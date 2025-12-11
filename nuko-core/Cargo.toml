@@ -12,9 +12,6 @@ readme = "README.md"
 [dependencies]
 # 形態素解析
 lindera = { workspace = true }
-lindera-core = { workspace = true }
-lindera-dictionary = { workspace = true }
-lindera-tokenizer = { workspace = true }
 
 # データベース
 redb = { workspace = true }

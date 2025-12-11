@@ -22,10 +22,7 @@ categories = ["text-processing", "internationalization"]
 
 [workspace.dependencies]
 # 形態素解析
-lindera = "0.36"
-lindera-core = "0.36"
-lindera-dictionary = "0.36"
-lindera-tokenizer = "0.36"
+lindera = { version = "0.36", features = ["ipadic"] }
 
 # データベース・ストレージ
 redb = "2.2"
