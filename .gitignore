@@ -1,0 +1,49 @@
+# Rust
+/target/
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ビルド成果物
+*.exe
+*.dll
+*.so
+*.dylib
+*.app
+
+# テスト・カバレッジ
+*.profraw
+*.profdata
+coverage/
+tarpaulin-report.html
+
+# ドキュメント生成
+/doc/
+
+# ローカル設定
+.env
+.env.local
+*.local.toml
+
+# ユーザーデータ（開発中）
+*.dict
+*.json.bak
+learning.json
+
+# パッケージング
+*.pkg
+*.msi
+*.deb
+*.rpm
+*.dmg
+*.tar.gz
+*.zip
