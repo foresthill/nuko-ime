@@ -281,7 +281,30 @@ send_statistics = false
 - **絵文字・顔文字**: 拡張変換対応
 - **音声入力**: Whisper統合
 
-### 8.2 モバイル対応
+### 8.2 入力カスタマイズ機能
+
+#### 「ん」の入力スタイル設定
+現在の実装では `n + 子音` で「ん」を確定するスタイル（ATOK風）を採用。
+将来的にはユーザー設定で切り替え可能にする：
+
+```rust
+pub enum NInputStyle {
+    /// nn → ん（MS-IME風）
+    /// 例: kanna → かんあ, kannna → かんな
+    DoubleN,
+    /// n + 子音 → ん + 子音（ATOK風、現在のデフォルト）
+    /// 例: kanna → かんな, nn → んん
+    ConsonantTrigger,
+}
+```
+
+設定例：
+```toml
+[input]
+n_style = "consonant_trigger"  # または "double_n"
+```
+
+### 8.3 モバイル対応
 - Android: Kotlin + Rust FFI
 - iOS: Swift + Rust FFI
 
