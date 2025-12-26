@@ -8,14 +8,19 @@ lint = "clippy --all-targets --all-features -- -D warnings"
 fmt-check = "fmt --all -- --check"
 
 [build]
-# リリースビルドを高速化
+# ビルドの並列度
 jobs = 8
 
-[target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+# 以下のリンカー設定はオプションです
+# mold/lldがインストールされている場合のみ有効化してください
 
-[target.x86_64-apple-darwin]
-rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+# Linux (mold)
+# [target.x86_64-unknown-linux-gnu]
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 
-[target.aarch64-apple-darwin]
-rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+# macOS (lld) - Homebrew: brew install llvm
+# [target.x86_64-apple-darwin]
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+# [target.aarch64-apple-darwin]
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]
