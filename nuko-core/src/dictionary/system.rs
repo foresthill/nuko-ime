@@ -1,18 +1,21 @@
 //! システム辞書
 //!
-//! linderaを使用した形態素解析ベースの辞書検索を提供します。
+//! 静的辞書による基本的な辞書検索を提供します。
+//! `lindera` featureを有効にすると、形態素解析機能も利用可能になります。
 
 use crate::conversion::Candidate;
 use crate::error::{NukoError, Result};
+use once_cell::sync::Lazy;
+use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+#[cfg(feature = "lindera")]
 use lindera::{
     dictionary::{load_dictionary_from_kind, DictionaryKind},
     mode::Mode,
     tokenizer::Tokenizer,
 };
-use once_cell::sync::Lazy;
-use parking_lot::RwLock;
-use std::collections::HashMap;
-use std::sync::Arc;
 
 /// 読み→表層形のマッピングを構築するための静的辞書データ
 /// linderaの辞書から抽出した基本的な変換候補
@@ -243,9 +246,11 @@ static READING_TO_SURFACE: Lazy<HashMap<String, Vec<(String, String)>>> = Lazy::
 
 /// システム辞書
 ///
-/// linderaを使用した形態素解析と辞書検索を提供します。
+/// 静的辞書による辞書検索を提供します。
+/// `lindera` featureが有効な場合は形態素解析も利用可能です。
 pub struct SystemDictionary {
-    /// lindera トークナイザー
+    /// lindera トークナイザー（lindera feature有効時のみ）
+    #[cfg(feature = "lindera")]
     tokenizer: Option<Tokenizer>,
     /// 読み→表層形のキャッシュ
     cache: Arc<RwLock<HashMap<String, Vec<Candidate>>>>,
@@ -254,7 +259,7 @@ pub struct SystemDictionary {
 impl SystemDictionary {
     /// 新しいシステム辞書を作成
     pub fn new() -> Result<Self> {
-        // linderaの辞書を読み込み
+        #[cfg(feature = "lindera")]
         let tokenizer = match Self::create_tokenizer() {
             Ok(t) => Some(t),
             Err(e) => {
@@ -264,12 +269,14 @@ impl SystemDictionary {
         };
 
         Ok(Self {
+            #[cfg(feature = "lindera")]
             tokenizer,
             cache: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
     /// linderaトークナイザーを作成
+    #[cfg(feature = "lindera")]
     fn create_tokenizer() -> Result<Tokenizer> {
         let dictionary = load_dictionary_from_kind(DictionaryKind::IPADIC)
             .map_err(|e| NukoError::Dictionary(format!("IPADIC辞書の読み込みに失敗: {}", e)))?;
@@ -337,6 +344,8 @@ impl SystemDictionary {
     /// テキストを形態素解析
     ///
     /// linderaを使用してテキストをトークンに分割します。
+    /// `lindera` featureが無効な場合はエラーを返します。
+    #[cfg(feature = "lindera")]
     pub fn analyze(&self, text: &str) -> Result<Vec<Token>> {
         let tokenizer = self
             .tokenizer
@@ -363,10 +372,25 @@ impl SystemDictionary {
         Ok(tokens)
     }
 
+    /// テキストを形態素解析（lindera無効時はエラー）
+    #[cfg(not(feature = "lindera"))]
+    pub fn analyze(&self, _text: &str) -> Result<Vec<Token>> {
+        Err(NukoError::Dictionary(
+            "形態素解析にはlindera featureが必要です".to_string(),
+        ))
+    }
+
     /// トークナイザーが利用可能かどうか
     #[must_use]
     pub fn has_tokenizer(&self) -> bool {
-        self.tokenizer.is_some()
+        #[cfg(feature = "lindera")]
+        {
+            self.tokenizer.is_some()
+        }
+        #[cfg(not(feature = "lindera"))]
+        {
+            false
+        }
     }
 
     /// 辞書のエントリ数を取得

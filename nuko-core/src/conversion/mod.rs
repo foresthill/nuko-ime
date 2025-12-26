@@ -6,6 +6,6 @@ mod candidate;
 mod context;
 mod engine;
 
-pub use candidate::{Candidate, CandidateList};
+pub use candidate::{Candidate, CandidateList, CandidateSource};
 pub use context::ConversionContext;
 pub use engine::ConversionEngine;

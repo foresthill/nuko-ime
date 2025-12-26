@@ -99,9 +99,8 @@ fn cmd_add(surface: &str, reading: &str, pos: Option<&str>, dict_path: Option<Pa
     let path = dict_path.unwrap_or_else(default_dict_path);
     let mut dict = UserDictionary::load(&path)?;
 
-    let mut entry = nuko_core::dictionary::UserDictionary::default();
     // ここは実際のUserEntryを使う
-    use nuko_core::dictionary::user::UserEntry;
+    use nuko_core::dictionary::UserEntry;
     let mut new_entry = UserEntry::new(surface, reading);
     if let Some(p) = pos {
         new_entry = new_entry.with_pos(p);

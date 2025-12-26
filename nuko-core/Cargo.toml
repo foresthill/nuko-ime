@@ -9,9 +9,14 @@ repository.workspace = true
 description = "ぬこIME コアエンジン - 変換処理・辞書管理・学習機能"
 readme = "README.md"
 
+[features]
+default = []
+# lindera形態素解析を有効化（ビルド時にIPADIC辞書をダウンロード）
+lindera = ["dep:lindera"]
+
 [dependencies]
-# 形態素解析
-lindera = { workspace = true }
+# 形態素解析（オプション）
+lindera = { workspace = true, optional = true }
 
 # データベース
 redb = { workspace = true }

@@ -7,4 +7,4 @@ mod system;
 mod user;
 
 pub use manager::DictionaryManager;
-pub use user::UserDictionary;
+pub use user::{UserDictionary, UserEntry};

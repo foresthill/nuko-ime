@@ -5,5 +5,5 @@
 mod kana;
 mod romaji;
 
-pub use kana::{KanaType, to_hiragana, to_katakana};
+pub use kana::{KanaType, to_halfwidth_katakana, to_hiragana, to_katakana};
 pub use romaji::RomajiConverter;
