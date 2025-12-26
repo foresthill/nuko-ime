@@ -294,6 +294,7 @@ impl RomajiConverter {
         self.buffer.push(c_lower);
 
         // 促音の処理（同じ子音が続く場合）
+        // 例: "tt" → "っ" を出力し、バッファには "t" を残す
         if self.buffer.len() >= 2 {
             let chars: Vec<char> = self.buffer.chars().collect();
             let len = chars.len();
@@ -302,7 +303,8 @@ impl RomajiConverter {
                 && !is_vowel(chars[len - 1])
                 && chars[len - 1] != 'n'
             {
-                self.buffer = format!("っ{}", chars[len - 1]);
+                // バッファには子音1文字だけを残す（っを入れない）
+                self.buffer = chars[len - 1].to_string();
                 return "っ".to_string();
             }
         }
@@ -322,30 +324,32 @@ impl RomajiConverter {
             return None; // まだ確定しない
         }
 
-        // 「n」の後に母音以外が来た場合
+        // 「n」の後に子音が来た場合（母音とy以外）
+        // 例: "nt" → "ん" + "t", "nn" → "ん" + "n"（nannaをかんなに変換するため）
         if self.buffer.len() >= 2 && self.buffer.starts_with('n') {
             let second = self.buffer.chars().nth(1).unwrap();
-            if second != 'y' && second != 'n' && !is_vowel(second) {
-                let rest = self.buffer[1..].to_string();
+            if second != 'y' && !is_vowel(second) {
+                let rest: String = self.buffer.chars().skip(1).collect();
                 self.buffer = rest;
                 return Some("ん".to_string());
             }
         }
 
         // テーブルから検索（最長一致）
-        for len in (1..=self.buffer.len()).rev() {
-            let prefix = &self.buffer[..len];
-            if let Some(&kana) = ROMAJI_TABLE.get(prefix) {
-                let rest = self.buffer[len..].to_string();
-                self.buffer = rest;
+        // 文字単位でスライスしてUTF-8境界問題を回避
+        let chars: Vec<char> = self.buffer.chars().collect();
+        for len in (1..=chars.len()).rev() {
+            let prefix: String = chars[..len].iter().collect();
+            if let Some(&kana) = ROMAJI_TABLE.get(prefix.as_str()) {
+                self.buffer = chars[len..].iter().collect();
                 return Some(kana.to_string());
             }
         }
 
         // バッファが長すぎる場合は先頭を破棄
-        if self.buffer.len() > 4 {
-            let first = self.buffer.remove(0);
-            return Some(first.to_string());
+        if chars.len() > 4 {
+            self.buffer = chars[1..].iter().collect();
+            return Some(chars[0].to_string());
         }
 
         None
