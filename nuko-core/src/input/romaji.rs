@@ -324,20 +324,29 @@ impl RomajiConverter {
             return None; // まだ確定しない
         }
 
-        // 「n」の後に子音が来た場合（母音とy以外）
-        // 例: "nt" → "ん" + "t", "nn" → "ん" + "n"（nannaをかんなに変換するため）
-        if self.buffer.len() >= 2 && self.buffer.starts_with('n') {
-            let second = self.buffer.chars().nth(1).unwrap();
-            if second != 'y' && !is_vowel(second) {
-                let rest: String = self.buffer.chars().skip(1).collect();
-                self.buffer = rest;
-                return Some("ん".to_string());
+        // 「n'」は特別処理（テーブルで直接マッチ）
+        if self.buffer == "n'" {
+            if let Some(&kana) = ROMAJI_TABLE.get("n'") {
+                self.buffer.clear();
+                return Some(kana.to_string());
             }
         }
 
         // テーブルから検索（最長一致）
         // 文字単位でスライスしてUTF-8境界問題を回避
         let chars: Vec<char> = self.buffer.chars().collect();
+
+        // 「n」の後に子音が来た場合（母音とy以外）
+        // 例: "nt" → "ん" + "t", "nn" → "ん" + "n"（kannaをかんなに変換するため）
+        if chars.len() >= 2 && chars[0] == 'n' {
+            let second = chars[1];
+            if second != 'y' && !is_vowel(second) {
+                self.buffer = chars[1..].iter().collect();
+                return Some("ん".to_string());
+            }
+        }
+
+        // テーブルから検索（最長一致）
         for len in (1..=chars.len()).rev() {
             let prefix: String = chars[..len].iter().collect();
             if let Some(&kana) = ROMAJI_TABLE.get(prefix.as_str()) {
@@ -457,5 +466,152 @@ mod tests {
     fn test_nihongo() {
         let mut conv = RomajiConverter::new();
         assert_eq!(conv.convert("nihongo").unwrap(), "にほんご");
+    }
+
+    #[test]
+    fn test_dakuon() {
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("gakkou").unwrap(), "がっこう");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("zannen").unwrap(), "ざんねん");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("denwa").unwrap(), "でんわ");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("tabemono").unwrap(), "たべもの");
+    }
+
+    #[test]
+    fn test_handakuon() {
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("panpan").unwrap(), "ぱんぱん");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("pinpon").unwrap(), "ぴんぽん");
+    }
+
+    #[test]
+    fn test_small_kana() {
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("xtu").unwrap(), "っ");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("ltu").unwrap(), "っ");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("xa").unwrap(), "ぁ");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("xya").unwrap(), "ゃ");
+    }
+
+    #[test]
+    fn test_special_chars() {
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("-").unwrap(), "ー");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert(".").unwrap(), "。");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert(",").unwrap(), "、");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("ra-men").unwrap(), "らーめん");
+    }
+
+    #[test]
+    fn test_n_apostrophe() {
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("kan'i").unwrap(), "かんい");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("shin'you").unwrap(), "しんよう");
+    }
+
+    #[test]
+    fn test_uppercase_input() {
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("NIHON").unwrap(), "にほん");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("ToKyO").unwrap(), "ときょ");
+    }
+
+    #[test]
+    fn test_empty_input() {
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("").unwrap(), "");
+    }
+
+    #[test]
+    fn test_complex_words() {
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("konnichiha").unwrap(), "こんにちは");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("arigatou").unwrap(), "ありがとう");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("ohayougozaimasu").unwrap(), "おはようございます");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("sumimasen").unwrap(), "すみません");
+    }
+
+    #[test]
+    fn test_fa_row() {
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("fairu").unwrap(), "ふぁいる");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("fea").unwrap(), "ふぇあ");
+    }
+
+    #[test]
+    fn test_ji_zu_variations() {
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("ji").unwrap(), "じ");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("zi").unwrap(), "じ");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("zu").unwrap(), "ず");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("du").unwrap(), "づ");
+    }
+
+    #[test]
+    fn test_chi_tsu_variations() {
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("chi").unwrap(), "ち");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("ti").unwrap(), "ち");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("tsu").unwrap(), "つ");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("tu").unwrap(), "つ");
+    }
+
+    #[test]
+    fn test_shi_variations() {
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("shi").unwrap(), "し");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("si").unwrap(), "し");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("shu").unwrap(), "しゅ");
+
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert("sya").unwrap(), "しゃ");
     }
 }
