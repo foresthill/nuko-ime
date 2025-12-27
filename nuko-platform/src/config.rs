@@ -162,7 +162,12 @@ pub enum CandidatePosition {
     /// 画面下部
     Bottom,
     /// カスタム位置
-    Custom { x: i32, y: i32 },
+    Custom {
+        /// X座標
+        x: i32,
+        /// Y座標
+        y: i32,
+    },
 }
 
 /// プライバシー設定

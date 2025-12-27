@@ -99,28 +99,22 @@ fn cmd_add(surface: &str, reading: &str, pos: Option<&str>, dict_path: Option<Pa
     let path = dict_path.unwrap_or_else(default_dict_path);
     let mut dict = UserDictionary::load(&path)?;
 
-    // ここは実際のUserEntryを使う
     use nuko_core::dictionary::UserEntry;
-    let mut new_entry = UserEntry::new(surface, reading);
+    let mut entry = UserEntry::new(surface, reading);
     if let Some(p) = pos {
-        new_entry = new_entry.with_pos(p);
+        entry = entry.with_pos(p);
     }
 
-    // UserDictionaryにadd機能がないので、内部構造を使う必要がある
-    // 実際の実装ではUserDictionaryのメソッドを呼ぶ
+    dict.add(entry)?;
+    dict.save()?;
 
     println!("  表層形: {}", surface.green());
     println!("  読み: {}", reading.yellow());
     if let Some(p) = pos {
         println!("  品詞: {}", p.dimmed());
     }
-
-    // dict.add(new_entry)?;
-    // dict.save()?;
-
     println!();
     println!("{}", "エントリを追加しました".green());
-    println!("(注: デモ版では実際の保存は行われません)");
 
     Ok(())
 }
@@ -129,13 +123,21 @@ fn cmd_remove(surface: &str, reading: &str, dict_path: Option<PathBuf>) -> Resul
     println!("{}", "ユーザー辞書からエントリを削除".cyan().bold());
 
     let path = dict_path.unwrap_or_else(default_dict_path);
+    let mut dict = UserDictionary::load(&path)?;
 
-    println!("  表層形: {}", surface.green());
-    println!("  読み: {}", reading.yellow());
-    println!("  辞書: {}", path.display());
-    println!();
-    println!("{}", "エントリを削除しました".green());
-    println!("(注: デモ版では実際の削除は行われません)");
+    let removed = dict.remove(reading, surface)?;
+    if removed {
+        dict.save()?;
+        println!("  表層形: {}", surface.green());
+        println!("  読み: {}", reading.yellow());
+        println!();
+        println!("{}", "エントリを削除しました".green());
+    } else {
+        println!("  表層形: {}", surface.yellow());
+        println!("  読み: {}", reading.yellow());
+        println!();
+        println!("{}", "該当するエントリが見つかりませんでした".red());
+    }
 
     Ok(())
 }
@@ -147,18 +149,19 @@ fn cmd_list(dict_path: Option<PathBuf>, filter: Option<&str>) -> Result<()> {
     println!("辞書: {}", path.display().to_string().dimmed());
     println!();
 
-    if let Some(f) = filter {
-        println!("フィルター: {}", f.yellow());
+    let dict = UserDictionary::load(&path)?;
+    let entries = dict.all_entries();
+
+    if entries.is_empty() {
+        println!("{}", "辞書は空です".dimmed());
+        return Ok(());
     }
 
-    // デモデータ
-    let demo_entries = vec![
-        ("ぬこ", "猫", "名詞"),
-        ("いめ", "IME", "名詞"),
-        ("にほんご", "日本語", "名詞"),
-    ];
+    if let Some(f) = filter {
+        println!("フィルター: {}", f.yellow());
+        println!();
+    }
 
-    println!();
     println!(
         "  {} {} {}",
         "読み".underline(),
@@ -166,14 +169,17 @@ fn cmd_list(dict_path: Option<PathBuf>, filter: Option<&str>) -> Result<()> {
         "品詞".underline()
     );
 
-    for (reading, surface, pos) in demo_entries {
-        if filter.map_or(true, |f| reading.starts_with(f)) {
-            println!("  {} {} {}", reading.yellow(), surface.green(), pos.dimmed());
+    let mut count = 0;
+    for entry in &entries {
+        if filter.map_or(true, |f| entry.reading.starts_with(f)) {
+            let pos = entry.pos.as_deref().unwrap_or("-");
+            println!("  {} {} {}", entry.reading.yellow(), entry.surface.green(), pos.dimmed());
+            count += 1;
         }
     }
 
     println!();
-    println!("(注: デモ版ではサンプルデータを表示しています)");
+    println!("合計: {} 件", count);
 
     Ok(())
 }
