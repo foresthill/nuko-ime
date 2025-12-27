@@ -33,6 +33,14 @@ enum Commands {
         /// 変換するローマ字
         input: String,
     },
+    /// 予測変換（入力途中で候補を提示）
+    Predict {
+        /// 入力途中の読み（ひらがな）
+        prefix: String,
+        /// 候補数
+        #[arg(short = 'n', long, default_value = "10")]
+        count: usize,
+    },
     /// 辞書情報を表示
     DictInfo,
     /// バージョン情報を表示
@@ -53,6 +61,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Convert { reading, count } => cmd_convert(&reading, count),
         Commands::Romaji { input } => cmd_romaji(&input),
+        Commands::Predict { prefix, count } => cmd_predict(&prefix, count),
         Commands::DictInfo => cmd_dict_info(),
         Commands::Info => cmd_info(),
     }
@@ -98,6 +107,34 @@ fn cmd_romaji(input: &str) -> Result<()> {
     let result = converter.convert(input)?;
 
     println!("結果: {}", result.green().bold());
+
+    Ok(())
+}
+
+fn cmd_predict(prefix: &str, count: usize) -> Result<()> {
+    println!("{}", "ぬこIME 予測変換".cyan().bold());
+    println!("入力: {}", prefix.yellow());
+    println!();
+
+    let engine = ConversionEngine::new()?;
+    let predictions = engine.predict(prefix, count)?;
+
+    if predictions.is_empty() {
+        println!("{}", "候補が見つかりませんでした".dimmed());
+        return Ok(());
+    }
+
+    println!("{}:", "予測候補".green());
+    for (i, (reading, candidate)) in predictions.iter().enumerate() {
+        let num = format!("{}.", i + 1);
+        println!(
+            "  {} {} {} {}",
+            num.dimmed(),
+            candidate.surface.white().bold(),
+            format!("[{}]", reading).yellow(),
+            candidate.pos.as_deref().unwrap_or("-").dimmed()
+        );
+    }
 
     Ok(())
 }

@@ -60,6 +60,25 @@ impl DictionaryManager {
         Ok(candidates)
     }
 
+    /// 前方一致で候補を検索（予測変換用）
+    ///
+    /// 入力途中のかなから、完全な読みと候補を返します。
+    pub fn prefix_search(&self, prefix: &str) -> Result<Vec<(String, Vec<Candidate>)>> {
+        let mut results = Vec::new();
+
+        // システム辞書から前方一致検索
+        let system_results = self.system.prefix_search(prefix)?;
+        for (reading, candidates) in system_results {
+            let candidates_with_source: Vec<Candidate> = candidates
+                .into_iter()
+                .map(|c| c.with_source(CandidateSource::System))
+                .collect();
+            results.push((reading, candidates_with_source));
+        }
+
+        Ok(results)
+    }
+
     /// ユーザー辞書への参照を取得
     #[must_use]
     pub fn user_dictionary(&self) -> &UserDictionary {

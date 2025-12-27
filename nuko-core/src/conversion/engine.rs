@@ -85,6 +85,36 @@ impl ConversionEngine {
         Ok(candidates)
     }
 
+    /// 予測変換（入力途中で候補を提示）
+    ///
+    /// # 引数
+    /// * `prefix` - 入力途中の読み（ひらがな）
+    /// * `max_results` - 最大結果数
+    ///
+    /// # 戻り値
+    /// (完全な読み, 変換候補) のリスト
+    pub fn predict(&self, prefix: &str, max_results: usize) -> Result<Vec<(String, Candidate)>> {
+        if prefix.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut predictions = Vec::new();
+
+        // 前方一致で辞書を検索
+        let results = self.dictionary.prefix_search(prefix)?;
+
+        for (reading, candidates) in results {
+            for candidate in candidates {
+                predictions.push((reading.clone(), candidate));
+                if predictions.len() >= max_results {
+                    return Ok(predictions);
+                }
+            }
+        }
+
+        Ok(predictions)
+    }
+
     /// 変換を確定し、学習データを更新
     ///
     /// # 引数
