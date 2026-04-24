@@ -52,7 +52,10 @@ impl DictionaryManager {
         let system_candidates = self.system.lookup(reading)?;
         for c in system_candidates {
             // 重複をチェック
-            if !candidates.iter().any(|existing| existing.surface == c.surface) {
+            if !candidates
+                .iter()
+                .any(|existing| existing.surface == c.surface)
+            {
                 candidates.push(c.with_source(CandidateSource::System));
             }
         }

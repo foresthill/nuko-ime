@@ -22,11 +22,9 @@ impl NukoIME {
     pub fn new() -> Result<Self> {
         info!("ぬこIME (macOS) を初期化中...");
 
-        let engine = ConversionEngine::new()
-            .map_err(|e| PlatformError::Core(e))?;
+        let engine = ConversionEngine::new().map_err(|e| PlatformError::Core(e))?;
 
-        let config = Config::load(Config::default_path())
-            .unwrap_or_default();
+        let config = Config::load(Config::default_path()).unwrap_or_default();
 
         Ok(Self {
             engine,

@@ -4,9 +4,8 @@ use parking_lot::Mutex;
 use std::sync::LazyLock;
 
 /// 共有 ConversionEngine（全入力セッションで共有するシングルトン）
-pub static ENGINE: LazyLock<Mutex<ConversionEngine>> = LazyLock::new(|| {
-    Mutex::new(ConversionEngine::new().expect("ConversionEngine の初期化に失敗"))
-});
+pub static ENGINE: LazyLock<Mutex<ConversionEngine>> =
+    LazyLock::new(|| Mutex::new(ConversionEngine::new().expect("ConversionEngine の初期化に失敗")));
 
 /// セッションごとの入力状態（IMKInputController インスタンスごとに1つ）
 pub struct InputState {

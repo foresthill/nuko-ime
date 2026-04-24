@@ -12,9 +12,9 @@ use std::cell::RefCell;
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, Bool, NSObjectProtocol, Sel};
 use objc2::{define_class, msg_send, DefinedClass};
-use std::ffi::CStr;
 use objc2_foundation::{NSArray, NSRange, NSString};
 use objc2_input_method_kit::{IMKInputController, IMKServer};
+use std::ffi::CStr;
 use tracing::{debug, error, info, warn};
 
 use crate::state::{InputState, ENGINE};
@@ -27,7 +27,11 @@ const NS_NOT_FOUND: usize = isize::MAX as usize;
 fn debug_log(msg: &str) {
     use std::io::Write;
     let path = std::path::Path::new("/tmp/nuko-ime-debug.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -349,7 +353,10 @@ impl NukoInputController {
         let text_len = text.encode_utf16().count();
         let sel_range = NSRange::new(text_len, 0);
         let rep_range = NSRange::new(NS_NOT_FOUND, 0);
-        debug_log(&format!("setMarkedText: '{}' (utf16_len={})", text, text_len));
+        debug_log(&format!(
+            "setMarkedText: '{}' (utf16_len={})",
+            text, text_len
+        ));
         unsafe {
             let _: () = msg_send![
                 client,

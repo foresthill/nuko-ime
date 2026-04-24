@@ -93,7 +93,12 @@ fn main() -> Result<()> {
     }
 }
 
-fn cmd_add(surface: &str, reading: &str, pos: Option<&str>, dict_path: Option<PathBuf>) -> Result<()> {
+fn cmd_add(
+    surface: &str,
+    reading: &str,
+    pos: Option<&str>,
+    dict_path: Option<PathBuf>,
+) -> Result<()> {
     println!("{}", "ユーザー辞書にエントリを追加".cyan().bold());
 
     let path = dict_path.unwrap_or_else(default_dict_path);
@@ -173,7 +178,12 @@ fn cmd_list(dict_path: Option<PathBuf>, filter: Option<&str>) -> Result<()> {
     for entry in &entries {
         if filter.map_or(true, |f| entry.reading.starts_with(f)) {
             let pos = entry.pos.as_deref().unwrap_or("-");
-            println!("  {} {} {}", entry.reading.yellow(), entry.surface.green(), pos.dimmed());
+            println!(
+                "  {} {} {}",
+                entry.reading.yellow(),
+                entry.surface.green(),
+                pos.dimmed()
+            );
             count += 1;
         }
     }

@@ -23,9 +23,8 @@ static HIRAGANA_TO_KATAKANA: Lazy<HashMap<char, char>> = Lazy::new(|| {
 });
 
 /// カタカナ→ひらがな変換テーブル
-static KATAKANA_TO_HIRAGANA: Lazy<HashMap<char, char>> = Lazy::new(|| {
-    HIRAGANA_TO_KATAKANA.iter().map(|(&h, &k)| (k, h)).collect()
-});
+static KATAKANA_TO_HIRAGANA: Lazy<HashMap<char, char>> =
+    Lazy::new(|| HIRAGANA_TO_KATAKANA.iter().map(|(&h, &k)| (k, h)).collect());
 
 /// カタカナ→半角カタカナ変換テーブル
 static KATAKANA_TO_HALFWIDTH: Lazy<HashMap<char, &'static str>> = Lazy::new(|| {
