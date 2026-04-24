@@ -1,0 +1,33 @@
+[package]
+name = "nuko-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ぬこIME UIコンポーネント - 候補ウィンドウ・設定画面"
+readme = "README.md"
+
+[dependencies]
+nuko-core = { workspace = true }
+nuko-platform = { workspace = true }
+
+# UI フレームワーク
+iced = { version = "0.13", features = ["tokio"] }
+
+# シリアライズ
+serde = { workspace = true }
+
+# エラーハンドリング
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# ログ
+tracing = { workspace = true }
+
+# 非同期
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

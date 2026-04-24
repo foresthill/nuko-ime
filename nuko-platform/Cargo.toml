@@ -1,0 +1,51 @@
+[package]
+name = "nuko-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ぬこIME OS統合層 - Windows/macOS/Linux対応"
+readme = "README.md"
+
+[dependencies]
+nuko-core = { workspace = true }
+
+# シリアライズ
+serde = { workspace = true }
+toml = { workspace = true }
+
+# エラーハンドリング
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# ログ
+tracing = { workspace = true }
+
+# ユーティリティ
+once_cell = { workspace = true }
+parking_lot = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# Windows TSF
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_TextServices",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Com",
+    "implement",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS Input Method Kit
+objc2 = "0.5"
+objc2-foundation = "0.2"
+objc2-app-kit = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux IBus
+# ibus-rs = "0.1"  # 将来的に追加
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
