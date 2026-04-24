@@ -1,0 +1,22 @@
+[package]
+name = "nuko-macos"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ぬこIME macOS Input Method - InputMethodKit統合"
+
+[[bin]]
+name = "NukoIME"
+path = "src/main.rs"
+
+[dependencies]
+nuko-core = { workspace = true }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSObject", "NSDictionary", "NSAttributedString", "NSRange"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSEvent", "NSRunningApplication", "NSResponder"] }
+objc2-input-method-kit = { version = "0.3" }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+parking_lot = { workspace = true }

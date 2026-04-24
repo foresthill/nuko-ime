@@ -5,6 +5,7 @@ members = [
     "nuko-platform",
     "nuko-ui",
     "nuko-cli",
+    "nuko-macos",
 ]
 
 [workspace.package]
