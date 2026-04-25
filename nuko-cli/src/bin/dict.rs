@@ -4,7 +4,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::*;
 use nuko_core::dictionary::{DictionaryManager, UserDictionary};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "nuko-dict")]
@@ -189,7 +189,7 @@ fn cmd_list(dict_path: Option<PathBuf>, filter: Option<&str>) -> Result<()> {
     }
 
     println!();
-    println!("合計: {} 件", count);
+    println!("合計: {count} 件");
 
     Ok(())
 }
@@ -224,7 +224,7 @@ fn cmd_search(reading: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_import(file: &PathBuf, output: Option<PathBuf>) -> Result<()> {
+fn cmd_import(file: &Path, output: Option<PathBuf>) -> Result<()> {
     println!("{}", "辞書インポート".cyan().bold());
     println!("入力: {}", file.display());
 
@@ -237,7 +237,7 @@ fn cmd_import(file: &PathBuf, output: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_export(dict_path: Option<PathBuf>, output: &PathBuf) -> Result<()> {
+fn cmd_export(dict_path: Option<PathBuf>, output: &Path) -> Result<()> {
     println!("{}", "辞書エクスポート".cyan().bold());
 
     let path = dict_path.unwrap_or_else(default_dict_path);

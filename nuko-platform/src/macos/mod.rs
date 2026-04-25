@@ -1,8 +1,6 @@
-//! macOS Input Method Kit統合
+//! macOS [`Input Method Kit`] 統合
 //!
-//! Input Method Kit を使用したmacOS IME実装。
-
-#![cfg(target_os = "macos")]
+//! Input Method Kit を使用した macOS IME 実装。
 
 mod ime;
 

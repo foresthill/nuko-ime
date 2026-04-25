@@ -3,9 +3,9 @@
 //! ぬこIMEのOS統合層。
 //!
 //! このクレートは各プラットフォーム固有のIME APIとの統合を提供します：
-//! - Windows: Text Services Framework (TSF)
+//! - Windows: Text Services Framework ([`TSF`])
 //! - macOS: Input Method Kit
-//! - Linux: IBus / Fcitx5
+//! - Linux: `IBus` / `Fcitx5`
 //!
 //! ## 使用例
 //!
@@ -19,6 +19,18 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::must_use_candidate,
+    clippy::unused_self,
+    clippy::unnecessary_wraps,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::redundant_closure_for_method_calls,
+    clippy::map_unwrap_or,
+    clippy::items_after_statements
+)]
 
 pub mod config;
 pub mod error;

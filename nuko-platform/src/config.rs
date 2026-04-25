@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// IME設定
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     /// 一般設定
     pub general: GeneralConfig,
@@ -15,17 +15,6 @@ pub struct Config {
     pub ui: UiConfig,
     /// プライバシー設定
     pub privacy: PrivacyConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            general: GeneralConfig::default(),
-            dictionary: DictionaryConfig::default(),
-            ui: UiConfig::default(),
-            privacy: PrivacyConfig::default(),
-        }
-    }
 }
 
 impl Config {
@@ -171,18 +160,10 @@ pub enum CandidatePosition {
 }
 
 /// プライバシー設定
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PrivacyConfig {
     /// 匿名統計データを送信する
     pub send_statistics: bool,
-}
-
-impl Default for PrivacyConfig {
-    fn default() -> Self {
-        Self {
-            send_statistics: false,
-        }
-    }
 }
 
 /// 設定ディレクトリのパスを取得

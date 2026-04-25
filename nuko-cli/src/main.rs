@@ -131,7 +131,7 @@ fn cmd_predict(prefix: &str, count: usize) -> Result<()> {
             "  {} {} {} {}",
             num.dimmed(),
             candidate.surface.white().bold(),
-            format!("[{}]", reading).yellow(),
+            format!("[{reading}]").yellow(),
             candidate.pos.as_deref().unwrap_or("-").dimmed()
         );
     }

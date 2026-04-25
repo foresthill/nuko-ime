@@ -113,7 +113,7 @@ impl CandidateWindow {
         if self.candidates.is_empty() {
             0
         } else {
-            (self.candidates.len() + self.page_size - 1) / self.page_size
+            self.candidates.len().div_ceil(self.page_size)
         }
     }
 

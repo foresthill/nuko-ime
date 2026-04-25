@@ -14,7 +14,6 @@ use objc2::runtime::{AnyObject, Bool, NSObjectProtocol, Sel};
 use objc2::{define_class, msg_send, DefinedClass};
 use objc2_foundation::{NSArray, NSRange, NSString};
 use objc2_input_method_kit::{IMKInputController, IMKServer};
-use std::ffi::CStr;
 use tracing::{debug, error, info, warn};
 
 use crate::state::{InputState, ENGINE};
@@ -36,7 +35,7 @@ fn debug_log(msg: &str) {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let _ = writeln!(f, "[{}] {}", now, msg);
+        let _ = writeln!(f, "[{now}] {msg}");
     }
 }
 
@@ -183,7 +182,7 @@ impl NukoInputController {
                         .selected()
                         .map(|s| s.surface.clone())
                         .unwrap_or_default();
-                    debug_log(&format!("space: cycle to next candidate '{}'", surface));
+                    debug_log(&format!("space: cycle to next candidate '{surface}'"));
                     drop(state);
                     Self::set_marked_text_on_client(client, &surface);
                 }
@@ -276,12 +275,12 @@ impl NukoInputController {
             return Bool::NO;
         }
 
-        // セレクタ名をバイト列で比較
-        let insert_newline = CStr::from_bytes_with_nul(b"insertNewline:\0").unwrap();
-        let cancel_op = CStr::from_bytes_with_nul(b"cancelOperation:\0").unwrap();
-        let delete_back = CStr::from_bytes_with_nul(b"deleteBackward:\0").unwrap();
-        let move_down = CStr::from_bytes_with_nul(b"moveDown:\0").unwrap();
-        let move_up = CStr::from_bytes_with_nul(b"moveUp:\0").unwrap();
+        // セレクタ名を C 文字列リテラルで比較
+        let insert_newline = c"insertNewline:";
+        let cancel_op = c"cancelOperation:";
+        let delete_back = c"deleteBackward:";
+        let move_down = c"moveDown:";
+        let move_up = c"moveUp:";
 
         if sel_name == insert_newline {
             // Enter: 確定
@@ -320,7 +319,7 @@ impl NukoInputController {
             }
             Bool::YES
         } else {
-            debug_log(&format!("unhandled selector: {:?}", sel_name));
+            debug_log(&format!("unhandled selector: {sel_name:?}"));
             // 未知のセレクタ: 確定してパススルー
             self.do_commit(client);
             Bool::NO
@@ -353,10 +352,7 @@ impl NukoInputController {
         let text_len = text.encode_utf16().count();
         let sel_range = NSRange::new(text_len, 0);
         let rep_range = NSRange::new(NS_NOT_FOUND, 0);
-        debug_log(&format!(
-            "setMarkedText: '{}' (utf16_len={})",
-            text, text_len
-        ));
+        debug_log(&format!("setMarkedText: '{text}' (utf16_len={text_len})"));
         unsafe {
             let _: () = msg_send![
                 client,
@@ -373,7 +369,7 @@ impl NukoInputController {
     fn insert_text_on_client(client: &AnyObject, text: &str) {
         let ns_string = NSString::from_str(text);
         let rep_range = NSRange::new(NS_NOT_FOUND, 0);
-        debug_log(&format!("insertText: '{}'", text));
+        debug_log(&format!("insertText: '{text}'"));
         unsafe {
             let _: () = msg_send![
                 client,
@@ -398,7 +394,7 @@ impl NukoInputController {
         }
 
         let composition = state.composition.clone();
-        debug_log(&format!("do_convert: input='{}'", composition));
+        debug_log(&format!("do_convert: input='{composition}'"));
 
         let engine = ENGINE.lock();
         match engine.convert(&composition, &state.context) {
@@ -409,10 +405,7 @@ impl NukoInputController {
                     .take(5)
                     .map(|c| c.surface.clone())
                     .collect();
-                debug_log(&format!(
-                    "do_convert: got {} candidates: {:?}",
-                    count, preview
-                ));
+                debug_log(&format!("do_convert: got {count} candidates: {preview:?}"));
 
                 if let Some(selected) = candidates.selected() {
                     let surface = selected.surface.clone();
@@ -430,8 +423,8 @@ impl NukoInputController {
                 }
             }
             Err(e) => {
-                warn!("変換エラー: {}", e);
-                debug_log(&format!("do_convert: ERROR {}", e));
+                warn!("変換エラー: {e}");
+                debug_log(&format!("do_convert: ERROR {e}"));
                 let display = state.display_text();
                 drop(state);
                 drop(engine);
