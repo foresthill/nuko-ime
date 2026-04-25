@@ -6,6 +6,11 @@
     <string>ja</string>
     <key>CFBundleDisplayName</key>
     <string>ぬこIME</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>ja</string>
+        <string>en</string>
+    </array>
     <key>CFBundleExecutable</key>
     <string>NukoIME</string>
     <key>CFBundleIdentifier</key>
@@ -47,7 +52,7 @@
                 <key>TISIntendedLanguage</key>
                 <string>ja</string>
                 <key>tsInputModeAlternateMenuIconFileKey</key>
-                <string>icon</string>
+                <string>icon-japanese</string>
                 <key>tsInputModeCharacterRepertoireKey</key>
                 <array>
                     <string>Hira</string>
@@ -63,9 +68,9 @@
                 <key>tsInputModeKeyEquivalentModifiersKey</key>
                 <integer>1572864</integer>
                 <key>tsInputModeMenuIconFileKey</key>
-                <string>icon</string>
+                <string>icon-japanese</string>
                 <key>tsInputModePaletteIconFileKey</key>
-                <string>icon</string>
+                <string>icon-japanese</string>
                 <key>tsInputModePrimaryInJapaneseFileKey</key>
                 <true/>
                 <key>tsInputModeScriptKey</key>
@@ -78,7 +83,7 @@
                 <key>TISIntendedLanguage</key>
                 <string>en</string>
                 <key>tsInputModeAlternateMenuIconFileKey</key>
-                <string>icon</string>
+                <string>icon-roman</string>
                 <key>tsInputModeCharacterRepertoireKey</key>
                 <array>
                     <string>Latn</string>
@@ -90,9 +95,9 @@
                 <key>tsInputModeKeyEquivalentModifiersKey</key>
                 <integer>1572864</integer>
                 <key>tsInputModeMenuIconFileKey</key>
-                <string>icon</string>
+                <string>icon-roman</string>
                 <key>tsInputModePaletteIconFileKey</key>
-                <string>icon</string>
+                <string>icon-roman</string>
                 <key>tsInputModeScriptKey</key>
                 <string>smRoman</string>
             </dict>

@@ -1,0 +1,10 @@
+/* InfoPlist English localization */
+
+/* Bundle display name */
+"CFBundleName" = "NukoIME";
+"CFBundleDisplayName" = "NukoIME";
+
+/* Input mode display names
+   Shown in the input source picker and menu bar. */
+"com.nuko.inputmethod.Nuko.Japanese" = "Hiragana";
+"com.nuko.inputmethod.Nuko.Roman" = "Roman";
