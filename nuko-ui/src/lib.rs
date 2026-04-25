@@ -28,7 +28,8 @@
     clippy::cast_sign_loss,
     clippy::redundant_closure_for_method_calls,
     clippy::map_unwrap_or,
-    clippy::items_after_statements
+    clippy::items_after_statements,
+    clippy::doc_markdown
 )]
 
 pub mod candidate_window;

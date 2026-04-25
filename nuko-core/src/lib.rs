@@ -33,7 +33,8 @@
     clippy::cast_sign_loss,            // 同上
     clippy::redundant_closure_for_method_calls, // 可読性優先で残すケースを許容
     clippy::items_after_statements,     // ヘルパー定義位置の柔軟性を保つ
-    clippy::map_unwrap_or               // map(...).unwrap_or(...) も意図が明確なら許容
+    clippy::map_unwrap_or,              // map(...).unwrap_or(...) も意図が明確なら許容
+    clippy::doc_markdown                // 日本語混在 doc で英単語にバッククォート強要を緩和
 )]
 
 pub mod conversion;

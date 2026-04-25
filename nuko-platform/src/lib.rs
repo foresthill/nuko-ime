@@ -29,7 +29,8 @@
     clippy::cast_sign_loss,
     clippy::redundant_closure_for_method_calls,
     clippy::map_unwrap_or,
-    clippy::items_after_statements
+    clippy::items_after_statements,
+    clippy::doc_markdown                // 日本語混在 doc で英単語にバッククォート強要を緩和
 )]
 
 pub mod config;
