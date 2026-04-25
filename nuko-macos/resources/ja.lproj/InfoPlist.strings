@@ -1,0 +1,11 @@
+/* InfoPlist 日本語ローカライズ */
+
+/* バンドル表示名 */
+"CFBundleName" = "ぬこIME";
+"CFBundleDisplayName" = "ぬこIME";
+
+/* 入力モード表示名
+   Apple IME 標準の "ひらがな" / "英数" に倣う。
+   入力ソースピッカーやメニューバーに表示される。 */
+"com.nuko.inputmethod.Nuko.Japanese" = "ひらがな";
+"com.nuko.inputmethod.Nuko.Roman" = "英数";

@@ -17,7 +17,7 @@ cargo build --release -p nuko-macos
 echo "[2/4] .appバンドル作成中..."
 rm -rf "$PROJECT_ROOT/target/$APP_BUNDLE"
 mkdir -p "$PROJECT_ROOT/target/$APP_BUNDLE/Contents/MacOS"
-mkdir -p "$PROJECT_ROOT/target/$APP_BUNDLE/Contents/Resources/ja.lproj"
+mkdir -p "$PROJECT_ROOT/target/$APP_BUNDLE/Contents/Resources"
 
 # バイナリコピー
 cp "$PROJECT_ROOT/target/release/NukoIME" \
@@ -27,11 +27,23 @@ cp "$PROJECT_ROOT/target/release/NukoIME" \
 cp "$PROJECT_ROOT/nuko-macos/Info.plist" \
    "$PROJECT_ROOT/target/$APP_BUNDLE/Contents/"
 
-# リソースコピー（存在する場合）
-if [ -f "$PROJECT_ROOT/nuko-macos/resources/icon.tiff" ]; then
-    cp "$PROJECT_ROOT/nuko-macos/resources/icon.tiff" \
-       "$PROJECT_ROOT/target/$APP_BUNDLE/Contents/Resources/"
-fi
+# アイコンファイル (TIFF) コピー
+for icon in icon.tiff icon-japanese.tiff icon-roman.tiff; do
+    if [ -f "$PROJECT_ROOT/nuko-macos/resources/$icon" ]; then
+        cp "$PROJECT_ROOT/nuko-macos/resources/$icon" \
+           "$PROJECT_ROOT/target/$APP_BUNDLE/Contents/Resources/"
+    fi
+done
+
+# ローカライズファイル (.lproj) コピー
+for lang in ja en; do
+    if [ -d "$PROJECT_ROOT/nuko-macos/resources/$lang.lproj" ]; then
+        mkdir -p "$PROJECT_ROOT/target/$APP_BUNDLE/Contents/Resources/$lang.lproj"
+        cp "$PROJECT_ROOT/nuko-macos/resources/$lang.lproj/"*.strings \
+           "$PROJECT_ROOT/target/$APP_BUNDLE/Contents/Resources/$lang.lproj/" \
+           2>/dev/null || true
+    fi
+done
 
 echo "[3/4] インストール中..."
 mkdir -p "$INSTALL_DIR"
