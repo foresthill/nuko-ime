@@ -3,9 +3,10 @@
 use iced::Color;
 
 /// UIテーマ
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Theme {
     /// ライトテーマ
+    #[default]
     Light,
     /// ダークテーマ
     Dark,
@@ -61,11 +62,5 @@ impl Theme {
             Theme::Light => Color::from_rgb(0.5, 0.5, 0.5),
             Theme::Dark => Color::from_rgb(0.6, 0.6, 0.6),
         }
-    }
-}
-
-impl Default for Theme {
-    fn default() -> Self {
-        Theme::Light
     }
 }

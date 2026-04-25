@@ -23,8 +23,7 @@ fn main() {
     info!("ぬこIME macOS starting...");
 
     // メインスレッドで実行されていることを確認
-    let mtm = MainThreadMarker::new()
-        .expect("Must be on main thread");
+    let mtm = MainThreadMarker::new().expect("Must be on main thread");
 
     // NSApplication 取得
     let app = NSApplication::sharedApplication(mtm);

@@ -8,7 +8,11 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(name = "nuko")]
-#[command(author, version, about = "ぬこIME - 日本人の、日本人による、日本人のためのIME")]
+#[command(
+    author,
+    version,
+    about = "ぬこIME - 日本人の、日本人による、日本人のためのIME"
+)]
 struct Cli {
     /// 詳細ログを出力
     #[arg(short, long)]
@@ -88,11 +92,7 @@ fn cmd_convert(reading: &str, count: usize) -> Result<()> {
     }
 
     if candidates.len() > count {
-        println!(
-            "  {} 他 {} 件",
-            "...".dimmed(),
-            candidates.len() - count
-        );
+        println!("  {} 他 {} 件", "...".dimmed(), candidates.len() - count);
     }
 
     Ok(())
@@ -131,7 +131,7 @@ fn cmd_predict(prefix: &str, count: usize) -> Result<()> {
             "  {} {} {} {}",
             num.dimmed(),
             candidate.surface.white().bold(),
-            format!("[{}]", reading).yellow(),
+            format!("[{reading}]").yellow(),
             candidate.pos.as_deref().unwrap_or("-").dimmed()
         );
     }

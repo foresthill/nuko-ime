@@ -21,6 +21,21 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
+// MVP 段階で過度に厳しい pedantic lint を緩和。
+// 安定後に個別対応する場合はここから外す。
+#![allow(
+    clippy::missing_errors_doc,        // Result を返す関数全部に # Errors 必須は早すぎる
+    clippy::must_use_candidate,        // #[must_use] 候補が多すぎてノイズ
+    clippy::unused_self,               // API 拡張余地のため self を保持しているケースを許容
+    clippy::unnecessary_wraps,         // 将来エラーを返す予定の Result<T> を保持
+    clippy::cast_possible_truncation,  // 範囲限定の usize→i32 等
+    clippy::cast_possible_wrap,        // 同上
+    clippy::cast_sign_loss,            // 同上
+    clippy::redundant_closure_for_method_calls, // 可読性優先で残すケースを許容
+    clippy::items_after_statements,     // ヘルパー定義位置の柔軟性を保つ
+    clippy::map_unwrap_or,              // map(...).unwrap_or(...) も意図が明確なら許容
+    clippy::doc_markdown                // 日本語混在 doc で英単語にバッククォート強要を緩和
+)]
 
 pub mod conversion;
 pub mod dictionary;

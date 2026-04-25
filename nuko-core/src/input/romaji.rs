@@ -555,7 +555,10 @@ mod tests {
         assert_eq!(conv.convert("arigatou").unwrap(), "ありがとう");
 
         let mut conv = RomajiConverter::new();
-        assert_eq!(conv.convert("ohayougozaimasu").unwrap(), "おはようございます");
+        assert_eq!(
+            conv.convert("ohayougozaimasu").unwrap(),
+            "おはようございます"
+        );
 
         let mut conv = RomajiConverter::new();
         assert_eq!(conv.convert("sumimasen").unwrap(), "すみません");
