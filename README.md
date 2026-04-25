@@ -1,9 +1,18 @@
 # ぬこIME
 
+```
+       /\___/\
+      ( =^・ω・^= )
+       (")_ぬこ_(")
+```
+
 **日本人の、日本人による、日本人のためのIME**
 
-[![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+> 音声入力が上位互換と思われるが、
+> 手入力する必要性 (仕事などで) も少しはまだ残っているため。
+
+[![License](https://img.shields.io/badge/license-Apache--2.0_OR_MIT-blue)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 ## 概要
 
