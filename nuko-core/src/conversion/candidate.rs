@@ -86,7 +86,8 @@ impl CandidateList {
 
     /// 候補をスコア順にソート
     pub fn sort_by_score(&mut self) {
-        self.candidates.sort_by(|a, b| b.score.cmp(&a.score));
+        self.candidates
+            .sort_by_key(|c| std::cmp::Reverse(c.score));
     }
 
     /// 候補数を取得

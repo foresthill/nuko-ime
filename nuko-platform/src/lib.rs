@@ -3,7 +3,7 @@
 //! ぬこIMEのOS統合層。
 //!
 //! このクレートは各プラットフォーム固有のIME APIとの統合を提供します：
-//! - Windows: Text Services Framework ([`TSF`])
+//! - Windows: Text Services Framework (`TSF`)
 //! - macOS: Input Method Kit
 //! - Linux: `IBus` / `Fcitx5`
 //!

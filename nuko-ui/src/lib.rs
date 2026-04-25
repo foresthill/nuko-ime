@@ -26,7 +26,9 @@
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
-    clippy::redundant_closure_for_method_calls
+    clippy::redundant_closure_for_method_calls,
+    clippy::map_unwrap_or,
+    clippy::items_after_statements
 )]
 
 pub mod candidate_window;

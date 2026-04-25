@@ -1,4 +1,4 @@
-//! macOS [`Input Method Kit`] 統合
+//! macOS Input Method Kit 統合
 //!
 //! Input Method Kit を使用した macOS IME 実装。
 
