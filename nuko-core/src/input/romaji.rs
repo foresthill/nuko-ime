@@ -36,6 +36,16 @@ impl RomajiConverter {
     /// 変換されたかな文字列（変換できない場合は空文字列）
     pub fn input(&mut self, c: char) -> String {
         let c_lower = c.to_ascii_lowercase();
+
+        // 「nn」完結直後の余剰 n (buffer="n", flag=true) に追加の n が来た場合、
+        // それは「次の音節の n」と解釈する。
+        // 例: "konnnichi" → 1,2 文字目の nn で ん 出力、3 文字目は ni の n。
+        // この扱いをしないと buffer="nn" で再度 ん を出してしまい "こんん..." になる。
+        if c_lower == 'n' && self.buffer == "n" && self.last_was_nn_emit {
+            self.last_was_nn_emit = false;
+            return String::new();
+        }
+
         self.buffer.push(c_lower);
 
         // 促音の処理（同じ子音が続く場合）
@@ -98,7 +108,15 @@ impl RomajiConverter {
         // テーブルから検索（最長一致）
         // Mozc 3 列エントリ (例: "tch" → "っ" + next_state="ch") は
         // next_state を buffer に残して後続文字と結合させる。
+        //
+        // 注: buffer 先頭が 'n' で 2 文字以上ある場合は、Mozc TSV の "n → ん"
+        // 単体エントリにフォールバックさせない。"ny" や "n+母音" は最長一致を
+        // 待たないと "nyu" → "ん" + "ゆ" のような誤変換が起きる。
+        let n_only_forbidden = chars.len() >= 2 && chars[0] == 'n';
         for len in (1..=chars.len()).rev() {
+            if n_only_forbidden && len == 1 {
+                continue;
+            }
             let prefix: String = chars[..len].iter().collect();
             if let Some(entry) = MOZC_TABLE.get(prefix.as_str()) {
                 let remaining: String = chars[len..].iter().collect();
@@ -192,6 +210,51 @@ fn is_vowel(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
+
+    /// テーブル駆動: 入力 → 期待出力 を一覧で検証。
+    /// 境界値 (n 系・促音・外来音) はここに追記する。
+    #[rstest]
+    // 基本
+    #[case("aiueo", "あいうえお")]
+    #[case("kakikukeko", "かきくけこ")]
+    // 「ん」系: ここが直近のバグ密集地帯
+    #[case("kanna", "かんな")]
+    #[case("konnichiha", "こんにちは")]
+    #[case("konnnichiha", "こんにちは")] // 3 連続 n
+    #[case("nyu", "にゅ")] // ny で n 単体マッチに落ちないこと
+    #[case("menyu", "めにゅ")]
+    #[case("menyu-", "めにゅー")]
+    #[case("nya", "にゃ")]
+    #[case("nyo", "にょ")]
+    #[case("shinya", "しにゃ")] // MS-IME 互換: ny は最長一致で にゃ。「真夜」は shin'ya
+    #[case("shin'ya", "しんや")] // アポストロフィで「ん」を切り出す
+    #[case("kan'i", "かんい")]
+    #[case("hon'ya", "ほんや")]
+    #[case("hen", "へん")]
+    #[case("henn", "へん")]
+    #[case("zannen", "ざんねん")]
+    // 促音
+    #[case("kitte", "きって")]
+    #[case("nippon", "にっぽん")]
+    #[case("matcha", "まっちゃ")]
+    #[case("jisshuu", "じっしゅう")]
+    #[case("gakkou", "がっこう")]
+    // 拗音
+    #[case("kyouto", "きょうと")]
+    #[case("shashin", "しゃしん")]
+    // 外来音
+    #[case("va", "ゔぁ")]
+    #[case("vu", "ゔ")]
+    #[case("fairu", "ふぁいる")]
+    // 文章レベル
+    #[case("watashihagakuseidesu", "わたしはがくせいです")]
+    #[case("ohayougozaimasu", "おはようございます")]
+    #[case("sumimasen", "すみません")]
+    fn romaji_to_kana(#[case] input: &str, #[case] expected: &str) {
+        let mut conv = RomajiConverter::new();
+        assert_eq!(conv.convert(input).unwrap(), expected, "input: {input}");
+    }
 
     #[test]
     fn test_basic_conversion() {
