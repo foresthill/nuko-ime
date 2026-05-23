@@ -43,6 +43,7 @@ unicode-segmentation = { workspace = true }
 proptest = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
+rstest = "0.26.1"
 
 [[bench]]
 name = "conversion"
