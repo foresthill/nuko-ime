@@ -470,6 +470,7 @@ L1 / L2 は AI なしで実装できる (Stage 3 まで)。L3 で初めて AI �
 
 ### 8.9 関連
 - [docs/VISION.md](VISION.md) のミッションと整合性チェック必須
+- [docs/AI_AGENT_FOUNDATION.md](AI_AGENT_FOUNDATION.md) — Section 8 が「**IME の内側**の学習機構」であるのに対し、本書は「**IME を超えた個人 AI エージェントの基盤データ**」としての位置づけを論じる。Section 8 の成熟が前提
 - 過去の PR (#5, #7) で発見した境界値バグは、Stage 2 の観察ログがあれば自動報告されていたはずの類型
 - 8.5 / 8.6 / 8.7 / 8.8 はそれぞれ独立して PoC 可能。Stage 4 着手前でも先行設計できる
 - Section 2.2 (ユーザー固有の傾向性) は 8.8 L1〜L2 の素朴版。Section 8.8 はその AI 拡張
