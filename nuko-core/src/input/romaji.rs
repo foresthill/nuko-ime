@@ -37,13 +37,25 @@ impl RomajiConverter {
     pub fn input(&mut self, c: char) -> String {
         let c_lower = c.to_ascii_lowercase();
 
-        // 「nn」完結直後の余剰 n (buffer="n", flag=true) に追加の n が来た場合、
-        // それは「次の音節の n」と解釈する。
-        // 例: "konnnichi" → 1,2 文字目の nn で ん 出力、3 文字目は ni の n。
-        // この扱いをしないと buffer="nn" で再度 ん を出してしまい "こんん..." になる。
-        if c_lower == 'n' && self.buffer == "n" && self.last_was_nn_emit {
+        // 「nn」完結直後の余剰 n (buffer="n", flag=true) の特殊処理。
+        // この状態は kanna 互換のため buffer に "n" を残しているが、
+        // 次に来る文字によって解釈を変える必要がある:
+        //
+        //   - 母音 / y → buffer="n" 維持。"na"/"nya" で「な」「にゃ」を作る (kanna 互換)
+        //   - n        → 新音節の n と解釈し buffer="n" 維持 (konnnichi 対応)
+        //   - 上記以外 (子音) → 余剰 n を捨てて新音節として処理
+        //
+        // 子音ケースの例: "konnbannha" (こん+ばん+は) で nn→ん の後に b/h が来る。
+        // ここで buffer="nb"/"nh" にして n+子音処理を走らせると、再度 "ん" が
+        // 出力されて composition に "んん" が積まれ "こんんばんんは" となる。
+        if self.buffer == "n" && self.last_was_nn_emit {
             self.last_was_nn_emit = false;
-            return String::new();
+            if c_lower == 'n' {
+                return String::new();
+            }
+            if !is_vowel(c_lower) && c_lower != 'y' {
+                self.buffer.clear();
+            }
         }
 
         self.buffer.push(c_lower);
@@ -222,6 +234,11 @@ mod tests {
     #[case("kanna", "かんな")]
     #[case("konnichiha", "こんにちは")]
     #[case("konnnichiha", "こんにちは")] // 3 連続 n
+    #[case("konnbannha", "こんばんは")] // nn → ん の後に子音 (n2+n2 パターン)
+    #[case("konnban", "こんばん")] // nn → ん の後に b (子音)
+    #[case("annki", "あんき")] // nn → ん の後に k (子音)
+    #[case("annpan", "あんぱん")] // nn → ん の後に p (子音)
+    #[case("dennsha", "でんしゃ")] // nn → ん の後に sh (子音クラスタ)
     #[case("nyu", "にゅ")] // ny で n 単体マッチに落ちないこと
     #[case("menyu", "めにゅ")]
     #[case("menyu-", "めにゅー")]
