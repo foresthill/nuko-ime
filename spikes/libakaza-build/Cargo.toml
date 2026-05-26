@@ -1,0 +1,11 @@
+[package]
+name = "libakaza-build-spike"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[dependencies]
+libakaza = { git = "https://github.com/akaza-im/akaza", rev = "8a404281ece7ca51119127a96bdde8c153b0df61" }
+
+# spikes/ はメインワークスペースから独立して Cargo.lock を持つ
+[workspace]
