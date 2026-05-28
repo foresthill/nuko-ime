@@ -1,3 +1,16 @@
+> ## 📜 アーカイブ文書 (2025-12 時点の初期計画書)
+>
+> このドキュメントは **2025-12-11 時点の初期計画** を保存したものです。
+> 当時の想定 (lindera/vibrato 中心、Windows/macOS/Linux 同時並走) は、
+> 2026-05 の Path B 採用 (libakaza ベース + macOS 一点突破) で **更新されました**。
+>
+> **現在の正しい記述**: [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md) / [`docs/ROADMAP.md`](../ROADMAP.md)
+>
+> このファイルは「なぜ当初の計画から変更したか」の文脈として保存しています。
+> 原本は `git log --follow docs/archive/SPECIFICATION-2025-12.md` で履歴を辿れます。
+
+---
+
 # ぬこIME 開発仕様書
 
 ## 1. プロジェクト概要

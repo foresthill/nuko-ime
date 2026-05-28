@@ -480,6 +480,6 @@ L1 / L2 は AI なしで実装できる (Stage 3 まで)。L3 で初めて AI �
 ## 関連ドキュメント
 
 - [VISION.md](VISION.md): プロジェクト全体のビジョン
-- [SPECIFICATION.md](SPECIFICATION.md): 現状の仕様書
-- [PROJECT_PLAN.md](PROJECT_PLAN.md): プロジェクト計画
+- [ARCHITECTURE.md](ARCHITECTURE.md): 現在の構成
+- [ROADMAP.md](ROADMAP.md): Phase 別の実装順序
 - [research/macos-ime-research.md](research/macos-ime-research.md): macOS IME 実装調査

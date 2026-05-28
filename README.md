@@ -128,7 +128,10 @@ Apache License 2.0 または MIT License のデュアルライセンスです。
 
 ## 関連リンク
 
-- [開発仕様書](docs/SPECIFICATION.md)
+- [アーキテクチャ](docs/ARCHITECTURE.md) — 現在の構成
+- [ロードマップ](docs/ROADMAP.md) — Phase 別の実装順序
+- [将来機能](docs/FUTURE_FEATURES.md)
+- [AI エージェント基盤としての思想](docs/AI_AGENT_FOUNDATION.md)
 - [Issues](https://github.com/your-org/nuko-ime/issues)
 - [Discussions](https://github.com/your-org/nuko-ime/discussions)
 
