@@ -20,39 +20,26 @@
 
 ## 特徴
 
-- **高速**: Rust製による高速な変換処理
-- **軽量**: 最小限のメモリ使用量
-- **学習機能**: ユーザーの入力パターンに適応
+- **高速**: Rust製による高速な変換処理を目指す
+- **軽量**: 最小限のメモリ使用量を目指す
+- **学習機能**: ユーザーの入力パターンに適応 (実装中)
 - **プライバシー重視**: 完全オフライン動作、データは端末内のみ
-- **クロスプラットフォーム**: Windows / macOS / Linux対応
+- **マルチプラットフォーム指向**: 現在は **macOS** で開発中。Linux / Windows は将来対応予定
+
+> [!NOTE]
+> ぬこIMEは現在 **開発初期段階** です。実機で動作するのは macOS のみで、かな漢字変換エンジンは統合中です。
+> 詳細は [ロードマップ](docs/ROADMAP.md) を参照してください。
 
 ## インストール
 
-### Windows
+現在はソースからのビルドのみ対応しています (macOS)。
+パッケージマネージャ (Homebrew / winget / AUR 等) での配布は将来対応予定です
+([ロードマップ Phase 5+](docs/ROADMAP.md))。
 
-```powershell
-# winget (準備中)
-winget install nuko-ime
-```
-
-### macOS
+### ソースからビルド (macOS)
 
 ```bash
-# Homebrew (準備中)
-brew install nuko-ime
-```
-
-### Linux
-
-```bash
-# AUR (準備中)
-yay -S nuko-ime
-```
-
-### ソースからビルド
-
-```bash
-git clone https://github.com/your-org/nuko-ime.git
+git clone https://github.com/foresthill/nuko-ime.git
 cd nuko-ime
 cargo build --release
 ```
@@ -102,11 +89,12 @@ cargo bench
 
 ```
 nuko-ime/
-├── nuko-core/       # コアエンジン
-├── nuko-platform/   # OS統合層
+├── nuko-core/       # コアエンジン (入力・変換・辞書・学習)
+├── nuko-platform/   # OS統合の抽象層
+├── nuko-macos/      # macOS InputMethodKit 統合
 ├── nuko-ui/         # UI コンポーネント
 ├── nuko-cli/        # CLIツール
-├── tools/           # 開発ツール
+├── spikes/          # 短命の検証用 crate (ワークスペース外)
 └── docs/            # ドキュメント
 ```
 
@@ -132,8 +120,8 @@ Apache License 2.0 または MIT License のデュアルライセンスです。
 - [ロードマップ](docs/ROADMAP.md) — Phase 別の実装順序
 - [将来機能](docs/FUTURE_FEATURES.md)
 - [AI エージェント基盤としての思想](docs/AI_AGENT_FOUNDATION.md)
-- [Issues](https://github.com/your-org/nuko-ime/issues)
-- [Discussions](https://github.com/your-org/nuko-ime/discussions)
+- [Issues](https://github.com/foresthill/nuko-ime/issues)
+- [Discussions](https://github.com/foresthill/nuko-ime/discussions)
 
 ---
 

@@ -115,7 +115,7 @@
 
 ### 課題の選択
 
-1. [Issues](https://github.com/your-org/nuko-ime/issues)ページから取り組みたい課題を選ぶ
+1. [Issues](https://github.com/foresthill/nuko-ime/issues)ページから取り組みたい課題を選ぶ
 2. コメントして作業開始の意思表示をする
 3. 未解決の課題に取り組む場合は、事前に議論を開始する
 4. `good first issue` タグは初心者向けの課題です
