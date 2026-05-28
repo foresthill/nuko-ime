@@ -328,8 +328,8 @@ IME 経由で **無意識的にこれが行われる** 設計が広まれば、
 - [VISION.md](VISION.md) — プロジェクト全体のビジョン
 - [FUTURE_FEATURES.md](FUTURE_FEATURES.md) Section 8 — AI 駆動の自己学習機構
   (本ドキュメントの内側の学習機構)
-- [SPECIFICATION.md](SPECIFICATION.md) — 現状の仕様
-- [PROJECT_PLAN.md](PROJECT_PLAN.md) — プロジェクト計画
+- [ARCHITECTURE.md](ARCHITECTURE.md) — 現在の構成
+- [ROADMAP.md](ROADMAP.md) — Phase 別の実装順序
 
 ---
 
