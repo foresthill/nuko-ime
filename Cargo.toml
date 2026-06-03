@@ -25,6 +25,10 @@ categories = ["text-processing", "internationalization"]
 # 形態素解析（ビルド時にIPADIC辞書をダウンロード）
 lindera = { version = "0.36", features = ["ipadic"] }
 
+# かな漢字変換エンジン (Path B: libakaza ベース、MIT)
+# モデルは別途生成。詳細は docs/spikes/libakaza-api-survey.md
+libakaza = { git = "https://github.com/akaza-im/akaza", rev = "8a404281ece7ca51119127a96bdde8c153b0df61" }
+
 # データベース・ストレージ
 redb = "2.2"
 

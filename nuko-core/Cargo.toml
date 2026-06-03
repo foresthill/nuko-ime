@@ -13,10 +13,15 @@ readme = "README.md"
 default = []
 # lindera形態素解析を有効化（ビルド時にIPADIC辞書をダウンロード）
 lindera = ["dep:lindera"]
+# libakaza ベースのかな漢字変換バックエンドを有効化（モデルファイルは別途配置）
+akaza = ["dep:libakaza"]
 
 [dependencies]
 # 形態素解析（オプション）
 lindera = { workspace = true, optional = true }
+
+# かな漢字変換エンジン（オプション、Path B）
+libakaza = { workspace = true, optional = true }
 
 # データベース
 redb = { workspace = true }
