@@ -1,0 +1,18 @@
+[package]
+name = "libakaza-with-model-spike"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+# Phase 2-C 疎通確認: nuko-core の LibakazaBackend を直接呼んで、
+# model-pipeline/data/ で生成したモデルが libakaza で実際に読めて
+# 何かしらの変換が返ることを確かめる。
+#
+# Path B 設計の最終的な疎通テスト。これが pass すれば nuko-ime に
+# `NUKO_AKAZA_MODEL_DIR` を設定して実機検証 (Phase 2-D) に進める。
+
+[dependencies]
+nuko-core = { path = "../../nuko-core", features = ["akaza"] }
+
+# spikes/ はメインワークスペースから独立して Cargo.lock を持つ
+[workspace]

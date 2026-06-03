@@ -55,8 +55,10 @@ model-pipeline/
 ├── README.md            # このファイル
 ├── NOTICE               # データソース別ライセンス継承
 ├── Makefile             # ビルドスクリプト (現状は骨格のみ)
-├── seed/
+├── dict/
 │   └── SKK-JISYO.akaza  # 手書き seed 辞書 (上流流用、Phase 2-E で自前置換)
+│                        # ※ akaza-data make-dict が dict/SKK-JISYO.akaza を
+│                        #    ハードコードで探すため、ディレクトリ名は dict/ 固定
 ├── scripts/             # 前処理ヘルパー (Python/シェル、Phase 2-C で追加)
 ├── tools/               # cargo install 先 (gitignore)
 ├── work/                # ダウンロード/展開の中間ファイル (gitignore)
@@ -65,10 +67,10 @@ model-pipeline/
 
 ## Phase 進行と本ディレクトリの対応
 
-- **Phase 2-B (本コミット)**: scaffold (README / NOTICE / Makefile 骨格 / seed 流用)
+- **Phase 2-B**: scaffold (README / NOTICE / Makefile 骨格 / dict seed 上流流用)
 - **Phase 2-C**: 最小モデル試作 (青空文庫 + SudachiDict 小規模、epochs を下げる)
 - **Phase 2-D**: ぬこIME 本体で `NUKO_AKAZA_MODEL_DIR` 指定して実機検証
-- **Phase 2-E**: 本番モデル (上流 corpus-stats + UniDic + 自前 seed への置換)
+- **Phase 2-E**: 本番モデル (上流 corpus-stats + UniDic + dict/SKK-JISYO.akaza の自前置換)
 - **Phase 2-F**: 手動配置のドキュメント (ぬこIME 本体 README)
 - **Phase 2-G**: 自動ダウンローダ (将来)
 
