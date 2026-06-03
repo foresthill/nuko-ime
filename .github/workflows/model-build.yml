@@ -1,0 +1,65 @@
+name: Model Build
+
+# Phase 2-B scaffold。Phase 2-C 以降で実装が入る。
+# 本 workflow は通常 CI とは独立: 重い処理を伴うため毎 PR では走らせず、
+# 手動 dispatch か model-v* tag push の時のみ起動する。
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Model profile (min | full)'
+        required: true
+        default: 'min'
+        type: choice
+        options:
+          - min
+          - full
+  push:
+    tags:
+      - 'model-v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-model:
+    name: Build models (PROFILE=${{ inputs.profile || 'min' }})
+    runs-on: ubuntu-latest
+    # Phase 2-C 実装まではエラーで早期終了する設計なので、
+    # 既存 CI の merge gating には絶対に絡めない。
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: model-pipeline/tools -> target
+
+      - name: Show pipeline help (scaffold sanity)
+        working-directory: model-pipeline
+        run: make help
+
+      - name: Install akaza-data CLI
+        working-directory: model-pipeline
+        run: make install-tools
+
+      - name: Build models
+        working-directory: model-pipeline
+        env:
+          PROFILE: ${{ inputs.profile || 'min' }}
+        # Phase 2-B では download/build target が `@false` で終わるため、
+        # ここは失敗するのが想定挙動。Phase 2-C で実装が入れば pass する。
+        run: make all PROFILE=$PROFILE
+        continue-on-error: true
+
+      - name: Upload models (Phase 2-C 以降で有効化)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuko-ime-model-${{ inputs.profile || 'min' }}
+          path: model-pipeline/data/
+          if-no-files-found: ignore

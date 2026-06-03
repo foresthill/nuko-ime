@@ -1,0 +1,6 @@
+# Pipeline 中間ファイル/生成物 — リポジトリには含めない (Releases に添付)
+work/
+data/
+
+# cargo install --root の生成物
+tools/
