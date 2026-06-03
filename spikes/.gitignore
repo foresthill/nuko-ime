@@ -1,0 +1,3 @@
+# spikes/ は実験用 crate を置く場所。各 spike は独自の target/ と Cargo.lock を持つ。
+**/target/
+**/Cargo.lock
