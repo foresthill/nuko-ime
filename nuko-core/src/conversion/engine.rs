@@ -1,10 +1,24 @@
 //! 変換エンジン本体
 
+#[cfg(feature = "akaza")]
+use std::path::Path;
+
+#[cfg(feature = "akaza")]
+use super::backend::LibakazaBackend;
 use super::{Candidate, CandidateList, CandidateSource, ConversionContext};
 use crate::dictionary::DictionaryManager;
 use crate::error::{NukoError, Result};
 use crate::input::{to_halfwidth_katakana, to_katakana};
 use crate::learning::LearningManager;
+
+/// libakaza 由来候補に上乗せする優先度ブースト。
+///
+/// 静的辞書のスコアは概ね 0〜100 のレンジで、libakaza の cost_to_score は
+/// 大きな負値になりがち。Phase 1.2 では「libakaza が動いていれば最優先」という
+/// 単純な方針を取り、静的辞書を必ず上回るよう一律ブーストする。
+/// 厳密なキャリブレーションは Phase 1.3 で行う。
+#[cfg(feature = "akaza")]
+const LIBAKAZA_PRIORITY_BOOST: i32 = 1_000;
 
 /// 変換エンジン
 pub struct ConversionEngine {
@@ -12,10 +26,13 @@ pub struct ConversionEngine {
     dictionary: DictionaryManager,
     /// 学習マネージャー
     learning: LearningManager,
+    /// libakaza バックエンド (`akaza` feature 有効時のみ)
+    #[cfg(feature = "akaza")]
+    libakaza: Option<LibakazaBackend>,
 }
 
 impl ConversionEngine {
-    /// 新しい変換エンジンを作成
+    /// 新しい変換エンジンを作成 (libakaza バックエンドなし)
     ///
     /// # エラー
     /// 辞書の読み込みに失敗した場合
@@ -23,7 +40,47 @@ impl ConversionEngine {
         Ok(Self {
             dictionary: DictionaryManager::new()?,
             learning: LearningManager::new()?,
+            #[cfg(feature = "akaza")]
+            libakaza: None,
         })
+    }
+
+    /// libakaza バックエンドを試行して変換エンジンを作成
+    ///
+    /// `model_dir` 配下の libakaza モデルファイル群を読み込もうとし、
+    /// 失敗した場合は警告ログを出して libakaza なしの状態で起動する
+    /// (= 静的辞書フォールバック)。エンジン自体の構築は常に成功する。
+    ///
+    /// # エラー
+    /// 辞書マネージャー/学習マネージャーの初期化に失敗した場合のみ。
+    /// libakaza 自体の load 失敗は内部で握り、Err にはしない。
+    #[cfg(feature = "akaza")]
+    pub fn with_libakaza(model_dir: impl AsRef<Path>) -> Result<Self> {
+        let dictionary = DictionaryManager::new()?;
+        let learning = LearningManager::new()?;
+        let libakaza = match LibakazaBackend::try_new(model_dir.as_ref()) {
+            Ok(backend) => Some(backend),
+            Err(e) => {
+                tracing::warn!(
+                    model_dir = %model_dir.as_ref().display(),
+                    error = %e,
+                    "libakaza バックエンド初期化失敗。静的辞書フォールバックで起動"
+                );
+                None
+            }
+        };
+        Ok(Self {
+            dictionary,
+            learning,
+            libakaza,
+        })
+    }
+
+    /// libakaza バックエンドが有効か (= load 成功して保持されているか)
+    #[cfg(feature = "akaza")]
+    #[must_use]
+    pub fn has_libakaza(&self) -> bool {
+        self.libakaza.is_some()
     }
 
     /// かなを漢字に変換
@@ -47,7 +104,29 @@ impl ConversionEngine {
             candidates.push(candidate.with_source(CandidateSource::Learned));
         }
 
-        // 2. 辞書から候補を取得
+        // 2. libakaza バックエンドが有効なら最優先で候補を追加
+        #[cfg(feature = "akaza")]
+        if let Some(backend) = &self.libakaza {
+            match backend.convert(reading) {
+                Ok(libakaza_candidates) => {
+                    for mut candidate in libakaza_candidates {
+                        candidate.score = candidate.score.saturating_add(LIBAKAZA_PRIORITY_BOOST);
+                        if !candidates.iter().any(|c| c.surface == candidate.surface) {
+                            candidates.push(candidate);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        reading = %reading,
+                        error = %e,
+                        "libakaza 変換失敗、静的辞書のみで継続"
+                    );
+                }
+            }
+        }
+
+        // 3. 辞書から候補を取得
         let dict_candidates = self.dictionary.lookup(reading)?;
         for candidate in dict_candidates {
             // 重複を避ける
@@ -56,14 +135,14 @@ impl ConversionEngine {
             }
         }
 
-        // 3. かなそのままも候補に追加
+        // 4. かなそのままも候補に追加
         candidates.push(
             Candidate::new(reading, reading)
                 .with_score(-100)
                 .with_source(CandidateSource::System),
         );
 
-        // 4. カタカナ変換も候補に追加
+        // 5. カタカナ変換も候補に追加
         let katakana = to_katakana(reading);
         candidates.push(
             Candidate::new(&katakana, reading)
@@ -71,7 +150,7 @@ impl ConversionEngine {
                 .with_source(CandidateSource::System),
         );
 
-        // 5. 半角カタカナも候補に追加
+        // 6. 半角カタカナも候補に追加
         let half_katakana = to_halfwidth_katakana(reading);
         candidates.push(
             Candidate::new(&half_katakana, reading)
@@ -160,6 +239,39 @@ mod tests {
 
         assert!(!candidates.is_empty());
         // かなそのまま、カタカナの候補は必ず含まれる
+        assert!(candidates.iter().any(|c| c.surface == "にほん"));
+        assert!(candidates.iter().any(|c| c.surface == "ニホン"));
+    }
+
+    #[cfg(feature = "akaza")]
+    #[test]
+    fn with_libakaza_falls_back_when_model_dir_missing() {
+        // spike-2 + LibakazaBackend で確認した契約:
+        // モデル不在でも with_libakaza は Ok を返し、libakaza なしで起動する。
+        let engine = ConversionEngine::with_libakaza(
+            "/tmp/nuko-ime-test-no-model-dir-for-engine-wireup-DOES-NOT-EXIST",
+        )
+        .expect("エンジン構築は libakaza load 失敗でも成功すべき");
+        assert!(
+            !engine.has_libakaza(),
+            "モデル不在時は libakaza バックエンドを保持しない"
+        );
+    }
+
+    #[cfg(feature = "akaza")]
+    #[test]
+    fn convert_works_when_libakaza_unavailable() {
+        // libakaza load に失敗してフォールバックした状態でも、
+        // 既存の静的辞書フローが動作することを確認する。
+        let engine = ConversionEngine::with_libakaza(
+            "/tmp/nuko-ime-test-no-model-for-convert-fallback-DOES-NOT-EXIST",
+        )
+        .unwrap();
+        let context = ConversionContext::new();
+        let candidates = engine.convert("にほん", &context).unwrap();
+
+        assert!(!candidates.is_empty());
+        // 静的辞書とカタカナ展開は必ず返る
         assert!(candidates.iter().any(|c| c.surface == "にほん"));
         assert!(candidates.iter().any(|c| c.surface == "ニホン"));
     }
