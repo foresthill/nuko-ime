@@ -11,6 +11,12 @@ description = "ぬこIME macOS Input Method - InputMethodKit統合"
 name = "NukoIME"
 path = "src/main.rs"
 
+[features]
+default = []
+# libakaza ベースのかな漢字変換バックエンドを有効化 (nuko-core 側の同名 feature を有効化)
+# 詳細は docs/spikes/libakaza-api-survey.md / libakaza-send-constraint.md
+akaza = ["nuko-core/akaza"]
+
 [dependencies]
 nuko-core = { workspace = true }
 objc2 = "0.6"
