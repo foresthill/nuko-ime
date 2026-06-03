@@ -16,7 +16,7 @@ use objc2_foundation::{NSArray, NSRange, NSString};
 use objc2_input_method_kit::{IMKInputController, IMKServer};
 use tracing::{debug, error, info, warn};
 
-use crate::state::{InputState, ENGINE};
+use crate::state::{with_engine, with_engine_mut, InputState};
 
 /// NSNotFound 相当値 (IMK の replacementRange で使用)
 /// macOS ヘッダでは NSIntegerMax と定義されている
@@ -208,8 +208,9 @@ impl NukoInputController {
 
             if let Some(ref candidates) = state.candidates {
                 if let Some(selected) = candidates.selected() {
-                    let mut engine = ENGINE.lock();
-                    let _ = engine.commit(selected, &state.context);
+                    with_engine_mut(|engine| {
+                        let _ = engine.commit(selected, &state.context);
+                    });
                 }
             }
 
@@ -396,8 +397,8 @@ impl NukoInputController {
         let composition = state.composition.clone();
         debug_log(&format!("do_convert: input='{composition}'"));
 
-        let engine = ENGINE.lock();
-        match engine.convert(&composition, &state.context) {
+        let result = with_engine(|engine| engine.convert(&composition, &state.context));
+        match result {
             Ok(candidates) => {
                 let count = candidates.iter().count();
                 let preview: Vec<String> = candidates
@@ -411,14 +412,12 @@ impl NukoInputController {
                     let surface = selected.surface.clone();
                     state.candidates = Some(candidates);
                     drop(state);
-                    drop(engine);
                     Self::set_marked_text_on_client(client, &surface);
                 } else {
                     debug_log("do_convert: no selected candidate, showing composition");
                     let display = state.display_text();
                     state.candidates = Some(candidates);
                     drop(state);
-                    drop(engine);
                     Self::set_marked_text_on_client(client, &display);
                 }
             }
@@ -427,7 +426,6 @@ impl NukoInputController {
                 debug_log(&format!("do_convert: ERROR {e}"));
                 let display = state.display_text();
                 drop(state);
-                drop(engine);
                 Self::set_marked_text_on_client(client, &display);
             }
         }
@@ -440,10 +438,11 @@ impl NukoInputController {
         let commit_text = if let Some(ref candidates) = state.candidates {
             if let Some(selected) = candidates.selected() {
                 let text = selected.surface.clone();
-                let mut engine = ENGINE.lock();
-                if let Err(e) = engine.commit(selected, &state.context) {
-                    error!("学習記録エラー: {}", e);
-                }
+                with_engine_mut(|engine| {
+                    if let Err(e) = engine.commit(selected, &state.context) {
+                        error!("学習記録エラー: {}", e);
+                    }
+                });
                 state.context.push_prev_word(&text);
                 text
             } else {
