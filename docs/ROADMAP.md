@@ -1,6 +1,6 @@
 # ぬこIME ロードマップ
 
-最終更新: 2026-05-28
+最終更新: 2026-06-03
 
 実装の **順序** を記述します。具体的な日付は意図的に書きません — 個人 OSS
 として「いつまでに」を約束できないためです。Phase 完了の判定基準のみ明示します。
@@ -28,34 +28,55 @@
 [`spike/libakaza-macos-build`](https://github.com/foresthill/nuko-ime/tree/spike/libakaza-macos-build)
 ブランチを参照。
 
-### 1.2 nuko-core への統合
+### 1.2 nuko-core への統合 ✅ 完了
 
-- [ ] `nuko-core/Cargo.toml` に libakaza を追加
-- [ ] libakaza の公開 API 表面調査 (Engine / 変換層を pub で叩けるか)
-- [ ] ぬこIME 既存のローマ字層と libakaza の入力境界を明確化
-  (libakaza に渡すのは **かな文字列** のみ、ローマ字層は本プロジェクト維持)
-- [ ] `nuko-core::conversion::engine` に libakaza バックエンド実装
-- [ ] フォールバック (libakaza モデルが無い場合の挙動) 設計
-- [ ] 単体テスト
+- [x] libakaza 公開 API 調査 (PR #13)
+- [x] モデル不在エラー挙動の実機検証 (spike-2, PR #14)
+- [x] `nuko-core/Cargo.toml` に `akaza` feature + optional libakaza (PR #15)
+- [x] `LibakazaBackend` 実装 (try_new / convert / cost_to_score, PR #15)
+- [x] `ConversionEngine::with_libakaza()` と静的辞書フォールバック契約 (PR #16)
+- [x] Send 制約発見と対処方針 (spike-3, PR #17)
+- [x] nuko-macos: thread_local 化 + `akaza` feature pass-through (PR #18)
 
-### 1.3 候補ウィンドウ最小実装
+### 1.3 候補ウィンドウ最小実装 / 残作業
 
 - [ ] `nuko-ui` で候補表示 (`iced` ベース or InputMethodKit native)
 - [ ] 確定・キャンセル・次候補のキーバインド
+- [ ] libakaza 変換の文節別 API 化 (現在は連結 1 候補 = 案 C)
+- [ ] `LIBAKAZA_PRIORITY_BOOST` キャリブレーション
 
-**完了判定**: 「にほんご」入力 → 「日本語」など実用的な変換候補が出る
+**完了判定**: 「にほんご」入力 → 「日本語」など実用的な変換候補が出る (Phase 2 のモデル生成完了が前提)
 
 ## Phase 2 — 自前モデル生成パイプライン
 
-`akaza-default-model` (SKK-JISYO.L 含む GPL 汚染) を使わずモデルを生成。
+libakaza 本体は MIT、上流 corpus-stats は CC BY-SA + PD + IPADIC BSD-3 で
+**GPL を経由しない**ことを一次調査で確認済 (PR #19)。生成パイプラインは
+[`model-pipeline/`](../model-pipeline/) ディレクトリに配置 (モノレポ運用)。
 
-- [ ] データ取得スクリプト (SudachiDict, UniDic, Wikipedia, 青空文庫)
-- [ ] `jawiki-kana-kanji-dict` ベースの辞書生成スクリプト
-- [ ] bigram コーパス生成 (Wikipedia → 統計データ)
-- [ ] libakaza 互換のバイナリモデル出力
-- [ ] GitHub Actions ワークフロー (6 時間制限内に収まるよう分割)
-- [ ] モデルファイルのリリース添付 (`gh release upload`)
-- [ ] モデル取得・配置の利用者向け手順
+### 2-A spike-4: akaza-data CLI 検証 ✅ 完了 (PR #20)
+- [x] cargo install で macOS ビルド確認、16 subcommand を `--help` で確定
+
+### 2-B model-pipeline/ scaffold ✅ 進行中 (本 PR)
+- [x] README / NOTICE / Makefile 骨格 / seed (上流流用) / `.github/workflows/model-build.yml`
+
+### 2-C 最小モデル試作 (案 III)
+- [ ] Makefile の download target 実装 (corpus-stats / UniDic / SudachiDict)
+- [ ] `make-dict` / `learn-corpus` 呼び出し実装 (PROFILE=min)
+- [ ] `akaza-data check` で疎通確認
+
+### 2-D ぬこIME 本体で実機検証
+- [ ] `NUKO_AKAZA_MODEL_DIR` でモデルを指定 → 変換が走る
+
+### 2-E 本番モデル (案 I)
+- [ ] PROFILE=full でビルド
+- [ ] seed を自前再構築 (上流から置換)
+- [ ] `model-v0.1.0` リリース、tarball 添付
+
+### 2-F 手動配置のドキュメント
+- [ ] README に展開手順を記載
+
+### 2-G 自動ダウンローダ (将来)
+- [ ] nuko-cli or nuko-macos に CLI 追加
 
 **完了判定**: ユーザーが GitHub Release からモデルをダウンロード → 配置で動作
 
