@@ -7,12 +7,26 @@ APP_NAME="NukoIME"
 APP_BUNDLE="$APP_NAME.app"
 INSTALL_DIR="$HOME/Library/Input Methods"
 
+# 使用方法:
+#   ./install.sh                  # default features (静的辞書のみ)
+#   FEATURES=akaza ./install.sh   # libakaza バックエンドを有効化
+#                                 # モデルを ~/Library/Application\ Support/nuko-ime/akaza-model/
+#                                 # に配置していない場合は静的辞書フォールバックで起動
+FEATURES="${FEATURES:-}"
+
 echo "=== ぬこIME macOS ビルド＆インストール ==="
+if [ -n "$FEATURES" ]; then
+    echo "Features: $FEATURES"
+fi
 echo ""
 
 echo "[1/4] ビルド中..."
 cd "$PROJECT_ROOT"
-cargo build --release -p nuko-macos
+if [ -n "$FEATURES" ]; then
+    cargo build --release -p nuko-macos --features "$FEATURES"
+else
+    cargo build --release -p nuko-macos
+fi
 
 echo "[2/4] .appバンドル作成中..."
 rm -rf "$PROJECT_ROOT/target/$APP_BUNDLE"
