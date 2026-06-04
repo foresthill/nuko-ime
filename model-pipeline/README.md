@@ -35,18 +35,84 @@ make all PROFILE=min
 make all PROFILE=full
 ```
 
-実行後の生成物:
+実行後の生成物 (PROFILE=min での実測、2026-06-04):
 ```
 data/
-├── SKK-JISYO.akaza
-├── unigram.model
-├── bigram.model
-└── skip_bigram.model
+├── SKK-JISYO.akaza         42 MB
+├── unigram.model           16 MB
+├── bigram.model            53 MB
+├── bigram.model.scores     35 MB  ← bigram.model と必ずペア
+├── skip_bigram.model       94 MB
+└── skip_bigram.model.scores 58 MB ← skip_bigram.model と必ずペア
+                            合計 ~298 MB
 ```
+
+⚠️ **`.scores` ファイルは bigram/skip_bigram の本体スコアデータ**。
+コピー漏れすると libakaza が silent failure (load 時に `No such file or directory`、
+nuko-ime は静的辞書フォールバックに落ちて気付かれない)。
 
 これを tarball にして GitHub Releases に添付するのが Phase 2-E。
 エンドユーザーは tarball を `~/Library/Application Support/nuko-ime/akaza-model/` に
-展開して使う (Phase 2-F の手動配置パス)。
+展開して使う ([Phase 2-F: 手動配置の手順](#phase-2-f-手動配置の手順) 参照)。
+
+## Phase 2-F: 手動配置の手順
+
+PROFILE=min/full でローカルビルドしたモデルを nuko-ime IME 本体で使うまで:
+
+### 1. モデルを期待される場所に配置
+
+`data/` 配下の **全 6 ファイル** を `~/Library/Application Support/nuko-ime/akaza-model/` にコピーする (`.scores` 漏れ注意):
+
+```bash
+mkdir -p ~/Library/Application\ Support/nuko-ime/akaza-model
+cp model-pipeline/data/* ~/Library/Application\ Support/nuko-ime/akaza-model/
+```
+
+`*` で全部コピーするのが確実。`unigram.model` `bigram.model` `bigram.model.scores`
+`skip_bigram.model` `skip_bigram.model.scores` `SKK-JISYO.akaza` の 6 つが揃って
+いることを確認:
+
+```bash
+ls -lh ~/Library/Application\ Support/nuko-ime/akaza-model/
+# 6 ファイル、合計 ~300 MB
+```
+
+別のパスに置きたい場合は環境変数 `NUKO_AKAZA_MODEL_DIR=<path>` で上書き可能。
+
+### 2. `--features akaza` でビルド・インストール
+
+```bash
+FEATURES=akaza ./nuko-macos/scripts/install.sh
+```
+
+`FEATURES` 環境変数は [PR #23](https://github.com/foresthill/nuko-ime/pull/23) で
+追加。指定なしだと既存通り (静的辞書のみ) ビルド。
+
+### 3. NukoIME プロセスを再起動
+
+モデルファイル更新後は **必ずプロセス再起動** が必要。`LibakazaBackend::try_new`
+は起動時 1 回だけ呼ばれるため (PR #16 設計)、走行中のプロセスは古い状態のまま:
+
+```bash
+killall NukoIME
+```
+
+macOS の入力ソースを別の IME に一旦切り替え → ぬこIME に戻すと自動再起動する。
+
+### 4. 動作確認
+
+任意のテキストフィールドで以下が漢字変換できることを確認:
+
+| 入力 (ローマ字) | 期待される 1 番目の候補 |
+|---|---|
+| `nihongo` | 日本語 |
+| `watashinonamae` | 私の名前 |
+| `kyouhaiitenki` | 今日はいい天気 |
+| `nihongowohanasu` | 日本語を話す |
+
+うまく変換されない場合は `/tmp/nuko-ime-debug.log` に IMK callback のログが
+蓄積されているので参照。「全てカタカナになる」「Space 何回押しても漢字にならない」
+等は典型的に `.scores` 漏れ or プロセス未再起動が原因。
 
 ## ディレクトリ構造
 
