@@ -1,16 +1,16 @@
 # nuko-ime model-pipeline — libakaza モデル生成
 #
-# 現状: Phase 2-B (scaffold)。各 target は骨格のみで、実体は Phase 2-C 以降で実装。
+# Phase 2-C 実装。各 target は実際にダウンロード + ビルドする。
 # 詳細は README.md と docs/spikes/phase2-model-pipeline.md を参照。
 
 # -------------------------------------------------------------------------
 # Configuration
 # -------------------------------------------------------------------------
 
-# libakaza / akaza-data の pin (libakaza-api-survey で確定した rev)
+# libakaza / akaza-data の pin
 AKAZA_REV ?= 8a404281ece7ca51119127a96bdde8c153b0df61
 
-# corpus-stats / UniDic / SudachiDict のバージョン (上流 Makefile に追従)
+# 上流データのバージョン (akaza 上流 Makefile に追従)
 CORPUS_STATS_VERSION ?= v2026.0216.0
 SUDACHI_VERSION      ?= 20260116
 
@@ -38,11 +38,19 @@ endif
 
 AKAZA_DATA = $(TOOLS_DIR)/bin/akaza-data
 
+# corpus-stats tarball 展開後の trie ファイル群 (extraction で位置を確認)
+CORPUS_UNIGRAM_TRIE     = $(WORK_DIR)/stats-vibrato-unigram.wordcnt.trie
+CORPUS_BIGRAM_TRIE      = $(WORK_DIR)/stats-vibrato-bigram.wordcnt.trie
+CORPUS_SKIP_BIGRAM_TRIE = $(WORK_DIR)/stats-vibrato-skip-bigram.wordcnt.trie
+VOCAB_FILE              = $(WORK_DIR)/vibrato-ipadic.vocab
+
+UNIDIC_CSV = $(WORK_DIR)/unidic/lex_3_1.csv
+
 # -------------------------------------------------------------------------
 # High-level targets
 # -------------------------------------------------------------------------
 
-.PHONY: all help install-tools clean distclean
+.PHONY: all help install-tools clean distclean verify
 
 all: $(DATA_DIR)/unigram.model $(DATA_DIR)/bigram.model $(DATA_DIR)/skip_bigram.model $(DATA_DIR)/SKK-JISYO.akaza
 
@@ -52,14 +60,12 @@ help:
 	@echo "  make install-tools              # cargo install akaza-data into $(TOOLS_DIR)/"
 	@echo "  make all PROFILE=min            # build minimum models (Phase 2-C; epochs short)"
 	@echo "  make all PROFILE=full           # build full-quality models (Phase 2-E)"
+	@echo "  make verify                     # smoke test: akaza-data check で疎通確認"
 	@echo "  make clean                      # remove $(WORK_DIR) and $(DATA_DIR)"
 	@echo "  make distclean                  # also remove $(TOOLS_DIR)"
 	@echo ""
 	@echo "Current PROFILE=$(PROFILE):"
 	@echo "  delta=$(DELTA) may=$(MAY_EPOCHS) should=$(SHOULD_EPOCHS) must=$(MUST_EPOCHS)"
-	@echo ""
-	@echo "NOTE: Phase 2-B scaffold — all build targets are currently placeholders."
-	@echo "      Concrete implementation lands in Phase 2-C."
 
 # -------------------------------------------------------------------------
 # Tool installation
@@ -75,58 +81,126 @@ $(AKAZA_DATA):
 	  akaza-data
 
 # -------------------------------------------------------------------------
-# Downloads (Phase 2-C で実装)
+# Downloads
 # -------------------------------------------------------------------------
 
+# akaza-corpus-stats tarball: Wikipedia + 青空文庫 + CC-100 + IPADIC から
+# 生成された wordcnt trie + vocab ファイル群 (~270 MB)
 $(WORK_DIR)/corpus-stats/_SUCCESS:
-	@echo "TODO Phase 2-C: gh release download $(CORPUS_STATS_VERSION) from akaza-im/akaza-corpus-stats"
-	@false
+	mkdir -p $(WORK_DIR)
+	gh release download $(CORPUS_STATS_VERSION) \
+	  --repo akaza-im/akaza-corpus-stats \
+	  --pattern 'akaza-corpus-stats-full.tar.gz' \
+	  --output $(WORK_DIR)/akaza-corpus-stats.tar.gz
+	tar xzf $(WORK_DIR)/akaza-corpus-stats.tar.gz -C $(WORK_DIR)/
+	rm $(WORK_DIR)/akaza-corpus-stats.tar.gz
+	mkdir -p $(WORK_DIR)/corpus-stats && touch $(WORK_DIR)/corpus-stats/_SUCCESS
 
-$(WORK_DIR)/unidic/lex_3_1.csv:
-	@echo "TODO Phase 2-C: download UniDic 3.1.1 (BSD-3 side)"
-	@false
+# corpus-stats が提供するファイル群はすべて _SUCCESS マーカーに依存
+$(CORPUS_UNIGRAM_TRIE) $(CORPUS_BIGRAM_TRIE) $(CORPUS_SKIP_BIGRAM_TRIE) $(VOCAB_FILE): $(WORK_DIR)/corpus-stats/_SUCCESS
 
-$(WORK_DIR)/sudachi/small_lex.csv:
-	@echo "TODO Phase 2-C: download SudachiDict small_lex.csv ($(SUDACHI_VERSION))"
-	@false
+# UniDic 3.1.1 CSJ (BSD-3 側を採用、NINJAL から直接取得)
+# 上流 akaza は unidic-mirror release を使っていたが、当該 release が削除済のため
+# NINJAL の公式アーカイブを参照する。
+$(WORK_DIR)/unidic/unidic.zip:
+	mkdir -p $(WORK_DIR)/unidic/
+	curl -fL -o $(WORK_DIR)/unidic/unidic.zip \
+	  https://clrd.ninjal.ac.jp/unidic_archive/csj/3.1.1/unidic-csj-3.1.1.zip
 
-$(WORK_DIR)/vibrato-ipadic.vocab:
-	@echo "TODO Phase 2-C: download IPADIC via Vibrato"
-	@false
+$(UNIDIC_CSV): $(WORK_DIR)/unidic/unidic.zip
+	unzip -D -o -j $(WORK_DIR)/unidic/unidic.zip -d $(WORK_DIR)/unidic/
+	touch $(UNIDIC_CSV)
+
+# SudachiDict 各 lex CSV (固有名詞補完用、Apache-2.0)
+# macOS では wget が標準でないため curl を使う
+$(WORK_DIR)/sudachi/%_lex.csv:
+	mkdir -p $(WORK_DIR)/sudachi
+	curl -fL -o $(WORK_DIR)/sudachi/$*_lex.zip \
+	  http://sudachi.s3-website-ap-northeast-1.amazonaws.com/sudachidict-raw/$(SUDACHI_VERSION)/$*_lex.zip
+	unzip -o $(WORK_DIR)/sudachi/$*_lex.zip -d $(WORK_DIR)/sudachi/
+	rm $(WORK_DIR)/sudachi/$*_lex.zip
 
 # -------------------------------------------------------------------------
-# SKK-JISYO.akaza generation (Phase 2-C で実装)
+# SKK-JISYO.akaza generation
 # -------------------------------------------------------------------------
 
+# 上流 Makefile に倣い、make-dict は dict/SKK-JISYO.akaza + UniDic + vocab +
+# SudachiDict + training-corpus から data/SKK-JISYO.akaza を出力する。
+# 末尾の data/SKK-JISYO.akaza は CLI の <TXT_FILE> 位置引数 (実体としては
+# SKK 辞書の出力先)。
 $(DATA_DIR)/SKK-JISYO.akaza: $(AKAZA_DATA) \
-                              seed/SKK-JISYO.akaza \
-                              $(WORK_DIR)/unidic/lex_3_1.csv \
-                              $(WORK_DIR)/vibrato-ipadic.vocab \
-                              $(WORK_DIR)/sudachi/small_lex.csv
-	@mkdir -p $(DATA_DIR)
-	@echo "TODO Phase 2-C: akaza-data make-dict --unidic ... --vocab ... --sudachi-lex ... \\"
-	@echo "  --corpus seed/SKK-JISYO.akaza  $(DATA_DIR)/SKK-JISYO.akaza.txt"
-	@echo "  (skeleton; actual invocation in Phase 2-C)"
-	@false
+                              dict/SKK-JISYO.akaza \
+                              training-corpus/must.txt \
+                              training-corpus/should.txt \
+                              training-corpus/may.txt \
+                              $(UNIDIC_CSV) \
+                              $(VOCAB_FILE) \
+                              $(WORK_DIR)/sudachi/small_lex.csv \
+                              $(WORK_DIR)/sudachi/core_lex.csv \
+                              $(WORK_DIR)/sudachi/notcore_lex.csv
+	mkdir -p $(DATA_DIR)
+	$(AKAZA_DATA) make-dict \
+	  --corpus dict/SKK-JISYO.akaza \
+	  --corpus training-corpus/must.txt \
+	  --corpus training-corpus/should.txt \
+	  --corpus training-corpus/may.txt \
+	  --unidic $(UNIDIC_CSV) \
+	  --vocab $(VOCAB_FILE) \
+	  --sudachi-lex $(WORK_DIR)/sudachi/small_lex.csv \
+	  --sudachi-lex $(WORK_DIR)/sudachi/core_lex.csv \
+	  --sudachi-lex $(WORK_DIR)/sudachi/notcore_lex.csv \
+	  $(DATA_DIR)/SKK-JISYO.akaza
 
 # -------------------------------------------------------------------------
-# Language model training (Phase 2-C で実装)
+# Language model training
 # -------------------------------------------------------------------------
 
-$(DATA_DIR)/bigram.model $(DATA_DIR)/unigram.model $(DATA_DIR)/skip_bigram.model: \
-    $(AKAZA_DATA) \
-    $(DATA_DIR)/SKK-JISYO.akaza \
-    $(WORK_DIR)/corpus-stats/_SUCCESS
-	@mkdir -p $(DATA_DIR)
-	@echo "TODO Phase 2-C: akaza-data learn-corpus --delta $(DELTA) \\"
-	@echo "  --may-epochs $(MAY_EPOCHS) --should-epochs $(SHOULD_EPOCHS) --must-epochs $(MUST_EPOCHS) \\"
-	@echo "  <may.txt> <should.txt> <must.txt> \\"
-	@echo "  $(WORK_DIR)/corpus-stats/stats-vibrato-unigram.wordcnt.trie \\"
-	@echo "  $(WORK_DIR)/corpus-stats/stats-vibrato-bigram.wordcnt.trie \\"
-	@echo "  $(DATA_DIR)/unigram.model $(DATA_DIR)/bigram.model \\"
-	@echo "  --src-skip-bigram $(WORK_DIR)/corpus-stats/stats-vibrato-skip-bigram.wordcnt.trie \\"
-	@echo "  --dst-skip-bigram $(DATA_DIR)/skip_bigram.model"
-	@false
+# learn-corpus: 7 positional 引数の順序固定 (may → should → must → src_unigram
+# → src_bigram → dst_unigram → dst_bigram)。skip_bigram は任意ペア。
+# bigram.model のターゲットが unigram/skip_bigram もまとめて生成する。
+$(DATA_DIR)/bigram.model: $(AKAZA_DATA) \
+                           $(DATA_DIR)/SKK-JISYO.akaza \
+                           training-corpus/must.txt \
+                           training-corpus/should.txt \
+                           training-corpus/may.txt \
+                           $(CORPUS_UNIGRAM_TRIE) \
+                           $(CORPUS_BIGRAM_TRIE) \
+                           $(CORPUS_SKIP_BIGRAM_TRIE)
+	mkdir -p $(DATA_DIR)
+	$(AKAZA_DATA) learn-corpus \
+	  --delta=$(DELTA) \
+	  --may-epochs=$(MAY_EPOCHS) \
+	  --should-epochs=$(SHOULD_EPOCHS) \
+	  --must-epochs=$(MUST_EPOCHS) \
+	  training-corpus/may.txt \
+	  training-corpus/should.txt \
+	  training-corpus/must.txt \
+	  $(CORPUS_UNIGRAM_TRIE) \
+	  $(CORPUS_BIGRAM_TRIE) \
+	  $(DATA_DIR)/unigram.model \
+	  $(DATA_DIR)/bigram.model \
+	  --src-skip-bigram=$(CORPUS_SKIP_BIGRAM_TRIE) \
+	  --dst-skip-bigram=$(DATA_DIR)/skip_bigram.model
+
+# unigram/skip_bigram は learn-corpus が同時生成するため bigram.model に依存
+$(DATA_DIR)/unigram.model $(DATA_DIR)/skip_bigram.model: $(DATA_DIR)/bigram.model
+
+# -------------------------------------------------------------------------
+# Verification (Phase 2-C 完了判定)
+# -------------------------------------------------------------------------
+
+# 疎通確認: 簡単な日本語フレーズを変換して、libakaza が生成モデルを読めて
+# 何かしらの surface が返ることを確認する (品質は不問、PROFILE=min なので)。
+#
+# 上流の akaza-data check は libakaza::config が XDG_DATA から
+# romkan/default.json を要求するため設定ファイル一式が必要。
+# nuko-ime では romkan は自前なので、代わりに spikes/libakaza-with-model の
+# Rust バイナリ (= LibakazaBackend を直接叩く) を疎通テストとして使う。
+verify: all
+	@echo "=== Phase 2-C 疎通確認 (spike: LibakazaBackend 直接呼び出し) ==="
+	cargo run --release \
+	  --manifest-path ../spikes/libakaza-with-model/Cargo.toml \
+	  -- $(abspath $(DATA_DIR))
 
 # -------------------------------------------------------------------------
 # Maintenance

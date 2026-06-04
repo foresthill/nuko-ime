@@ -6,7 +6,7 @@ for the libakaza-based conversion engine of nuko-ime. The generated files
 (SKK-JISYO.akaza, unigram.model, bigram.model, skip_bigram.model) are
 derivative works of the following data sources.
 
-The pipeline scripts (Makefile, scripts/, seed/) in this directory are
+The pipeline scripts (Makefile, scripts/, dict/) in this directory are
 licensed under MIT, consistent with the rest of nuko-ime.
 
 The generated model files distributed in GitHub Releases inherit the
@@ -78,7 +78,7 @@ License: MIT (pipeline scripts)
 The pipeline scripts of akaza-corpus-stats are MIT-licensed; the data
 they produce inherits the licenses of items 1-3 and 6 above.
 
-8. Seed Dictionary (seed/SKK-JISYO.akaza)
+8. Seed Dictionary (dict/SKK-JISYO.akaza)
 ------------------------------------------
 Source (Phase 2-B): derived from akaza-im/akaza@8a40428 default-model/dict/
                     https://github.com/akaza-im/akaza
@@ -86,3 +86,12 @@ License: MIT
 
 In Phase 2-E this seed will be replaced with nuko-ime's own entries
 maintained under the same MIT terms.
+
+9. Training Corpus (training-corpus/{must,should,may}.txt)
+-----------------------------------------------------------
+Source (Phase 2-C): derived from akaza-im/akaza@8a40428 default-model/training-corpus/
+                    https://github.com/akaza-im/akaza
+License: Public Domain (per upstream README.md)
+
+These small text corpora (~125 KB total) provide weak/medium/strong
+conversion hints for learn-corpus. nuko-ime may extend them in Phase 2-E.
