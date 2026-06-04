@@ -41,8 +41,18 @@
 ```bash
 git clone https://github.com/foresthill/nuko-ime.git
 cd nuko-ime
-cargo build --release
+
+# 静的辞書のみ (最小構成)
+./nuko-macos/scripts/install.sh
+
+# libakaza ベースの統計変換を有効化する場合 (推奨)
+# モデルファイルを ~/Library/Application Support/nuko-ime/akaza-model/ に
+# 配置する手順は model-pipeline/README.md を参照
+FEATURES=akaza ./nuko-macos/scripts/install.sh
 ```
+
+libakaza バックエンドの **モデル生成・配置手順** は
+[`model-pipeline/README.md`](model-pipeline/README.md) を参照してください。
 
 ## 使い方
 
