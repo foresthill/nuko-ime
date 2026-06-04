@@ -1,6 +1,7 @@
 use nuko_core::conversion::{CandidateList, ConversionContext};
 use nuko_core::prelude::*;
 use std::cell::RefCell;
+use std::time::Instant;
 
 // セッション共有の `ConversionEngine` を thread-local で保持する。
 //
@@ -90,6 +91,14 @@ pub struct InputState {
     pub is_composing: bool,
     /// 日本語入力モード（false = 英数直接入力モード）
     pub japanese_mode: bool,
+    /// 直近の activateServer 呼び出し時刻
+    ///
+    /// macOS のソース切替ショートカット (Ctrl+Space 等) で NukoIME が
+    /// 活性化された直後、押下中の Space キーが本 IME に漏れて
+    /// inputText: Some(" ") として届くことがある (実観測 2026-06-04)。
+    /// 活性化から短時間以内の Space は「ショートカットの漏れ」と判定して
+    /// 破棄する目的で記録する。
+    pub activated_at: Option<Instant>,
 }
 
 impl InputState {
@@ -101,6 +110,7 @@ impl InputState {
             context: ConversionContext::new(),
             is_composing: false,
             japanese_mode: true, // デフォルトは日本語入力モード
+            activated_at: None,
         }
     }
 
