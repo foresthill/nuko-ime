@@ -119,6 +119,11 @@ define_class!(
         fn activate_server(&self, _sender: Option<&AnyObject>) {
             debug_log("=== NukoIME activateServer called ===");
             info!("NukoIME activated");
+            // ソース切替ショートカットの Space キーが活性化直後に
+            // inputText として漏れることがあるため、活性化時刻を記録して
+            // input_text 側で短時間以内の Space を判定可能にする
+            self.ivars().state.borrow_mut().activated_at =
+                Some(std::time::Instant::now());
         }
 
         /// 入力メソッドが非アクティブになった
@@ -174,6 +179,8 @@ impl NukoInputController {
         // スペースキー:
         //   - 候補表示中 → 次候補へ巡回
         //   - 未確定文字列がある → 変換実行
+        //   - **活性化直後 (150ms 以内) の Space → ソース切替の Ctrl+Space
+        //     ショートカット由来の漏れと判定して破棄**
         //   - それ以外 → 全角スペース「　」(U+3000) を入力 (日本語モードの慣例)
         //
         // 半角スペースを入れるには英数モードに切り替えてから入力する。
@@ -182,6 +189,19 @@ impl NukoInputController {
         // 入ってしまうため、日本語モード中は常に消費する方針に変更
         // (Mozc / Google 日本語入力等の標準挙動)。
         if text == " " {
+            // 活性化直後の Space は破棄 (ソース切替の漏れ対策)
+            const ACTIVATION_GUARD_MS: u128 = 150;
+            if let Some(activated_at) = state.activated_at {
+                if activated_at.elapsed().as_millis() < ACTIVATION_GUARD_MS
+                    && state.candidates.is_none()
+                    && !state.is_composing
+                {
+                    state.activated_at = None; // 1 shot で消費
+                    debug_log("space: discard (activation guard, likely source-switch leak)");
+                    return Bool::YES;
+                }
+            }
+
             if state.candidates.is_some() {
                 if let Some(ref mut candidates) = state.candidates {
                     candidates.select_next();
