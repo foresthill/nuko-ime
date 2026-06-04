@@ -13,12 +13,21 @@ use crate::learning::LearningManager;
 
 /// libakaza 由来候補に上乗せする優先度ブースト。
 ///
-/// 静的辞書のスコアは概ね 0〜100 のレンジで、libakaza の cost_to_score は
-/// 大きな負値になりがち。Phase 1.2 では「libakaza が動いていれば最優先」という
-/// 単純な方針を取り、静的辞書を必ず上回るよう一律ブーストする。
-/// 厳密なキャリブレーションは Phase 1.3 で行う。
+/// 静的辞書のスコアは概ね -100〜100 のレンジ、libakaza の cost_to_score は
+/// 長文で大きな負値になる (実観測: 「きょうはいいてんき」 score=-8870)。
+/// libakaza が動いていれば最優先で表示するため、想定最悪値を上回る大きな
+/// ブーストを乗せる。BOOST=100_000 なら libakaza score=-50_000 の入力でも
+/// 静的辞書 (max 100) を必ず上回る。
+///
+/// 実機検証 (2026-06-04, PROFILE=min):
+/// - BOOST=1_000 では「わたしのなまえ」「きょうはいいてんき」がカタカナ候補
+///   より下に来てしまい、Space を 3〜4 回押すまで漢字変換が出なかった
+/// - BOOST=100_000 に引き上げて libakaza 候補が常に先頭に来るよう調整
+///
+/// Phase 1.3 で複数候補対応 (案 B) する際は、libakaza 出力内の相対順序は
+/// 元の cost で決まるため、本 BOOST は全体の oxford 順序のみに影響する。
 #[cfg(feature = "akaza")]
-const LIBAKAZA_PRIORITY_BOOST: i32 = 1_000;
+const LIBAKAZA_PRIORITY_BOOST: i32 = 100_000;
 
 /// 変換エンジン
 pub struct ConversionEngine {
