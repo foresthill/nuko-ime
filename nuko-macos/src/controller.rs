@@ -124,6 +124,7 @@ define_class!(
         /// 入力メソッドが非アクティブになった
         #[unsafe(method(deactivateServer:))]
         fn deactivate_server(&self, sender: Option<&AnyObject>) {
+            debug_log("=== NukoIME deactivateServer called ===");
             info!("NukoIME deactivated");
             let is_composing = self.ivars().state.borrow().is_composing;
             if is_composing {
@@ -173,7 +174,13 @@ impl NukoInputController {
         // スペースキー:
         //   - 候補表示中 → 次候補へ巡回
         //   - 未確定文字列がある → 変換実行
-        //   - それ以外 → パススルー (半角スペース入力)
+        //   - それ以外 → 全角スペース「　」(U+3000) を入力 (日本語モードの慣例)
+        //
+        // 半角スペースを入れるには英数モードに切り替えてから入力する。
+        // 旧実装は Bool::NO で host にパススルーしていたが、ソース切替の
+        // ショートカット (Ctrl+Space 等) で Space が漏れた時に意図しない半角が
+        // 入ってしまうため、日本語モード中は常に消費する方針に変更
+        // (Mozc / Google 日本語入力等の標準挙動)。
         if text == " " {
             if state.candidates.is_some() {
                 if let Some(ref mut candidates) = state.candidates {
@@ -192,9 +199,12 @@ impl NukoInputController {
                 drop(state);
                 self.do_convert(client);
                 return Bool::YES;
-            } else {
-                return Bool::NO;
             }
+            // 未確定状態: 全角スペースを直接挿入
+            drop(state);
+            debug_log("space: insert full-width space (no composition)");
+            Self::insert_text_on_client(client, "\u{3000}");
+            return Bool::YES;
         }
 
         // 候補選択中に文字を打ったら確定して新しい入力開始
