@@ -107,6 +107,15 @@ impl CandidateList {
         self.candidates.get(self.selected)
     }
 
+    /// 現在選択中のインデックスを取得
+    ///
+    /// プラットフォーム層 (IMK 候補ウィンドウ等) で
+    /// パネル内部の selected と本リストを同期させるために必要。
+    #[must_use]
+    pub fn selected_index(&self) -> usize {
+        self.selected
+    }
+
     /// 次の候補を選択
     pub fn select_next(&mut self) {
         if !self.candidates.is_empty() {

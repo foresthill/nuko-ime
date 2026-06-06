@@ -235,8 +235,10 @@ impl NukoInputController {
             }
 
             if state.candidates.is_some() {
+                let mut new_idx = None;
                 if let Some(ref mut candidates) = state.candidates {
                     candidates.select_next();
+                    new_idx = Some(candidates.selected_index());
                     let surface = candidates
                         .selected()
                         .map(|s| s.surface.clone())
@@ -244,6 +246,11 @@ impl NukoInputController {
                     debug_log(&format!("space: cycle to next candidate '{surface}'"));
                     drop(state);
                     Self::set_marked_text_on_client(client, &surface);
+                }
+                // パネル内部の青ハイライトも同期 (IMK の default routing が
+                // 効かない環境向けに明示的に呼ぶ)
+                if let Some(idx) = new_idx {
+                    Self::sync_panel_selection(idx);
                 }
                 return Bool::YES;
             }
@@ -257,6 +264,48 @@ impl NukoInputController {
             debug_log("space: insert full-width space (no composition)");
             Self::insert_text_on_client(client, "\u{3000}");
             return Bool::YES;
+        }
+
+        // 数字キー 1-9: 候補表示中なら該当 line の候補を確定する
+        // (一般的な日本語 IME の慣例。IMKCandidates のデフォルト selectionKeys と一致)
+        if state.candidates.is_some() && text.chars().count() == 1 {
+            if let Some(digit_char) = text.chars().next() {
+                if ('1'..='9').contains(&digit_char) {
+                    let line_idx = (digit_char as usize) - ('1' as usize);
+                    // borrow checker 回避: 学習に必要な情報を先に取り出してから
+                    // 別スコープで with_engine_mut を呼ぶ
+                    let selected: Option<Candidate> = {
+                        if let Some(candidates) = state.candidates.as_mut() {
+                            if line_idx < candidates.iter().count() {
+                                candidates.select(line_idx);
+                                candidates.selected().cloned()
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(selected) = selected {
+                        let ctx_snapshot = state.context.clone();
+                        with_engine_mut(|engine| {
+                            let _ = engine.commit(&selected, &ctx_snapshot);
+                        });
+                        state.context.push_prev_word(&selected.surface);
+                        let commit_text = selected.surface.clone();
+                        state.reset();
+                        drop(state);
+                        Self::hide_candidate_panel();
+                        Self::insert_text_on_client(client, &commit_text);
+                        debug_log(&format!(
+                            "digit-{digit_char}: committed line {line_idx} = '{commit_text}'"
+                        ));
+                        return Bool::YES;
+                    }
+                    // 数字 1-9 だが候補数を超えるなど → fallthrough して既存の
+                    // 「文字入力 = 確定 + 新規入力開始」パスへ
+                }
+            }
         }
 
         // 候補選択中に文字を打ったら確定して新しい入力開始
@@ -360,26 +409,36 @@ impl NukoInputController {
             Bool::YES
         } else if sel_name == move_down {
             // Down: 次候補
+            let mut new_idx = None;
             let mut state = self.ivars().state.borrow_mut();
             if let Some(ref mut candidates) = state.candidates {
                 candidates.select_next();
+                new_idx = Some(candidates.selected_index());
                 if let Some(selected) = candidates.selected() {
                     let surface = selected.surface.clone();
                     drop(state);
                     Self::set_marked_text_on_client(client, &surface);
                 }
             }
+            if let Some(idx) = new_idx {
+                Self::sync_panel_selection(idx);
+            }
             Bool::YES
         } else if sel_name == move_up {
             // Up: 前候補
+            let mut new_idx = None;
             let mut state = self.ivars().state.borrow_mut();
             if let Some(ref mut candidates) = state.candidates {
                 candidates.select_prev();
+                new_idx = Some(candidates.selected_index());
                 if let Some(selected) = candidates.selected() {
                     let surface = selected.surface.clone();
                     drop(state);
                     Self::set_marked_text_on_client(client, &surface);
                 }
+            }
+            if let Some(idx) = new_idx {
+                Self::sync_panel_selection(idx);
             }
             Bool::YES
         } else {
@@ -626,6 +685,33 @@ impl NukoInputController {
                         debug_log("hide_candidate_panel");
                         panel.hide();
                     }
+                }
+            }
+        });
+    }
+
+    /// パネル内部の青ハイライト位置を `state.candidates.selected` と同期する。
+    ///
+    /// 実機検証 (2026-06-06 PR #31 中) で、IMK のデフォルト routing が効かず
+    /// Space/矢印/数字キーが panel に届かない現象を確認した。我々の controller
+    /// が state を更新した後で、明示的に `selectCandidate` を呼んで青ハイライトを
+    /// 動かす必要がある。
+    ///
+    /// `line_number` (0-based) を `candidateIdentifierAtLineNumber:` で id に
+    /// 変換してから `selectCandidate:` する。id 取得に失敗 (NSNotFound) した
+    /// 場合は no-op。
+    fn sync_panel_selection(line_number: usize) {
+        with_candidates_panel(|panel| {
+            let Some(panel) = panel else { return };
+            unsafe {
+                if !panel.isVisible() {
+                    return;
+                }
+                let id = panel.candidateIdentifierAtLineNumber(line_number as isize);
+                // NSNotFound (= NSIntegerMax) は無効値
+                if id != isize::MAX {
+                    panel.selectCandidate(id);
+                    debug_log(&format!("sync_panel_selection: line={line_number} id={id}"));
                 }
             }
         });
