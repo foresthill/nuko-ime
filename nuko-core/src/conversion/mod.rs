@@ -6,7 +6,9 @@ pub mod backend;
 mod candidate;
 mod context;
 mod engine;
+mod segment;
 
 pub use candidate::{Candidate, CandidateList, CandidateSource};
 pub use context::ConversionContext;
 pub use engine::ConversionEngine;
+pub use segment::{Segment, SegmentedConversion};
