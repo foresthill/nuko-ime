@@ -11,15 +11,10 @@ use std::cell::RefCell;
 
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, Bool, NSObjectProtocol, Sel};
-use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
-use objc2_foundation::{NSArray, NSAttributedString, NSRange, NSString};
-use objc2_input_method_kit::{
-    kIMKLocateCandidatesBelowHint, kIMKSingleColumnScrollingCandidatePanel, IMKCandidates,
-    IMKInputController, IMKServer,
-};
+use objc2::{define_class, msg_send, DefinedClass};
+use objc2_foundation::{NSArray, NSRange, NSString};
+use objc2_input_method_kit::{IMKInputController, IMKServer};
 use tracing::{debug, error, info, warn};
-
-use nuko_core::conversion::Candidate;
 
 use crate::state::{with_engine, with_engine_mut, InputState};
 
@@ -48,21 +43,12 @@ fn debug_log(msg: &str) {
 
 pub struct NukoControllerIvars {
     state: RefCell<InputState>,
-    /// IMK 候補ウィンドウ (Phase 1.3 Step 2)
-    ///
-    /// `initWithServer:` が呼ばれた時点で `IMKServer` が渡されるので、
-    /// そこで `IMKCandidates` を構築して保持する。IMK callback はすべて
-    /// メインスレッドで dispatch されるため `RefCell` で十分。
-    /// パネル生成に失敗した場合 (= 何らかの IMK 初期化エラー) は `None` のまま
-    /// で起動し、候補リスト表示なしで動作させる (= 旧挙動互換)。
-    candidates_panel: RefCell<Option<Retained<IMKCandidates>>>,
 }
 
 impl Default for NukoControllerIvars {
     fn default() -> Self {
         Self {
             state: RefCell::new(InputState::new()),
-            candidates_panel: RefCell::new(None),
         }
     }
 }
@@ -95,34 +81,8 @@ define_class!(
             let this: Option<Retained<Self>> = unsafe {
                 msg_send![super(this), initWithServer: server, delegate: delegate, client: client]
             };
-            if let Some(this_ref) = &this {
+            if this.is_some() {
                 debug_log("initWithServer succeeded, ivars initialized");
-                // 候補ウィンドウ (IMKCandidates) を生成して保持。
-                // 失敗しても致命傷ではない (パネル無しでも変換は機能する) ため握る。
-                if let Some(server) = server {
-                    // IMK callback はメインスレッドで dispatch される。
-                    // unchecked で取得して unsafe ブロックを増やさない。
-                    let mtm = MainThreadMarker::new()
-                        .expect("initWithServer must be invoked on the main thread");
-                    let panel: Option<Retained<IMKCandidates>> = unsafe {
-                        IMKCandidates::initWithServer_panelType(
-                            IMKCandidates::alloc(mtm),
-                            Some(server),
-                            kIMKSingleColumnScrollingCandidatePanel as usize,
-                        )
-                    };
-                    if let Some(panel) = panel {
-                        // dismissesAutomatically = true (default) で、
-                        // Return キーで panel が閉じて candidateSelected: が呼ばれる。
-                        // 数字キー 1-9 は IMKCandidates のデフォルト selectionKeys。
-                        *this_ref.ivars().candidates_panel.borrow_mut() = Some(panel);
-                        debug_log("IMKCandidates panel created");
-                    } else {
-                        debug_log("IMKCandidates initWithServer:panelType: returned nil");
-                    }
-                } else {
-                    debug_log("initWithServer: server is nil, skipping panel creation");
-                }
             } else {
                 debug_log("initWithServer returned nil!");
             }
@@ -188,28 +148,6 @@ define_class!(
                     self.do_commit(client);
                 }
             }
-        }
-
-        /// 候補ウィンドウで選択中の候補が変わった時に IMK から呼ばれる
-        ///
-        /// パネル上で矢印キー / Space で navigate した時に発火する。
-        /// 確定ではなくプレビュー目的なので、state 側の選択インデックス更新と
-        /// marked text 更新のみ行う。
-        #[unsafe(method(candidateSelectionChanged:))]
-        fn candidate_selection_changed(
-            &self,
-            candidate_string: Option<&NSAttributedString>,
-        ) {
-            self._candidate_selection_changed_impl(candidate_string);
-        }
-
-        /// 候補ウィンドウで候補が最終確定された時に IMK から呼ばれる
-        ///
-        /// Return キー / 数字キー (1-9) で候補が選択された時に発火する。
-        /// パネルは既に閉じられた状態で呼ばれる契約。
-        #[unsafe(method(candidateSelected:))]
-        fn candidate_selected(&self, candidate_string: Option<&NSAttributedString>) {
-            self._candidate_selected_impl(candidate_string);
         }
     }
 );
@@ -308,7 +246,6 @@ impl NukoInputController {
 
             state.reset();
             drop(state);
-            self.hide_candidate_panel();
             Self::insert_text_on_client(client, &commit_text);
 
             // 新しい文字の入力を開始
@@ -506,14 +443,12 @@ impl NukoInputController {
                     state.candidates = Some(candidates);
                     drop(state);
                     Self::set_marked_text_on_client(client, &surface);
-                    self.show_candidate_panel();
                 } else {
                     debug_log("do_convert: no selected candidate, showing composition");
                     let display = state.display_text();
                     state.candidates = Some(candidates);
                     drop(state);
                     Self::set_marked_text_on_client(client, &display);
-                    self.show_candidate_panel();
                 }
             }
             Err(e) => {
@@ -558,8 +493,6 @@ impl NukoInputController {
         state.reset();
         drop(state);
 
-        self.hide_candidate_panel();
-
         if !commit_text.is_empty() {
             Self::insert_text_on_client(client, &commit_text);
         }
@@ -570,8 +503,6 @@ impl NukoInputController {
         let mut state = self.ivars().state.borrow_mut();
         state.reset();
         drop(state);
-
-        self.hide_candidate_panel();
 
         Self::insert_text_on_client(client, "");
     }
@@ -584,7 +515,6 @@ impl NukoInputController {
             state.candidates = None;
             let display = state.display_text();
             drop(state);
-            self.hide_candidate_panel();
             Self::set_marked_text_on_client(client, &display);
             return;
         }
@@ -620,135 +550,5 @@ impl NukoInputController {
         state.is_composing = false;
         drop(state);
         Self::insert_text_on_client(client, "");
-    }
-
-    // --- 候補ウィンドウ (IMKCandidates) -----------------------------------
-
-    /// 現在の `state.candidates` をパネルに反映し、表示する。
-    ///
-    /// パネルが未生成 (= init で失敗) や候補が空のときは何もしない。
-    fn show_candidate_panel(&self) {
-        let panel_ref = self.ivars().candidates_panel.borrow();
-        let Some(panel) = panel_ref.as_ref() else {
-            return;
-        };
-
-        let state = self.ivars().state.borrow();
-        let Some(candidates) = state.candidates.as_ref() else {
-            return;
-        };
-        if candidates.is_empty() {
-            return;
-        }
-
-        let ns_strings: Vec<Retained<NSString>> = candidates
-            .iter()
-            .map(|c| NSString::from_str(&c.surface))
-            .collect();
-        let array: Retained<NSArray<NSString>> = NSArray::from_retained_slice(&ns_strings);
-        // setCandidateData は `&NSArray` (要素型は any) を期待するので element type を消す
-        let array: Retained<NSArray> = unsafe { Retained::cast_unchecked(array) };
-
-        debug_log(&format!(
-            "show_candidate_panel: count={}",
-            candidates.iter().count()
-        ));
-
-        unsafe {
-            panel.setCandidateData(Some(&array));
-            panel.show(kIMKLocateCandidatesBelowHint as usize);
-        }
-    }
-
-    /// 候補ウィンドウを隠す (パネル未生成や非表示中なら no-op)
-    fn hide_candidate_panel(&self) {
-        if let Some(panel) = self.ivars().candidates_panel.borrow().as_ref() {
-            unsafe {
-                if panel.isVisible() {
-                    debug_log("hide_candidate_panel");
-                    panel.hide();
-                }
-            }
-        }
-    }
-
-    /// `candidateSelectionChanged:` の実装
-    ///
-    /// パネル上で navigate された候補をプレビューとして marked text に反映する。
-    /// 確定はしない。`state.candidates.selected` インデックスも同期して、
-    /// 既存の Space サイクル等の挙動と矛盾しないようにする。
-    fn _candidate_selection_changed_impl(&self, candidate_string: Option<&NSAttributedString>) {
-        let Some(attr) = candidate_string else {
-            return;
-        };
-        let surface = attr.string().to_string();
-        debug_log(&format!("candidateSelectionChanged: '{surface}'"));
-
-        let mut state = self.ivars().state.borrow_mut();
-        if let Some(candidates) = state.candidates.as_mut() {
-            // surface 一致する候補にインデックスを合わせる
-            let idx = candidates.iter().position(|c| c.surface == surface);
-            if let Some(idx) = idx {
-                candidates.select(idx);
-            }
-        }
-        // marked text 再描画は client ハンドルをここで持っていないため省略。
-        // IMK は通常 marked を保持したままパネル選択を更新するので問題ない。
-    }
-
-    /// `candidateSelected:` の実装
-    ///
-    /// パネル上で最終確定された候補を IMK クライアントに確定挿入する。
-    /// この時点でパネルは閉じられている (dismissesAutomatically=true) ので
-    /// hide_candidate_panel は不要。client ハンドルがメソッド引数で渡されない
-    /// ため、controller の `client` プロパティ (IMK 経由) を msg_send で取得する。
-    fn _candidate_selected_impl(&self, candidate_string: Option<&NSAttributedString>) {
-        let Some(attr) = candidate_string else {
-            return;
-        };
-        let surface = attr.string().to_string();
-        debug_log(&format!("candidateSelected: '{surface}'"));
-
-        // IMKInputController が保持する現在の client を取得 (super 経由)
-        let client_ptr: *mut AnyObject = unsafe { msg_send![self, client] };
-        if client_ptr.is_null() {
-            warn!("candidateSelected: client is nil, skipping insert");
-            return;
-        }
-        let client: &AnyObject = unsafe { &*client_ptr };
-
-        // borrow checker 回避: 学習に必要な情報 (選択した Candidate と
-        // context) を先に取り出してから with_engine_mut を呼ぶ。
-        let selected: Option<Candidate> = {
-            let mut state = self.ivars().state.borrow_mut();
-            if let Some(candidates) = state.candidates.as_mut() {
-                let idx = candidates.iter().position(|c| c.surface == surface);
-                if let Some(idx) = idx {
-                    candidates.select(idx);
-                    candidates.selected().cloned()
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-
-        if let Some(ref selected) = selected {
-            let ctx_snapshot = self.ivars().state.borrow().context.clone();
-            with_engine_mut(|engine| {
-                if let Err(e) = engine.commit(selected, &ctx_snapshot) {
-                    error!("学習記録エラー (panel): {e}");
-                }
-            });
-            self.ivars()
-                .state
-                .borrow_mut()
-                .context
-                .push_prev_word(&selected.surface);
-        }
-
-        self.ivars().state.borrow_mut().reset();
-        Self::insert_text_on_client(client, &surface);
     }
 }
