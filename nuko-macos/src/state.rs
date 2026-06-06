@@ -1,69 +1,47 @@
 use nuko_core::conversion::{CandidateList, ConversionContext};
 use nuko_core::prelude::*;
-use objc2::rc::Retained;
-use objc2::{MainThreadMarker, MainThreadOnly};
-use objc2_input_method_kit::{kIMKSingleColumnScrollingCandidatePanel, IMKCandidates, IMKServer};
+use objc2::MainThreadMarker;
 use std::cell::RefCell;
 use std::time::Instant;
 
-// IMKCandidates 候補ウィンドウを **アプリ全体で 1 つ** だけ保持する。
+use crate::candidate_panel::CustomCandidatePanel;
+
+// 自前候補ウィンドウ (NSPanel ベース) を **アプリ全体で 1 つ** だけ保持する。
 //
-// なぜ thread_local singleton か:
-// `IMKInputController` は IMK によってテキスト入力セッションごとに新規生成される
-// 可能性がある (ブラウザのタブ切替・別アプリへのフォーカス移動など)。
-// per-controller で `IMKCandidates` を作ると以下の既知問題に当たる:
+// 経緯: PR #29 / #31 / #32 で IMKCandidates を試したが、Apple 公式 IMK は
+// 「ancient rubbish」(Shiki Suen) と評される程度の framework バグを抱えており、
+// panel が出ても event routing / 青ハイライト同期に難ありで実用に至らず。
+// C 案 = vChewing スタイルの自前 NSPanel + NSTextField 描画に移行した
+// (PR #33 = `feat/custom-candidate-panel`)。
 //
-// - 複数 panel が同時に存在し IMK の session 管理と干渉する
-// - 「Different IMKInputController session instances might interfere with each other」
-//   (Shiki Suen, "macOS Input Method Development Guidelines for 2026" — vChewing 作者)
-// - 実機検証 (PR #29, revert #30 済み) で
-//   「panel.show() 直後に別の `initWithServer:` が発火し state が空のまま」
-//   という現象を観測
-//
-// 対策として、panel は **最初に IMKServer が利用可能になった時点で 1 度だけ生成** し、
-// 以降の controller インスタンスはすべて同じ panel を共有する。
-// IMK callback はすべてメインスレッドで dispatch されるため `RefCell` で十分。
-//
-// `IMKCandidates` 自体は `NSResponder` 系で `MainThreadOnly` のため、
-// `MainThreadMarker` が要求される。`ensure_candidates_panel` のシグネチャで強制する。
+// `CustomCandidatePanel` は `NSPanel` / `NSTextField` (= `NSResponder` 系)
+// を内部に持つため `MainThreadMarker` が必要。`ensure_custom_panel` の
+// シグネチャで強制する。
 thread_local! {
-    static CANDIDATES_PANEL: RefCell<Option<Retained<IMKCandidates>>> =
+    static CUSTOM_PANEL: RefCell<Option<CustomCandidatePanel>> =
         const { RefCell::new(None) };
 }
 
-/// 候補ウィンドウ用 panel を **必要に応じて** 生成する。
-///
-/// 既に生成済みなら何もしない。`initWithServer:panelType:` が `nil` を
-/// 返した場合 (= IMK 側の初期化失敗) も握りつぶし、`None` のままで起動を続ける。
-pub fn ensure_candidates_panel(server: &IMKServer, mtm: MainThreadMarker) {
-    CANDIDATES_PANEL.with(|cell| {
+/// 自前候補ウィンドウを **必要に応じて** 生成する (まだ未生成なら 1 度だけ)
+pub fn ensure_custom_panel(mtm: MainThreadMarker) {
+    CUSTOM_PANEL.with(|cell| {
         if cell.borrow().is_some() {
             return;
         }
-        let panel: Option<Retained<IMKCandidates>> = unsafe {
-            IMKCandidates::initWithServer_panelType(
-                IMKCandidates::alloc(mtm),
-                Some(server),
-                kIMKSingleColumnScrollingCandidatePanel as usize,
-            )
-        };
-        if let Some(panel) = panel {
-            tracing::info!("IMKCandidates panel created (singleton)");
-            *cell.borrow_mut() = Some(panel);
-        } else {
-            tracing::warn!("IMKCandidates::initWithServer:panelType: returned nil");
-        }
+        let panel = CustomCandidatePanel::new(mtm);
+        tracing::info!("CustomCandidatePanel created (singleton)");
+        *cell.borrow_mut() = Some(panel);
     });
 }
 
-/// 候補ウィンドウへのアクセサ。`f` には panel への参照が渡される (未生成時は `None`)。
-pub fn with_candidates_panel<F, R>(f: F) -> R
+/// 自前候補ウィンドウへのアクセサ。`f` には panel への参照が渡される (未生成時は `None`)
+pub fn with_custom_panel<F, R>(f: F) -> R
 where
-    F: FnOnce(Option<&IMKCandidates>) -> R,
+    F: FnOnce(Option<&CustomCandidatePanel>) -> R,
 {
-    CANDIDATES_PANEL.with(|cell| {
+    CUSTOM_PANEL.with(|cell| {
         let borrow = cell.borrow();
-        f(borrow.as_deref())
+        f(borrow.as_ref())
     })
 }
 
