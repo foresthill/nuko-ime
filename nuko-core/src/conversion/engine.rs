@@ -5,6 +5,8 @@ use std::path::Path;
 
 #[cfg(feature = "akaza")]
 use super::backend::LibakazaBackend;
+#[cfg(feature = "akaza")]
+use super::SegmentedConversion;
 use super::{Candidate, CandidateList, CandidateSource, ConversionContext};
 use crate::dictionary::DictionaryManager;
 use crate::error::{NukoError, Result};
@@ -173,6 +175,36 @@ impl ConversionEngine {
         Ok(candidates)
     }
 
+    /// 文節別の変換結果を返す (libakaza バックエンド有効時のみ)
+    ///
+    /// Phase 1.3 Step 2 以降の候補ウィンドウ・文節境界編集の上流 API。
+    /// 既存の `convert()` が返す flat な `CandidateList` とは別経路で、
+    /// 文節ごとの全候補をそのまま保持した `SegmentedConversion` を返す。
+    ///
+    /// # 戻り値
+    ///
+    /// - `Ok(None)` — `akaza` feature 無効、libakaza モデル未 load、または空入力
+    /// - `Ok(Some(SegmentedConversion))` — 文節列が得られた (空でないことを保証)
+    /// - `Err(_)` — libakaza が変換中にエラーを返した (呼び出し側は静的辞書フォールバックを検討)
+    ///
+    /// 静的辞書フォールバックはこの API では行わない。プラットフォーム層は
+    /// `None` を受け取った場合に既存の `convert()` ベースのフローへ切り替えること。
+    #[cfg(feature = "akaza")]
+    pub fn convert_segmented(&self, reading: &str) -> Result<Option<SegmentedConversion>> {
+        if reading.is_empty() {
+            return Ok(None);
+        }
+        let Some(backend) = &self.libakaza else {
+            return Ok(None);
+        };
+        let segmented = backend.convert_segmented(reading)?;
+        if segmented.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(segmented))
+        }
+    }
+
     /// 予測変換（入力途中で候補を提示）
     ///
     /// # 引数
@@ -265,6 +297,26 @@ mod tests {
             !engine.has_libakaza(),
             "モデル不在時は libakaza バックエンドを保持しない"
         );
+    }
+
+    #[cfg(feature = "akaza")]
+    #[test]
+    fn convert_segmented_returns_none_when_libakaza_unavailable() {
+        // libakaza load 失敗時は convert_segmented は静的辞書を一切触らず None を返す
+        let engine = ConversionEngine::with_libakaza(
+            "/tmp/nuko-ime-test-no-model-for-segmented-DOES-NOT-EXIST",
+        )
+        .unwrap();
+        let result = engine.convert_segmented("にほん").unwrap();
+        assert!(result.is_none(), "libakaza 不在時は None を返すべき");
+    }
+
+    #[cfg(feature = "akaza")]
+    #[test]
+    fn convert_segmented_returns_none_for_empty_input() {
+        let engine = ConversionEngine::new().unwrap();
+        let result = engine.convert_segmented("").unwrap();
+        assert!(result.is_none(), "空入力は None");
     }
 
     #[cfg(feature = "akaza")]

@@ -33,7 +33,7 @@ use libakaza::lm::system_bigram::MarisaSystemBigramLM;
 use libakaza::lm::system_unigram_lm::MarisaSystemUnigramLM;
 use libakaza::user_side_data::user_data::UserData;
 
-use crate::conversion::{Candidate, CandidateSource};
+use crate::conversion::{Candidate, CandidateSource, Segment, SegmentedConversion};
 use crate::error::{NukoError, Result};
 
 type Engine =
@@ -131,6 +131,55 @@ impl LibakazaBackend {
         Ok(vec![Candidate::new(surface, reading)
             .with_score(score)
             .with_source(CandidateSource::System)])
+    }
+
+    /// 読み (ひらがな) を文節別に変換し、`SegmentedConversion` を返す。
+    ///
+    /// Phase 1.3 Step 1 で追加 (案 B = 文節別 API)。
+    /// 文節ごとに libakaza の全候補を保持するため、候補ウィンドウ表示
+    /// (Step 2) や文節境界の編集 (Step 3) の基盤となる。
+    ///
+    /// 既存の [`convert`](Self::convert) は最良パスを 1 候補に flatten する
+    /// 案 C のままで残しているので、`ConversionEngine::convert()`
+    /// の最優先候補挿入は引き続き利用できる。
+    ///
+    /// # 戻り値
+    ///
+    /// - 入力が空 → 空の `SegmentedConversion`
+    /// - libakaza が空文節列を返した → 空の `SegmentedConversion`
+    /// - 正常 → 文節ごとに candidates が cost 昇順で並んだ `SegmentedConversion`
+    pub fn convert_segmented(&self, reading: &str) -> Result<SegmentedConversion> {
+        if reading.is_empty() {
+            return Ok(SegmentedConversion::default());
+        }
+
+        let segments = self.engine.convert(reading, None).map_err(|e| {
+            NukoError::Conversion(format!("libakaza 変換に失敗 (reading={reading}): {e}"))
+        })?;
+
+        if segments.is_empty() {
+            return Ok(SegmentedConversion::default());
+        }
+
+        let mut out: Vec<Segment> = Vec::with_capacity(segments.len());
+        for seg_candidates in segments {
+            if seg_candidates.is_empty() {
+                continue;
+            }
+            // 文節の読みは候補ごとに一致する想定だが、念のため先頭候補の yomi を採用
+            let yomi = seg_candidates[0].yomi.clone();
+            let candidates: Vec<Candidate> = seg_candidates
+                .iter()
+                .map(|c| {
+                    Candidate::new(c.surface_with_dynamic(), &c.yomi)
+                        .with_score(cost_to_score(c.cost))
+                        .with_source(CandidateSource::System)
+                })
+                .collect();
+            out.push(Segment::new(yomi, candidates));
+        }
+
+        Ok(SegmentedConversion::new(out))
     }
 
     /// モデルディレクトリへの参照
