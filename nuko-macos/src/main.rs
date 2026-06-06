@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 
+mod candidate_panel;
 mod controller;
 mod state;
 
