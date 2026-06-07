@@ -96,88 +96,58 @@ impl LibakazaBackend {
 
     /// 読み (ひらがな) を変換し、候補リストを返す。
     ///
-    /// ## 候補の構成 (2026-06-07 改訂)
+    /// ## 候補の構成 (2026-06-07 v3 改訂 / Phase 1.3 Step 2b)
     ///
-    /// 1. **最良パス連結候補** (= 各文節の先頭候補を連結した 1 文字列) を score 最高で
-    /// 2. **文節 0 の上位 N 候補** (= 「し」のような単一文節入力で複数漢字を出すため)
-    ///    を 2 番目以降に追加。score は先頭候補からの相対差で降順に並ぶ
+    /// libakaza の **k-best Viterbi** (`convert_k_best`) で**上位 k 通りの読み解き**を
+    /// 取得し、各 path の文節先頭候補を連結したものを順に候補リスト化する。
     ///
-    /// 旧仕様 (Phase 1.2 案 C) では最良パス 1 候補のみ返していたが、
-    /// 実機検証 (2026-06-07) で「し → 四 だけしか出ない」「同読みの別漢字
-    /// (詩 / 市 / 氏 ...) が選べない」というユーザー報告があったため、
-    /// 文節 0 の全候補を出すよう拡張した。
+    /// 旧仕様 (= 最良パス 1 件 + 単一文節時のみ文節 0 拡張) と比較:
+    /// - 単一文節 「し」: 旧と同等 (path 1=「四」, path 2=「詩」, ... の効果)
+    /// - 複数文節 「わたしのなまえ」: 旧は 1 件のみ、新は「私の名前」「渡しの名前」等の
+    ///   **文全体での代替** が複数出る (Phase 1.3 Step 2b の本命機能)
     ///
-    /// 複数文節入力 (例: 「わたしのなまえ」) では、文節 0 (= 「わたし」) の
-    /// 複数候補は出るが、文節 1〜N の代替候補は出ない。これは Phase 1.3 Step 3
-    /// (文節境界編集 UI) で扱う想定。
-    ///
-    /// `MAX_FIRST_SEGMENT_CANDIDATES` で「文節 0 から取り出す最大候補数」を制限する。
+    /// 各 path の score は `KBestPath::cost` を反転したもの。dedup は連結 surface で。
     pub fn convert(&self, reading: &str) -> Result<Vec<Candidate>> {
-        // 文節 0 から最大このくらいまで候補を取り出す。多すぎても Space サイクル
-        // 時にユーザーが疲れるので妥当な上限。
-        const MAX_FIRST_SEGMENT_CANDIDATES: usize = 9;
+        // k-best で取り出す上位 path 数の上限。Space サイクル / 数字 1-9 の
+        // 範囲を考えると 9 が妥当。
+        const K_BEST_PATHS: usize = 9;
 
         if reading.is_empty() {
             return Ok(Vec::new());
         }
 
-        let segments = self.engine.convert(reading, None).map_err(|e| {
-            NukoError::Conversion(format!("libakaza 変換に失敗 (reading={reading}): {e}"))
-        })?;
+        let paths = self
+            .engine
+            .convert_k_best(reading, None, K_BEST_PATHS)
+            .map_err(|e| {
+                NukoError::Conversion(format!(
+                    "libakaza convert_k_best 失敗 (reading={reading}): {e}"
+                ))
+            })?;
 
-        if segments.is_empty() {
+        if paths.is_empty() {
             return Ok(Vec::new());
         }
 
         let mut out: Vec<Candidate> = Vec::new();
         let mut seen_surfaces: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        // 1. 最良パス: 各文節の先頭候補を連結した 1 文字列を最優先で
-        let best_surface: String = segments
-            .iter()
-            .filter_map(|seg| seg.first().map(|c| c.surface_with_dynamic()))
-            .collect();
-        if !best_surface.is_empty() {
-            let total_cost: f32 = segments
+        for path in paths {
+            // 各文節の先頭候補を連結した 1 文字列 = この path の表す変換結果
+            let surface: String = path
+                .segments
                 .iter()
-                .filter_map(|seg| seg.first().map(|c| c.cost))
-                .sum();
-            let score = cost_to_score(total_cost);
-            seen_surfaces.insert(best_surface.clone());
+                .filter_map(|seg| seg.first().map(|c| c.surface_with_dynamic()))
+                .collect();
+            if surface.is_empty() || seen_surfaces.contains(&surface) {
+                continue;
+            }
+            seen_surfaces.insert(surface.clone());
             out.push(
-                Candidate::new(best_surface, reading)
-                    .with_score(score)
+                Candidate::new(surface, reading)
+                    .with_score(cost_to_score(path.cost))
                     .with_source(CandidateSource::System),
             );
-        }
-
-        // 2. **単一文節入力時のみ**、文節 0 の上位 N 候補を 2 番目以降に追加。
-        //
-        //    複数文節入力 (例: わたしのなまえ = 「私の名前」) で文節 0 の代替
-        //    候補だけ出すと「渡し」「ワタシ」のような partial が並んで混乱する
-        //    (1 文節分しか含まないので何の入力に対する代替か不明)。
-        //    完全な多文節候補展開は Phase 1.3 Step 3 (文節境界編集) で。
-        //
-        //    単一文節 (例: 「し」「にほん」「かんじ」) では partial の心配はないので
-        //    libakaza が持つ漢字候補をすべて Space サイクルで巡回可能にする。
-        if segments.len() == 1 {
-            if let Some(first_seg) = segments.first() {
-                for (i, c) in first_seg.iter().enumerate() {
-                    if i >= MAX_FIRST_SEGMENT_CANDIDATES {
-                        break;
-                    }
-                    let surface = c.surface_with_dynamic();
-                    if surface.is_empty() || seen_surfaces.contains(&surface) {
-                        continue;
-                    }
-                    seen_surfaces.insert(surface.clone());
-                    out.push(
-                        Candidate::new(surface, reading)
-                            .with_score(cost_to_score(c.cost))
-                            .with_source(CandidateSource::System),
-                    );
-                }
-            }
         }
 
         Ok(out)
