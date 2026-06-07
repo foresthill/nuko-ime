@@ -94,11 +94,29 @@ impl LibakazaBackend {
         Ok(Self { engine, model_dir })
     }
 
-    /// 読み (ひらがな) を変換し、最良パスを連結した 1 候補を返す。
+    /// 読み (ひらがな) を変換し、候補リストを返す。
     ///
-    /// Phase 1.2 のスコープでは「最良パスを単純連結 → 1 候補」とする (案 C)。
-    /// 文節別候補や複数候補は Phase 1.3 で対応する。
+    /// ## 候補の構成 (2026-06-07 改訂)
+    ///
+    /// 1. **最良パス連結候補** (= 各文節の先頭候補を連結した 1 文字列) を score 最高で
+    /// 2. **文節 0 の上位 N 候補** (= 「し」のような単一文節入力で複数漢字を出すため)
+    ///    を 2 番目以降に追加。score は先頭候補からの相対差で降順に並ぶ
+    ///
+    /// 旧仕様 (Phase 1.2 案 C) では最良パス 1 候補のみ返していたが、
+    /// 実機検証 (2026-06-07) で「し → 四 だけしか出ない」「同読みの別漢字
+    /// (詩 / 市 / 氏 ...) が選べない」というユーザー報告があったため、
+    /// 文節 0 の全候補を出すよう拡張した。
+    ///
+    /// 複数文節入力 (例: 「わたしのなまえ」) では、文節 0 (= 「わたし」) の
+    /// 複数候補は出るが、文節 1〜N の代替候補は出ない。これは Phase 1.3 Step 3
+    /// (文節境界編集 UI) で扱う想定。
+    ///
+    /// `MAX_FIRST_SEGMENT_CANDIDATES` で「文節 0 から取り出す最大候補数」を制限する。
     pub fn convert(&self, reading: &str) -> Result<Vec<Candidate>> {
+        // 文節 0 から最大このくらいまで候補を取り出す。多すぎても Space サイクル
+        // 時にユーザーが疲れるので妥当な上限。
+        const MAX_FIRST_SEGMENT_CANDIDATES: usize = 9;
+
         if reading.is_empty() {
             return Ok(Vec::new());
         }
@@ -111,26 +129,58 @@ impl LibakazaBackend {
             return Ok(Vec::new());
         }
 
-        // 最良パス: 各文節の先頭候補 (= cost 最小) を連結
-        let surface: String = segments
+        let mut out: Vec<Candidate> = Vec::new();
+        let mut seen_surfaces: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // 1. 最良パス: 各文節の先頭候補を連結した 1 文字列を最優先で
+        let best_surface: String = segments
             .iter()
             .filter_map(|seg| seg.first().map(|c| c.surface_with_dynamic()))
             .collect();
-
-        if surface.is_empty() {
-            return Ok(Vec::new());
+        if !best_surface.is_empty() {
+            let total_cost: f32 = segments
+                .iter()
+                .filter_map(|seg| seg.first().map(|c| c.cost))
+                .sum();
+            let score = cost_to_score(total_cost);
+            seen_surfaces.insert(best_surface.clone());
+            out.push(
+                Candidate::new(best_surface, reading)
+                    .with_score(score)
+                    .with_source(CandidateSource::System),
+            );
         }
 
-        // libakaza の cost: f32 (低=良) → nuko-core の score: i32 (高=良) へ反転
-        let total_cost: f32 = segments
-            .iter()
-            .filter_map(|seg| seg.first().map(|c| c.cost))
-            .sum();
-        let score = cost_to_score(total_cost);
+        // 2. **単一文節入力時のみ**、文節 0 の上位 N 候補を 2 番目以降に追加。
+        //
+        //    複数文節入力 (例: わたしのなまえ = 「私の名前」) で文節 0 の代替
+        //    候補だけ出すと「渡し」「ワタシ」のような partial が並んで混乱する
+        //    (1 文節分しか含まないので何の入力に対する代替か不明)。
+        //    完全な多文節候補展開は Phase 1.3 Step 3 (文節境界編集) で。
+        //
+        //    単一文節 (例: 「し」「にほん」「かんじ」) では partial の心配はないので
+        //    libakaza が持つ漢字候補をすべて Space サイクルで巡回可能にする。
+        if segments.len() == 1 {
+            if let Some(first_seg) = segments.first() {
+                for (i, c) in first_seg.iter().enumerate() {
+                    if i >= MAX_FIRST_SEGMENT_CANDIDATES {
+                        break;
+                    }
+                    let surface = c.surface_with_dynamic();
+                    if surface.is_empty() || seen_surfaces.contains(&surface) {
+                        continue;
+                    }
+                    seen_surfaces.insert(surface.clone());
+                    out.push(
+                        Candidate::new(surface, reading)
+                            .with_score(cost_to_score(c.cost))
+                            .with_source(CandidateSource::System),
+                    );
+                }
+            }
+        }
 
-        Ok(vec![Candidate::new(surface, reading)
-            .with_score(score)
-            .with_source(CandidateSource::System)])
+        Ok(out)
     }
 
     /// 読み (ひらがな) を文節別に変換し、`SegmentedConversion` を返す。
