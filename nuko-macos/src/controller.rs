@@ -13,7 +13,7 @@ use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, Bool, NSObjectProtocol, Sel};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker};
 use objc2_app_kit::NSScreen;
-use objc2_foundation::{NSArray, NSPoint, NSRange, NSRect, NSString};
+use objc2_foundation::{NSArray, NSPoint, NSRange, NSString};
 use objc2_input_method_kit::{IMKInputController, IMKServer};
 use tracing::{debug, error, info, warn};
 
@@ -743,78 +743,50 @@ impl NukoInputController {
         });
     }
 
-    /// 現在のキャレット (= marked text 末尾) の screen 座標を取得する。
+    /// パネル表示位置を返す。
     ///
-    /// 実機検証 (2026-06-07 PR #34 後) で `firstRectForCharacterRange:NSNotFound, 0`
-    /// が `(0,0,0,0)` ないし `origin=(0,0)` を返すクライアントが存在することが
-    /// 判明した。その場合パネルがスクリーン左下隅に固定され見えなくなるため、
-    /// 多段フォールバックする:
+    /// ## 経緯
     ///
-    /// 1. `range = {NSNotFound, 0}` (現在の挿入点)
-    /// 2. それが bogus (origin=0,0) なら `range = {0, 0}` を試す
-    /// 3. それも bogus ならメインスクリーンの中央付近を使う (見えないよりマシ)
-    fn caret_screen_point(client: &AnyObject) -> NSPoint {
-        // 候補 1: NSNotFound range
-        let rect1 = Self::query_first_rect(client, NS_NOT_FOUND);
-        debug_log(&format!(
-            "caret_screen_point: rect1 origin=({:.1},{:.1}) size=({:.1},{:.1})",
-            rect1.origin.x, rect1.origin.y, rect1.size.width, rect1.size.height
-        ));
-        if !Self::is_bogus_rect(rect1) {
-            return NSPoint::new(rect1.origin.x, rect1.origin.y);
-        }
-
-        // 候補 2: {0, 0} range
-        let rect2 = Self::query_first_rect(client, 0);
-        debug_log(&format!(
-            "caret_screen_point: rect2 origin=({:.1},{:.1}) size=({:.1},{:.1})",
-            rect2.origin.x, rect2.origin.y, rect2.size.width, rect2.size.height
-        ));
-        if !Self::is_bogus_rect(rect2) {
-            return NSPoint::new(rect2.origin.x, rect2.origin.y);
-        }
-
-        // 候補 3: メインスクリーンの中央付近 (= 見えないより 100 倍マシ)
+    /// PR #34 / #36 で `firstRectForCharacterRange:actualRange:` 経由の
+    /// 「カーソル直下」配置を試したが、実機の `/tmp/nuko-ime-debug.log` で
+    /// `rect1 origin=(0.0,0.0) size=(0.0,0.0)` のあと bogus 判定後の
+    /// `rect2` ログも `screen center fallback` ログも出ず、pos=(0,0) のまま
+    /// パネルが画面左下隅に張り付く現象が継続した。
+    /// (推定: msg_send! 経由の NSRect 戻り値 ABI 問題 or
+    /// `is_bogus_rect` がインライン化されて期待動作と異なる。要 root cause 解析。)
+    ///
+    /// ## 暫定方針 (Phase 1.3 Step 2 v3.2)
+    ///
+    /// 「先へ先へ」優先で、まず **常にスクリーン中央付近にパネルを出して** 表示
+    /// 自体を成立させる。カーソル追随は別途別 API
+    /// (`NSEvent::mouseLocation` や `attributesForCharacterIndex:` 等) を試す
+    /// 別 PR で復活させる。
+    ///
+    /// `client` 引数は将来の caret 追従用に残す (現状は未使用)。
+    fn caret_screen_point(_client: &AnyObject) -> NSPoint {
         let fallback = Self::screen_center_fallback();
         debug_log(&format!(
-            "caret_screen_point: using screen center fallback ({:.1},{:.1})",
+            "caret_screen_point: forcing screen center fallback ({:.1},{:.1})",
             fallback.x, fallback.y
         ));
         fallback
     }
 
-    /// `firstRectForCharacterRange:actualRange:` を ObjC msg_send 経由で呼ぶ
-    fn query_first_rect(client: &AnyObject, location: usize) -> NSRect {
-        let range = NSRange::new(location, 0);
-        let mut actual_range = NSRange::new(0, 0);
-        unsafe {
-            msg_send![
-                client,
-                firstRectForCharacterRange: range,
-                actualRange: &mut actual_range as *mut NSRange,
-            ]
-        }
-    }
-
-    /// rect が信頼できないか (origin (0,0) または size 完全 0)
-    fn is_bogus_rect(rect: NSRect) -> bool {
-        // origin が (0,0) は spec 上は valid だが、実機の text input client が
-        // 「該当 rect 無し」シグナルとして使うことが多い
-        (rect.origin.x == 0.0 && rect.origin.y == 0.0)
-            || (rect.size.width == 0.0 && rect.size.height == 0.0)
-    }
-
-    /// メインスクリーンの中央付近 (top-left 座標、y-up)
+    /// メインスクリーンの上 2/3 付近 (top-left 座標、y-up)
+    ///
+    /// 中央真ん中だと textfield と重なって入力中の見栄えが悪いので、
+    /// 「上 2/3 (= 画面の上から 1/3 のあたり) 中央寄り」 を採用。
     fn screen_center_fallback() -> NSPoint {
         let mtm =
             MainThreadMarker::new().expect("controller callbacks must run on the main thread");
         if let Some(screen) = NSScreen::mainScreen(mtm) {
             let frame = screen.visibleFrame();
+            // x: 横中央から panel 幅 (DEFAULT_WIDTH=280) の半分だけ左へ
             let x = frame.origin.x + frame.size.width / 2.0 - 140.0;
+            // y: 画面下から 2/3 の位置 (= 上 1/3 のところ)
             let y = frame.origin.y + frame.size.height * 2.0 / 3.0;
             NSPoint::new(x, y)
         } else {
-            // 最終手段
             NSPoint::new(400.0, 400.0)
         }
     }
