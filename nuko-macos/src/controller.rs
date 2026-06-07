@@ -285,6 +285,45 @@ impl NukoInputController {
             }
         }
 
+        // 数字 0-9 は IME 変換対象外。
+        //
+        // 旧挙動 (バグ): 数字を romaji.input に渡していたため、buffer に "1"
+        // が滞留して "1tu" → buffer="1tu" → flush で composition に "1tu" 注入
+        // → engine.convert("1tu") で意味不明な変換が出ていた
+        // (ユーザー報告 2026-06-07: 「1tu」と打ちたいのに「統治体のに」になる)。
+        //
+        // 修正: 候補表示なし & 単一の半角数字なら、
+        //   - 現在の composition があれば flush + 確定して insert
+        //   - そのあと数字を直接 insertText でホストに渡す
+        // 一般的な日本語 IME (Google 日本語入力 / ATOK / ことえり) と同じ挙動。
+        if state.candidates.is_none() && text.chars().count() == 1 {
+            if let Some(ch) = text.chars().next() {
+                if ch.is_ascii_digit() {
+                    let mut commit_text = String::new();
+                    if state.is_composing || !state.romaji.buffer().is_empty() {
+                        let remaining = state.romaji.flush();
+                        if !remaining.is_empty() {
+                            state.composition.push_str(&remaining);
+                        }
+                        commit_text = state.composition.clone();
+                        if !commit_text.is_empty() {
+                            state.context.push_prev_word(&commit_text);
+                        }
+                        state.reset();
+                    }
+                    drop(state);
+                    if !commit_text.is_empty() {
+                        Self::insert_text_on_client(client, &commit_text);
+                    }
+                    Self::insert_text_on_client(client, &text);
+                    debug_log(&format!(
+                        "digit-passthrough: prev_commit='{commit_text}' digit='{text}'"
+                    ));
+                    return Bool::YES;
+                }
+            }
+        }
+
         // 候補選択中に文字を打ったら確定して新しい入力開始
         if state.candidates.is_some() {
             let commit_text = state
