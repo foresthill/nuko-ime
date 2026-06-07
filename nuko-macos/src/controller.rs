@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, Bool, NSObjectProtocol, Sel};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker};
+use objc2_app_kit::NSScreen;
 use objc2_foundation::{NSArray, NSPoint, NSRange, NSRect, NSString};
 use objc2_input_method_kit::{IMKInputController, IMKServer};
 use tracing::{debug, error, info, warn};
@@ -744,24 +745,77 @@ impl NukoInputController {
 
     /// 現在のキャレット (= marked text 末尾) の screen 座標を取得する。
     ///
-    /// `firstRectForCharacterRange:actualRange:` を IMK client に投げて NSRect を得る。
-    /// 失敗時 (zero rect) はスクリーン左下付近にフォールバック。
+    /// 実機検証 (2026-06-07 PR #34 後) で `firstRectForCharacterRange:NSNotFound, 0`
+    /// が `(0,0,0,0)` ないし `origin=(0,0)` を返すクライアントが存在することが
+    /// 判明した。その場合パネルがスクリーン左下隅に固定され見えなくなるため、
+    /// 多段フォールバックする:
+    ///
+    /// 1. `range = {NSNotFound, 0}` (現在の挿入点)
+    /// 2. それが bogus (origin=0,0) なら `range = {0, 0}` を試す
+    /// 3. それも bogus ならメインスクリーンの中央付近を使う (見えないよりマシ)
     fn caret_screen_point(client: &AnyObject) -> NSPoint {
-        let range = NSRange::new(NS_NOT_FOUND, 0);
+        // 候補 1: NSNotFound range
+        let rect1 = Self::query_first_rect(client, NS_NOT_FOUND);
+        debug_log(&format!(
+            "caret_screen_point: rect1 origin=({:.1},{:.1}) size=({:.1},{:.1})",
+            rect1.origin.x, rect1.origin.y, rect1.size.width, rect1.size.height
+        ));
+        if !Self::is_bogus_rect(rect1) {
+            return NSPoint::new(rect1.origin.x, rect1.origin.y);
+        }
+
+        // 候補 2: {0, 0} range
+        let rect2 = Self::query_first_rect(client, 0);
+        debug_log(&format!(
+            "caret_screen_point: rect2 origin=({:.1},{:.1}) size=({:.1},{:.1})",
+            rect2.origin.x, rect2.origin.y, rect2.size.width, rect2.size.height
+        ));
+        if !Self::is_bogus_rect(rect2) {
+            return NSPoint::new(rect2.origin.x, rect2.origin.y);
+        }
+
+        // 候補 3: メインスクリーンの中央付近 (= 見えないより 100 倍マシ)
+        let fallback = Self::screen_center_fallback();
+        debug_log(&format!(
+            "caret_screen_point: using screen center fallback ({:.1},{:.1})",
+            fallback.x, fallback.y
+        ));
+        fallback
+    }
+
+    /// `firstRectForCharacterRange:actualRange:` を ObjC msg_send 経由で呼ぶ
+    fn query_first_rect(client: &AnyObject, location: usize) -> NSRect {
+        let range = NSRange::new(location, 0);
         let mut actual_range = NSRange::new(0, 0);
-        let rect: NSRect = unsafe {
+        unsafe {
             msg_send![
                 client,
                 firstRectForCharacterRange: range,
                 actualRange: &mut actual_range as *mut NSRange,
             ]
-        };
-        if rect.size.width == 0.0 && rect.size.height == 0.0 {
-            // フォールバック (cargo doc 環境などで client が rect を返さない)
-            return NSPoint::new(200.0, 600.0);
         }
-        // NSRect の origin は左下 (NS 座標系)、左上を返したいので y はそのまま
-        // (setFrameTopLeftPoint は y-up 座標を期待し、rect.origin.y がキャレット下端)
-        NSPoint::new(rect.origin.x, rect.origin.y)
+    }
+
+    /// rect が信頼できないか (origin (0,0) または size 完全 0)
+    fn is_bogus_rect(rect: NSRect) -> bool {
+        // origin が (0,0) は spec 上は valid だが、実機の text input client が
+        // 「該当 rect 無し」シグナルとして使うことが多い
+        (rect.origin.x == 0.0 && rect.origin.y == 0.0)
+            || (rect.size.width == 0.0 && rect.size.height == 0.0)
+    }
+
+    /// メインスクリーンの中央付近 (top-left 座標、y-up)
+    fn screen_center_fallback() -> NSPoint {
+        let mtm =
+            MainThreadMarker::new().expect("controller callbacks must run on the main thread");
+        if let Some(screen) = NSScreen::mainScreen(mtm) {
+            let frame = screen.visibleFrame();
+            let x = frame.origin.x + frame.size.width / 2.0 - 140.0;
+            let y = frame.origin.y + frame.size.height * 2.0 / 3.0;
+            NSPoint::new(x, y)
+        } else {
+            // 最終手段
+            NSPoint::new(400.0, 400.0)
+        }
     }
 }
