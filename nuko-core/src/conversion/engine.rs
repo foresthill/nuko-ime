@@ -109,10 +109,12 @@ impl ConversionEngine {
 
         let mut candidates = CandidateList::new();
 
-        // 1. 学習データから候補を取得
+        // 1. 学習データから候補を取得 (surface 一致は重複扱い)
         let learned = self.learning.get_candidates(reading, context)?;
         for candidate in learned {
-            candidates.push(candidate.with_source(CandidateSource::Learned));
+            if !candidates.iter().any(|c| c.surface == candidate.surface) {
+                candidates.push(candidate.with_source(CandidateSource::Learned));
+            }
         }
 
         // 2. libakaza バックエンドが有効なら最優先で候補を追加
@@ -146,28 +148,34 @@ impl ConversionEngine {
             }
         }
 
-        // 4. かなそのままも候補に追加
-        candidates.push(
-            Candidate::new(reading, reading)
-                .with_score(-100)
-                .with_source(CandidateSource::System),
-        );
+        // 4. かなそのままも候補に追加 (既存と surface 一致なら重複扱いで skip)
+        if !candidates.iter().any(|c| c.surface == reading) {
+            candidates.push(
+                Candidate::new(reading, reading)
+                    .with_score(-100)
+                    .with_source(CandidateSource::System),
+            );
+        }
 
         // 5. カタカナ変換も候補に追加
         let katakana = to_katakana(reading);
-        candidates.push(
-            Candidate::new(&katakana, reading)
-                .with_score(-90)
-                .with_source(CandidateSource::System),
-        );
+        if !candidates.iter().any(|c| c.surface == katakana) {
+            candidates.push(
+                Candidate::new(&katakana, reading)
+                    .with_score(-90)
+                    .with_source(CandidateSource::System),
+            );
+        }
 
         // 6. 半角カタカナも候補に追加
         let half_katakana = to_halfwidth_katakana(reading);
-        candidates.push(
-            Candidate::new(&half_katakana, reading)
-                .with_score(-95)
-                .with_source(CandidateSource::System),
-        );
+        if !candidates.iter().any(|c| c.surface == half_katakana) {
+            candidates.push(
+                Candidate::new(&half_katakana, reading)
+                    .with_score(-95)
+                    .with_source(CandidateSource::System),
+            );
+        }
 
         // スコア順にソート
         candidates.sort_by_score();
