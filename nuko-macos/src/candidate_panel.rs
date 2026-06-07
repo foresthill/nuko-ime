@@ -44,19 +44,34 @@ impl CustomCandidatePanel {
     pub fn new(mtm: MainThreadMarker) -> Self {
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(DEFAULT_WIDTH, 60.0));
 
-        // NSPanel を Borderless で生成
+        // NSPanel を Borderless + NonactivatingPanel で生成。
+        //
+        // NonactivatingPanel を付けないと、NSPanel は「アプリを activate する
+        // 普通のウィンドウ」扱いとなり、IME のように非アクティブアプリから
+        // 浮かせて表示する用途には使えない (orderFront しても表示されないか、
+        // 表示されても入力フォーカスを奪ってしまう)。
+        //
+        // 一次ソース: NSPanel docs of `NSWindowStyleMaskNonactivatingPanel`
+        // (1<<7) と `setBecomesKeyOnlyIfNeeded:` 関連。
+        let style = NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel;
         let panel: Retained<NSPanel> = unsafe {
             let allocated = NSPanel::alloc(mtm);
             msg_send![
                 allocated,
                 initWithContentRect: frame,
-                styleMask: NSWindowStyleMask::Borderless,
+                styleMask: style,
                 backing: NSBackingStoreType::Buffered,
                 defer: false,
             ]
         };
 
-        // 最前面・別アプリへのフォーカス移動でも閉じない設定
+        // 浮遊パネルとして振舞わせる設定:
+        // - setFloatingPanel(true) で他のウィンドウより前面に
+        // - setBecomesKeyOnlyIfNeeded(true) で focus 奪取を最小化
+        // - setLevel(NSPopUpMenuWindowLevel) で最前面 level に
+        // - setHidesOnDeactivate(false) で別アプリ移動でも閉じない
+        panel.setFloatingPanel(true);
+        panel.setBecomesKeyOnlyIfNeeded(true);
         panel.setLevel(NSPopUpMenuWindowLevel);
         panel.setHidesOnDeactivate(false);
         panel.setHasShadow(true);
@@ -100,10 +115,17 @@ impl CustomCandidatePanel {
         self.panel.setContentSize(frame.size);
     }
 
-    /// 指定の screen 座標 (top-left) にパネルを表示する
-    pub fn show_at(&self, top_left: NSPoint) {
+    /// 指定の screen 座標 (top-left) にパネルを表示する。
+    ///
+    /// `orderFrontRegardless` を使うのは、IME プロセスが non-active な状態でも
+    /// パネルを最前面に出すため。`orderFront:` は active アプリでなければ
+    /// 表示されないケースがあるので、IME 用途では不適。
+    ///
+    /// 戻り値は呼び出し後の `isVisible()` 結果 (診断用)。
+    pub fn show_at(&self, top_left: NSPoint) -> bool {
         self.panel.setFrameTopLeftPoint(top_left);
-        self.panel.orderFront(None);
+        self.panel.orderFrontRegardless();
+        self.panel.isVisible()
     }
 
     /// パネルを隠す
