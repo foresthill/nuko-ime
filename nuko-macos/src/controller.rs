@@ -628,7 +628,7 @@ impl NukoInputController {
         Self::insert_text_on_client(client, "");
     }
 
-    // --- 候補ウィンドウ (singleton IMKCandidates) -----------------------
+    // --- 候補ウィンドウ (singleton CustomCandidatePanel) ---------------
 
     /// 候補ウィンドウを表示する (自前 NSPanel)
     ///
@@ -656,7 +656,10 @@ impl NukoInputController {
         with_custom_panel(|panel| {
             if let Some(panel) = panel {
                 panel.set_candidates(&items, selected);
-                panel.show_at(position);
+                let visible = panel.show_at(position);
+                debug_log(&format!(
+                    "show_candidate_panel: after show_at isVisible={visible}"
+                ));
             } else {
                 debug_log("show_candidate_panel: panel not initialized");
             }
