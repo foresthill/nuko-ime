@@ -96,26 +96,63 @@ impl LibakazaBackend {
 
     /// 読み (ひらがな) を変換し、候補リストを返す。
     ///
-    /// ## 候補の構成 (2026-06-07 v3 改訂 / Phase 1.3 Step 2b)
+    /// ## 候補の構成 (2026-06-09 v4 改訂)
     ///
-    /// libakaza の **k-best Viterbi** (`convert_k_best`) で**上位 k 通りの読み解き**を
-    /// 取得し、各 path の文節先頭候補を連結したものを順に候補リスト化する。
+    /// `engine.convert()` の最良分割 + `convert_k_best()` の代替パスを **両方** マージする:
     ///
-    /// 旧仕様 (= 最良パス 1 件 + 単一文節時のみ文節 0 拡張) と比較:
-    /// - 単一文節 「し」: 旧と同等 (path 1=「四」, path 2=「詩」, ... の効果)
-    /// - 複数文節 「わたしのなまえ」: 旧は 1 件のみ、新は「私の名前」「渡しの名前」等の
-    ///   **文全体での代替** が複数出る (Phase 1.3 Step 2b の本命機能)
+    /// 1. `convert()` の最良分割の **文節 0 の全候補** を追加
+    ///    (= 単一文節入力「しんこう」で「進行 / 振興 / 新興 / 進攻」等の dict 全エントリを救う)
+    /// 2. `convert_k_best()` の **上位 k 件文全体パス** を追加
+    ///    (= 複数文節入力「わたしのなまえ」で「私の名前 / 渡しの名前」等の代替を救う)
+    /// 3. dedup は連結 surface で
     ///
-    /// 各 path の score は `KBestPath::cost` を反転したもの。dedup は連結 surface で。
+    /// 旧仕様 (PR #40, k-best のみ) では、libakaza segmenter が「しんこう」を
+    /// 「しん」+「こう」のように分割した場合、各 k-best path の segment 0 は
+    /// 「しん」固有の代替 (= 信、新、深...) しか得られず、しんこう全体の dict
+    /// エントリ (= 進行など 41 件) が **完全に失われる** 問題が 2026-06-09 実機
+    /// 検証で判明したため、convert() 経路を復活させた。
     pub fn convert(&self, reading: &str) -> Result<Vec<Candidate>> {
-        // k-best で取り出す上位 path 数の上限。Space サイクル / 数字 1-9 の
-        // 範囲を考えると 9 が妥当。
+        const MAX_FIRST_SEGMENT_CANDIDATES: usize = 9;
         const K_BEST_PATHS: usize = 9;
 
         if reading.is_empty() {
             return Ok(Vec::new());
         }
 
+        let mut out: Vec<Candidate> = Vec::new();
+        let mut seen_surfaces: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // (1) 最良分割を取り、その文節 0 の **全候補** をリストに加える
+        //
+        // 「しんこう」が 1 文節と判定された場合、segment[0].candidates には
+        // dict 内の全 「しんこう」 エントリ (= 信仰, 進行, 振興, 新興...) が
+        // 並んでいる (cost 順)。これを最大 N 件取り込むことで、ユーザーが
+        // 「進行」を Space サイクルで選べるようになる。
+        if let Ok(segments) = self.engine.convert(reading, None) {
+            if let Some(first_seg) = segments.first() {
+                for (i, c) in first_seg.iter().enumerate() {
+                    if out.len() >= MAX_FIRST_SEGMENT_CANDIDATES {
+                        break;
+                    }
+                    let _ = i;
+                    let surface = c.surface_with_dynamic();
+                    if surface.is_empty() || seen_surfaces.contains(&surface) {
+                        continue;
+                    }
+                    // 単一文節入力なら surface だけで文全体だが、複数文節入力では
+                    // segment 0 だけの partial surface (= 「しん」だけ) になる。
+                    // 後者は微妙だが、segmenter が誤分割した場合の救済として残す。
+                    seen_surfaces.insert(surface.clone());
+                    out.push(
+                        Candidate::new(surface, reading)
+                            .with_score(cost_to_score(c.cost))
+                            .with_source(CandidateSource::System),
+                    );
+                }
+            }
+        }
+
+        // (2) k-best パスで文全体の代替候補を追加 (複数文節入力で効く)
         let paths = self
             .engine
             .convert_k_best(reading, None, K_BEST_PATHS)
@@ -125,15 +162,7 @@ impl LibakazaBackend {
                 ))
             })?;
 
-        if paths.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut out: Vec<Candidate> = Vec::new();
-        let mut seen_surfaces: std::collections::HashSet<String> = std::collections::HashSet::new();
-
         for path in paths {
-            // 各文節の先頭候補を連結した 1 文字列 = この path の表す変換結果
             let surface: String = path
                 .segments
                 .iter()
