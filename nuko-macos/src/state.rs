@@ -90,12 +90,39 @@ fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
         model_dir = %model_dir.display(),
         "libakaza モデルディレクトリを試行 (akaza feature 有効)"
     );
-    ConversionEngine::with_libakaza(model_dir)
+    let mut engine = ConversionEngine::with_libakaza(model_dir)?;
+    setup_learning_persistence(&mut engine);
+    Ok(engine)
 }
 
 #[cfg(not(feature = "akaza"))]
 fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
-    ConversionEngine::new()
+    let mut engine = ConversionEngine::new()?;
+    setup_learning_persistence(&mut engine);
+    Ok(engine)
+}
+
+/// 学習データの永続化パスを設定する
+///
+/// 保存先: `~/Library/Application Support/nuko-ime/learning.json`
+/// 失敗 (= ホームディレクトリ取得 / load 失敗) は warn のみで起動を続ける。
+fn setup_learning_persistence(engine: &mut ConversionEngine) {
+    let Ok(home) = std::env::var("HOME") else {
+        tracing::warn!("HOME 環境変数が取得できないため学習永続化を無効化");
+        return;
+    };
+    let path = std::path::PathBuf::from(home)
+        .join("Library")
+        .join("Application Support")
+        .join("nuko-ime")
+        .join("learning.json");
+    if let Err(e) = engine.set_learning_path(&path) {
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "学習データ load 失敗。in-memory のみで継続"
+        );
+    }
 }
 
 /// macOS 上の libakaza モデルディレクトリのデフォルトパス。
