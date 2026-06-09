@@ -27,6 +27,50 @@ use crate::state::{
 /// macOS ヘッダでは NSIntegerMax と定義されている
 const NS_NOT_FOUND: usize = isize::MAX as usize;
 
+/// ASCII 句読点・記号を 全角 に変換 (日本語入力モードでの自動変換用)。
+///
+/// 主に JIS 標準で 全角が一般的なものに絞っている:
+/// - 句読点 (, .)
+/// - 疑問符・感嘆符 (? !)
+/// - 括弧類 (( ) [ ] { })
+/// - 中黒・波 (~)
+/// - その他よく使う記号 (; : @ # $ % & * + =)
+///
+/// 含まれないもの (= 半角のままがよく使われる):
+/// - 演算子 (- / \ < >)
+/// - 引用符 (' " `)
+/// - アンダースコア _
+/// - パイプ |
+/// - キャレット ^
+///
+/// 戻り値が `None` の場合は変換不要 = romaji buffer か通常入力に流れる。
+fn ascii_to_fullwidth_punctuation(c: char) -> Option<&'static str> {
+    match c {
+        ',' => Some("、"),
+        '.' => Some("。"),
+        '?' => Some("？"),
+        '!' => Some("！"),
+        '~' => Some("〜"),
+        '(' => Some("（"),
+        ')' => Some("）"),
+        '[' => Some("「"),
+        ']' => Some("」"),
+        '{' => Some("『"),
+        '}' => Some("』"),
+        ';' => Some("；"),
+        ':' => Some("："),
+        '@' => Some("＠"),
+        '#' => Some("＃"),
+        '$' => Some("＄"),
+        '%' => Some("％"),
+        '&' => Some("＆"),
+        '*' => Some("＊"),
+        '+' => Some("＋"),
+        '=' => Some("＝"),
+        _ => None,
+    }
+}
+
 /// デバッグログをファイルに書き出し（IMEプロセスのstdoutは見えないため）
 fn debug_log(msg: &str) {
     use std::io::Write;
@@ -323,6 +367,36 @@ impl NukoInputController {
                     Self::insert_text_on_client(client, &text);
                     debug_log(&format!(
                         "digit-passthrough: prev_commit='{commit_text}' digit='{text}'"
+                    ));
+                    return Bool::YES;
+                }
+
+                // 全角記号変換: ASCII 句読点・記号を 全角 に置き換えて挿入。
+                // ユーザー報告 (2026-06-10): 「全角記号が打てない」。
+                //
+                // 一般的な日本語 IME (Google 日本語入力 / ATOK / ことえり) 同様、
+                // composition が無い時に「.」を打つと「。」、「?」 → 「？」 等。
+                // composition がある場合は flush + commit してから記号挿入。
+                if let Some(fullwidth) = ascii_to_fullwidth_punctuation(ch) {
+                    let mut commit_text = String::new();
+                    if state.is_composing || !state.romaji.buffer().is_empty() {
+                        let remaining = state.romaji.flush();
+                        if !remaining.is_empty() {
+                            state.composition.push_str(&remaining);
+                        }
+                        commit_text = state.composition.clone();
+                        if !commit_text.is_empty() {
+                            state.context.push_prev_word(&commit_text);
+                        }
+                        state.reset();
+                    }
+                    drop(state);
+                    if !commit_text.is_empty() {
+                        Self::insert_text_on_client(client, &commit_text);
+                    }
+                    Self::insert_text_on_client(client, fullwidth);
+                    debug_log(&format!(
+                        "fullwidth-punct: '{ch}' → '{fullwidth}' (prev_commit='{commit_text}')"
                     ));
                     return Bool::YES;
                 }
