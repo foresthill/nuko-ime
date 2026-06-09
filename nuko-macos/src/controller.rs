@@ -235,12 +235,21 @@ const KEY_CODE_KANA: u16 = 104;
 
 impl NukoInputController {
     /// handleEvent:client: の実装
+    ///
+    /// ## 重要: 処理しないキーは必ず super に流すこと
+    ///
+    /// IMKInputController のデフォルト `handleEvent:` 実装は内部で
+    /// `inputText:` / `didCommandBySelector:` を派生させる。
+    /// **処理しない場合は `call_super_handle_event` を呼ぶ** 必要がある。
+    ///
+    /// PR #51 で super 呼出を忘れたため `inputText:` が呼ばれなくなり、
+    /// **「日本語が打てない」大デグレ** を引き起こした (2026-06-10 ユーザー報告)。
     fn _handle_event_impl(&self, event: Option<&NSEvent>, sender: Option<&AnyObject>) -> Bool {
         let Some(event) = event else { return Bool::NO };
 
         let event_type = event.r#type();
         if event_type != NSEventType::KeyDown {
-            return Bool::NO;
+            return self.call_super_handle_event(event, sender);
         }
 
         let key_code = event.keyCode();
@@ -251,7 +260,7 @@ impl NukoInputController {
                 // segmented モード中のみ反応 (= 単一文節時はホストに矢印移動を任せる)
                 let in_segmented = self.ivars().state.borrow().segmented.is_some();
                 if !in_segmented {
-                    return Bool::NO;
+                    return self.call_super_handle_event(event, sender);
                 }
                 if let Some(client) = sender {
                     self.handle_segment_focus_shift(client, /*forward=*/ false);
@@ -261,7 +270,7 @@ impl NukoInputController {
             KEY_CODE_RIGHT_ARROW => {
                 let in_segmented = self.ivars().state.borrow().segmented.is_some();
                 if !in_segmented {
-                    return Bool::NO;
+                    return self.call_super_handle_event(event, sender);
                 }
                 if let Some(client) = sender {
                     self.handle_segment_focus_shift(client, /*forward=*/ true);
@@ -272,11 +281,19 @@ impl NukoInputController {
                 // 「かな」キー押下を記録 → 直後の Space leak をガードで破棄
                 self.ivars().state.borrow_mut().kana_pressed_at = Some(std::time::Instant::now());
                 debug_log("kana key (keyCode 104) detected, setting guard");
-                // 入力ソース切替は OS に委ねるため Bool::NO で通常 IMK 処理に流す
-                Bool::NO
+                // 入力ソース切替は OS に委ねるため super に流す
+                self.call_super_handle_event(event, sender)
             }
-            _ => Bool::NO,
+            _ => self.call_super_handle_event(event, sender),
         }
+    }
+
+    /// `super.handleEvent:client:` を呼ぶ
+    ///
+    /// IMK のデフォルト実装は内部で `inputText:` / `didCommandBySelector:` を派生
+    /// させるので、**処理しないキーはこれを呼ばないとアプリに何も入力されない**。
+    fn call_super_handle_event(&self, event: &NSEvent, sender: Option<&AnyObject>) -> Bool {
+        unsafe { msg_send![super(self), handleEvent: event, client: sender] }
     }
 
     /// inputText:client: の実装
