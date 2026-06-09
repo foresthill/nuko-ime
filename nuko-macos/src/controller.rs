@@ -843,14 +843,14 @@ impl NukoInputController {
 
     /// 確定を実行
     ///
-    /// segmented モード時 (= 複数文節入力): まず focused segment の
-    /// `state.candidates.selected_index` を segmented の対応 segment に sync して
-    /// から、segmented.current_surface() で**全文節を連結**して確定する。
-    /// 各 segment の selected candidate は学習記録する。
+    /// テスト可能な純粋関数 [`crate::commit::decide_commit`] に commit_text と
+    /// learn_targets の決定を委譲する設計。本関数は副作用 (= 学習記録、
+    /// state.reset、insertText) だけを担う。
     fn do_commit(&self, client: &AnyObject) {
         let mut state = self.ivars().state.borrow_mut();
 
         // segmented モード: focused segment の selected を state.candidates から sync
+        // (decide_commit は state を mut しないので呼び出し前に sync しておく)
         let candidates_sel = state.candidates.as_ref().map(|c| c.selected_index());
         if let Some(segmented) = state.segmented.as_mut() {
             if let Some(sel) = candidates_sel {
@@ -861,60 +861,38 @@ impl NukoInputController {
             }
         }
 
-        let commit_text = if let Some(segmented) = state.segmented.as_ref() {
-            // 文全体を連結して確定。各 segment の選択候補は別途学習する
-            let text = segmented.current_surface();
-            // 学習記録: 各 segment の selected を個別に commit
-            // (borrow checker 回避のため snapshot を取ってから)
-            let seg_candidates: Vec<Candidate> = segmented
-                .segments
-                .iter()
-                .filter_map(|seg| seg.current().cloned())
-                .collect();
-            let ctx_snapshot = state.context.clone();
-            for c in &seg_candidates {
-                with_engine_mut(|engine| {
-                    if let Err(e) = engine.commit(c, &ctx_snapshot) {
-                        error!("学習記録エラー (segmented): {e}");
-                    }
-                });
-            }
-            if !text.is_empty() {
-                state.context.push_prev_word(&text);
-            }
-            text
-        } else if let Some(ref candidates) = state.candidates {
-            if let Some(selected) = candidates.selected() {
-                let text = selected.surface.clone();
-                with_engine_mut(|engine| {
-                    if let Err(e) = engine.commit(selected, &state.context) {
-                        error!("学習記録エラー: {}", e);
-                    }
-                });
-                state.context.push_prev_word(&text);
-                text
-            } else {
-                state.display_text()
-            }
-        } else {
+        // 未変換のかなだけのときに romaji buffer を flush
+        // (decide_commit は state を mut しないので、ここで先に flush しておく)
+        if state.segmented.is_none() && state.candidates.is_none() {
             let remaining = state.romaji.flush();
             if !remaining.is_empty() {
                 state.composition.push_str(&remaining);
             }
-            let text = state.composition.clone();
-            if !text.is_empty() {
-                state.context.push_prev_word(&text);
-            }
-            text
-        };
+        }
+
+        // 純粋関数で commit 決定 (← unit test でカバーする本丸)
+        let decision = crate::commit::decide_commit(&state);
+
+        // 学習記録 (副作用)
+        let ctx_snapshot = state.context.clone();
+        for c in &decision.learn_targets {
+            with_engine_mut(|engine| {
+                if let Err(e) = engine.commit(c, &ctx_snapshot) {
+                    error!("学習記録エラー: {e}");
+                }
+            });
+        }
+        if !decision.commit_text.is_empty() {
+            state.context.push_prev_word(&decision.commit_text);
+        }
 
         state.reset();
         drop(state);
 
         Self::hide_candidate_panel();
 
-        if !commit_text.is_empty() {
-            Self::insert_text_on_client(client, &commit_text);
+        if !decision.commit_text.is_empty() {
+            Self::insert_text_on_client(client, &decision.commit_text);
         }
     }
 
