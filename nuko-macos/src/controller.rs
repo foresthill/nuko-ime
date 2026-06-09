@@ -17,7 +17,7 @@ use objc2_foundation::{NSArray, NSPoint, NSRange, NSString};
 use objc2_input_method_kit::{IMKInputController, IMKServer};
 use tracing::{debug, error, info, warn};
 
-use nuko_core::conversion::Candidate;
+use nuko_core::conversion::{Candidate, CandidateList};
 
 use crate::state::{
     ensure_custom_panel, with_custom_panel, with_engine, with_engine_mut, InputState,
@@ -415,6 +415,8 @@ impl NukoInputController {
         let delete_back = c"deleteBackward:";
         let move_down = c"moveDown:";
         let move_up = c"moveUp:";
+        let move_left = c"moveLeft:";
+        let move_right = c"moveRight:";
 
         if sel_name == insert_newline {
             // Enter: 確定
@@ -428,6 +430,12 @@ impl NukoInputController {
             // Backspace: 削除
             self.do_backspace(client);
             Bool::YES
+        } else if sel_name == move_left {
+            // Left: 文節フォーカスを前へ (segmented モードのみ)
+            self.handle_segment_focus_shift(client, /*forward=*/ false)
+        } else if sel_name == move_right {
+            // Right: 文節フォーカスを後ろへ (segmented モードのみ)
+            self.handle_segment_focus_shift(client, /*forward=*/ true)
         } else if sel_name == move_down {
             // Down: 次候補
             let mut new_idx = None;
@@ -524,6 +532,13 @@ impl NukoInputController {
     }
 
     /// 変換を実行
+    ///
+    /// libakaza が利用可能なら `convert_segmented` で文節別の結果を取り、
+    /// `state.segmented` に保存。`state.candidates` は **focused 文節の候補リスト**
+    /// として用意する (= 既存の Space/↓↑/1-9 ハンドラがそのまま動く)。
+    ///
+    /// libakaza が無効ないし複数文節を返さない場合は、従来通り `engine.convert`
+    /// で flat な候補リストを取得して `state.candidates` のみ設定する。
     fn do_convert(&self, client: &AnyObject) {
         let mut state = self.ivars().state.borrow_mut();
 
@@ -540,6 +555,34 @@ impl NukoInputController {
         let composition = state.composition.clone();
         debug_log(&format!("do_convert: input='{composition}'"));
 
+        // 1. 文節別変換を試す (libakaza available + 単一文節超え)
+        #[cfg(feature = "akaza")]
+        let segmented_result = with_engine(|engine| engine.convert_segmented(&composition));
+        #[cfg(not(feature = "akaza"))]
+        let segmented_result: nuko_core::error::Result<
+            Option<nuko_core::conversion::SegmentedConversion>,
+        > = Ok(None);
+
+        if let Ok(Some(segmented)) = segmented_result {
+            if segmented.segments.len() >= 2 {
+                debug_log(&format!(
+                    "do_convert: segmented mode, {} segments",
+                    segmented.segments.len()
+                ));
+                let surface = segmented.current_surface();
+                let focused_candidates =
+                    Self::candidate_list_from_segment(&segmented, segmented.focused);
+                state.segmented = Some(segmented);
+                state.candidates = Some(focused_candidates);
+                drop(state);
+                Self::set_marked_text_on_client(client, &surface);
+                self.show_candidate_panel(client);
+                return;
+            }
+            // 単一文節時は従来の flat 経路の方が候補揃いが豊富 (k-best + 静的辞書 + かな variants) なので fall through
+        }
+
+        // 2. 従来の flat な変換 (libakaza 無効 / 単一文節 / segmented 失敗時)
         let result = with_engine(|engine| engine.convert(&composition, &state.context));
         match result {
             Ok(candidates) => {
@@ -553,6 +596,7 @@ impl NukoInputController {
 
                 if let Some(selected) = candidates.selected() {
                     let surface = selected.surface.clone();
+                    state.segmented = None;
                     state.candidates = Some(candidates);
                     drop(state);
                     Self::set_marked_text_on_client(client, &surface);
@@ -560,6 +604,7 @@ impl NukoInputController {
                 } else {
                     debug_log("do_convert: no selected candidate, showing composition");
                     let display = state.display_text();
+                    state.segmented = None;
                     state.candidates = Some(candidates);
                     drop(state);
                     Self::set_marked_text_on_client(client, &display);
@@ -576,11 +621,64 @@ impl NukoInputController {
         }
     }
 
+    /// 指定文節の候補を `CandidateList` に変換 (panel 表示と Space cycle 用)
+    fn candidate_list_from_segment(
+        segmented: &nuko_core::conversion::SegmentedConversion,
+        seg_idx: usize,
+    ) -> CandidateList {
+        let mut list = CandidateList::new();
+        if let Some(segment) = segmented.segments.get(seg_idx) {
+            for c in &segment.candidates {
+                list.push(c.clone());
+            }
+            list.select(segment.selected);
+        }
+        list
+    }
+
     /// 確定を実行
+    ///
+    /// segmented モード時 (= 複数文節入力): まず focused segment の
+    /// `state.candidates.selected_index` を segmented の対応 segment に sync して
+    /// から、segmented.current_surface() で**全文節を連結**して確定する。
+    /// 各 segment の selected candidate は学習記録する。
     fn do_commit(&self, client: &AnyObject) {
         let mut state = self.ivars().state.borrow_mut();
 
-        let commit_text = if let Some(ref candidates) = state.candidates {
+        // segmented モード: focused segment の selected を state.candidates から sync
+        let candidates_sel = state.candidates.as_ref().map(|c| c.selected_index());
+        if let Some(segmented) = state.segmented.as_mut() {
+            if let Some(sel) = candidates_sel {
+                let focused = segmented.focused;
+                if let Some(seg) = segmented.segments.get_mut(focused) {
+                    seg.select(sel);
+                }
+            }
+        }
+
+        let commit_text = if let Some(segmented) = state.segmented.as_ref() {
+            // 文全体を連結して確定。各 segment の選択候補は別途学習する
+            let text = segmented.current_surface();
+            // 学習記録: 各 segment の selected を個別に commit
+            // (borrow checker 回避のため snapshot を取ってから)
+            let seg_candidates: Vec<Candidate> = segmented
+                .segments
+                .iter()
+                .filter_map(|seg| seg.current().cloned())
+                .collect();
+            let ctx_snapshot = state.context.clone();
+            for c in &seg_candidates {
+                with_engine_mut(|engine| {
+                    if let Err(e) = engine.commit(c, &ctx_snapshot) {
+                        error!("学習記録エラー (segmented): {e}");
+                    }
+                });
+            }
+            if !text.is_empty() {
+                state.context.push_prev_word(&text);
+            }
+            text
+        } else if let Some(ref candidates) = state.candidates {
             if let Some(selected) = candidates.selected() {
                 let text = selected.surface.clone();
                 with_engine_mut(|engine| {
@@ -630,8 +728,10 @@ impl NukoInputController {
     fn do_backspace(&self, client: &AnyObject) {
         let mut state = self.ivars().state.borrow_mut();
 
-        if state.candidates.is_some() {
+        if state.candidates.is_some() || state.segmented.is_some() {
+            // 変換結果 (flat / segmented 両方) をクリアして未確定文字列の表示に戻す
             state.candidates = None;
+            state.segmented = None;
             let display = state.display_text();
             drop(state);
             Self::hide_candidate_panel();
@@ -745,6 +845,63 @@ impl NukoInputController {
                 }
             }
         });
+    }
+
+    /// 文節フォーカスを前後に動かす (segmented モードのみ)。
+    ///
+    /// `forward = true` で次の文節、`false` で前の文節へ。
+    /// 現在の focused の selected を保存してから focus を動かし、
+    /// 新しい focused の candidates を `state.candidates` に load する。
+    /// marked text は全文節の current_surface() で更新、panel は新文節の候補で再描画。
+    ///
+    /// segmented モードでない (= 単一文節 or libakaza fail) 場合は Bool::YES を
+    /// 返してイベントを消費するだけ (= 何もしない、host にも渡さない)。
+    /// これは未確定中に host のカーソル移動を呼ばないため。
+    fn handle_segment_focus_shift(&self, client: &AnyObject, forward: bool) -> Bool {
+        let mut new_focused: Option<usize> = None;
+        let mut new_surface: Option<String> = None;
+        let mut new_candidates: Option<CandidateList> = None;
+
+        {
+            let mut state = self.ivars().state.borrow_mut();
+            // 1. 現在の focused に candidates の selected を sync back
+            //    (borrow checker 回避のため、まず candidates から index を取り出してから segmented を mut 借用)
+            let candidates_sel = state.candidates.as_ref().map(|c| c.selected_index());
+            if let Some(segmented) = state.segmented.as_mut() {
+                if let Some(sel) = candidates_sel {
+                    let focused = segmented.focused;
+                    if let Some(seg) = segmented.segments.get_mut(focused) {
+                        seg.select(sel);
+                    }
+                }
+                // 2. focus を動かす (wrap)
+                if forward {
+                    segmented.focus_next();
+                } else {
+                    segmented.focus_prev();
+                }
+                new_focused = Some(segmented.focused);
+                new_surface = Some(segmented.current_surface());
+                new_candidates = Some(Self::candidate_list_from_segment(
+                    segmented,
+                    segmented.focused,
+                ));
+            }
+            if let Some(list) = new_candidates.take() {
+                state.candidates = Some(list);
+            }
+        }
+
+        if let (Some(focused), Some(surface)) = (new_focused, new_surface) {
+            debug_log(&format!(
+                "handle_segment_focus_shift: forward={forward} new_focused={focused}"
+            ));
+            Self::set_marked_text_on_client(client, &surface);
+            // panel を新文節の候補で再描画
+            self.show_candidate_panel(client);
+        }
+
+        Bool::YES
     }
 
     /// パネル表示位置を返す (マルチスクリーン対応、マウス近くに配置)。

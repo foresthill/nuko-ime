@@ -1,4 +1,4 @@
-use nuko_core::conversion::{CandidateList, ConversionContext};
+use nuko_core::conversion::{CandidateList, ConversionContext, SegmentedConversion};
 use nuko_core::prelude::*;
 use objc2::MainThreadMarker;
 use std::cell::RefCell;
@@ -153,7 +153,14 @@ pub struct InputState {
     /// 現在のかな組み立て文字列
     pub composition: String,
     /// 変換候補（None = 変換モードではない）
+    ///
+    /// libakaza が動かない場合 (= フォールバック) や、文節別変換が無効な場合に使用。
     pub candidates: Option<CandidateList>,
+    /// 文節別変換結果 (Phase 1.3 Step 3, libakaza が利用可能なときのみ)
+    ///
+    /// 複数文節入力で焦点文節を切り替えながら個別に候補を選べるようにする。
+    /// `candidates` と排他的に使う想定 (= どちらか一方が `Some`)。
+    pub segmented: Option<SegmentedConversion>,
     /// 変換コンテキスト（学習・文脈用）
     pub context: ConversionContext,
     /// 未確定文字列を表示中かどうか
@@ -176,6 +183,7 @@ impl InputState {
             romaji: RomajiConverter::new(),
             composition: String::new(),
             candidates: None,
+            segmented: None,
             context: ConversionContext::new(),
             is_composing: false,
             japanese_mode: true, // デフォルトは日本語入力モード
@@ -188,7 +196,15 @@ impl InputState {
         self.romaji.clear();
         self.composition.clear();
         self.candidates = None;
+        self.segmented = None;
         self.is_composing = false;
+    }
+
+    /// 変換結果が存在するか (`candidates` か `segmented` のどちらかが Some)
+    #[allow(dead_code)] // 将来用 (今は直接 state.candidates / state.segmented を見る)
+    #[must_use]
+    pub fn has_conversion(&self) -> bool {
+        self.candidates.is_some() || self.segmented.is_some()
     }
 
     /// 表示用テキストを取得（かな組み立て + ローマ字バッファ）
