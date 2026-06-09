@@ -121,6 +121,32 @@ $(WORK_DIR)/sudachi/%_lex.csv:
 	rm $(WORK_DIR)/sudachi/$*_lex.zip
 
 # -------------------------------------------------------------------------
+# SudachiDict 漢字普通名詞 → corpus 抽出
+# -------------------------------------------------------------------------
+#
+# 上流 akaza-data の make_sudachi_dict は SudachiDict から:
+#   - 名詞-固有名詞-一般
+#   - 名詞-普通名詞 (表層形が**全カタカナ**のみ)
+# しか拾わない設計のため、「既読 / 既得 / 危篤」のような **漢字熟語の
+# 普通名詞** が SKK-JISYO.akaza に入らない (2026-06-08 実機検証で判明)。
+#
+# 対策: SudachiDict CSV から漢字を含む普通名詞を抽出して `--corpus` 形式
+# (`surface/yomi` 1 行 1 単語) に変換し、make-dict に追加 corpus として
+# 渡す。make_corpus_dict はフィルタなく全 word を dict に追加するため、
+# 上流 akaza-data に手を入れずに同じ効果が得られる (= filter 緩和)。
+
+SUDACHI_CORPUS = $(WORK_DIR)/sudachi-kanji-corpus.txt
+
+$(SUDACHI_CORPUS): scripts/sudachi_to_corpus.py \
+                   $(WORK_DIR)/sudachi/small_lex.csv \
+                   $(WORK_DIR)/sudachi/core_lex.csv \
+                   $(WORK_DIR)/sudachi/notcore_lex.csv
+	python3 scripts/sudachi_to_corpus.py $(SUDACHI_CORPUS) \
+	  $(WORK_DIR)/sudachi/small_lex.csv \
+	  $(WORK_DIR)/sudachi/core_lex.csv \
+	  $(WORK_DIR)/sudachi/notcore_lex.csv
+
+# -------------------------------------------------------------------------
 # SKK-JISYO.akaza generation
 # -------------------------------------------------------------------------
 
@@ -137,13 +163,15 @@ $(DATA_DIR)/SKK-JISYO.akaza: $(AKAZA_DATA) \
                               $(VOCAB_FILE) \
                               $(WORK_DIR)/sudachi/small_lex.csv \
                               $(WORK_DIR)/sudachi/core_lex.csv \
-                              $(WORK_DIR)/sudachi/notcore_lex.csv
+                              $(WORK_DIR)/sudachi/notcore_lex.csv \
+                              $(SUDACHI_CORPUS)
 	mkdir -p $(DATA_DIR)
 	$(AKAZA_DATA) make-dict \
 	  --corpus dict/SKK-JISYO.akaza \
 	  --corpus training-corpus/must.txt \
 	  --corpus training-corpus/should.txt \
 	  --corpus training-corpus/may.txt \
+	  --corpus $(SUDACHI_CORPUS) \
 	  --unidic $(UNIDIC_CSV) \
 	  --vocab $(VOCAB_FILE) \
 	  --sudachi-lex $(WORK_DIR)/sudachi/small_lex.csv \
