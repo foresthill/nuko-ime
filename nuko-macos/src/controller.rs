@@ -191,13 +191,17 @@ impl NukoInputController {
         //   - 未確定文字列がある → 変換実行
         //   - **活性化直後 (150ms 以内) の Space → ソース切替の Ctrl+Space
         //     ショートカット由来の漏れと判定して破棄**
-        //   - それ以外 → 全角スペース「　」(U+3000) を入力 (日本語モードの慣例)
+        //   - それ以外 → **Bool::NO でホストにパススルー** (= macOS 標準の半角スペース)
         //
-        // 半角スペースを入れるには英数モードに切り替えてから入力する。
-        // 旧実装は Bool::NO で host にパススルーしていたが、ソース切替の
-        // ショートカット (Ctrl+Space 等) で Space が漏れた時に意図しない半角が
-        // 入ってしまうため、日本語モード中は常に消費する方針に変更
-        // (Mozc / Google 日本語入力等の標準挙動)。
+        // 経緯: PR #26 で日本語モード時の Space を U+3000 (全角) 挿入にしていたが
+        // (Mozc / Google 日本語入力の慣例に合わせていた)、ユーザーから
+        // 「『かな』キーを押すたびに全角スペースが入って不便」「Mac の Space は
+        // 本当のスペースの時だけ」(2026-06-09) との指摘を受けて macOS 標準
+        // (ことえり相当) の挙動に戻した。全角が欲しい場合は変換中の Space で
+        // 候補リストから「　」(全角スペース) を選ぶか、英数 + 全角モード等で。
+        //
+        // 150ms の活性化ガードは引き続き有効 ("かな" キーが本物の Space と
+        // 紛らわしいパスでホストに渡る場合の防御)。
         if text == " " {
             // 活性化直後の Space は破棄 (ソース切替の漏れ対策)
             const ACTIVATION_GUARD_MS: u128 = 150;
@@ -237,11 +241,11 @@ impl NukoInputController {
                 self.do_convert(client);
                 return Bool::YES;
             }
-            // 未確定状態: 全角スペースを直接挿入
+            // 未確定状態 (= 入力中でない、候補も無い): ホストに任せる。
+            // = macOS 標準の半角スペース挿入 (ことえり相当)。
             drop(state);
-            debug_log("space: insert full-width space (no composition)");
-            Self::insert_text_on_client(client, "\u{3000}");
-            return Bool::YES;
+            debug_log("space: passthrough to host (no composition)");
+            return Bool::NO;
         }
 
         // 数字キー 1-9: 候補表示中なら該当 line の候補を確定する
