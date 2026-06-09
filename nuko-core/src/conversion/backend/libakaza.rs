@@ -122,32 +122,41 @@ impl LibakazaBackend {
         let mut out: Vec<Candidate> = Vec::new();
         let mut seen_surfaces: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        // (1) 最良分割を取り、その文節 0 の **全候補** をリストに加える
+        // (1) 最良分割を取り、**単一文節時のみ** 文節 0 の全候補を追加
         //
         // 「しんこう」が 1 文節と判定された場合、segment[0].candidates には
         // dict 内の全 「しんこう」 エントリ (= 信仰, 進行, 振興, 新興...) が
-        // 並んでいる (cost 順)。これを最大 N 件取り込むことで、ユーザーが
+        // 並んでいる (cost 順)。これを取り込むことで、ユーザーが
         // 「進行」を Space サイクルで選べるようになる。
+        //
+        // **複数文節時はこの拡張を行わない**:
+        //
+        // 「こうそくでうってると」のような長文では segment[0] は「こうそく」
+        // 部分しかカバーしない partial 候補なので、Candidate.reading に
+        // 全文 reading を入れてしまうと、ユーザーが確定した時に
+        // 「composition 全体 → 「高速」だけ」 になって残りが消える **致命的
+        // データ消失バグ** が発生する (2026-06-09 実機検証で発覚)。
+        //
+        // 複数文節時の代替候補は (2) の k-best パス (= 文全体) で得る。
+        // 文節ごとの選択 UI は Phase 1.3 Step 3 (文節境界編集) で扱う想定。
         if let Ok(segments) = self.engine.convert(reading, None) {
-            if let Some(first_seg) = segments.first() {
-                for (i, c) in first_seg.iter().enumerate() {
-                    if out.len() >= MAX_FIRST_SEGMENT_CANDIDATES {
-                        break;
+            if segments.len() == 1 {
+                if let Some(first_seg) = segments.first() {
+                    for c in first_seg {
+                        if out.len() >= MAX_FIRST_SEGMENT_CANDIDATES {
+                            break;
+                        }
+                        let surface = c.surface_with_dynamic();
+                        if surface.is_empty() || seen_surfaces.contains(&surface) {
+                            continue;
+                        }
+                        seen_surfaces.insert(surface.clone());
+                        out.push(
+                            Candidate::new(surface, reading)
+                                .with_score(cost_to_score(c.cost))
+                                .with_source(CandidateSource::System),
+                        );
                     }
-                    let _ = i;
-                    let surface = c.surface_with_dynamic();
-                    if surface.is_empty() || seen_surfaces.contains(&surface) {
-                        continue;
-                    }
-                    // 単一文節入力なら surface だけで文全体だが、複数文節入力では
-                    // segment 0 だけの partial surface (= 「しん」だけ) になる。
-                    // 後者は微妙だが、segmenter が誤分割した場合の救済として残す。
-                    seen_surfaces.insert(surface.clone());
-                    out.push(
-                        Candidate::new(surface, reading)
-                            .with_score(cost_to_score(c.cost))
-                            .with_source(CandidateSource::System),
-                    );
                 }
             }
         }
