@@ -40,18 +40,35 @@ impl FrequencyEntry {
     /// スコアを計算
     ///
     /// 使用回数と最終使用時刻を考慮したスコアを返します。
+    ///
+    /// ## スコアレンジ設計 (2026-06-09 改訂)
+    ///
+    /// 旧仕様 (= `base_score + 1000`) では学習スコア ~1,010 程度で、
+    /// 同じ `engine.convert` 経路で `LIBAKAZA_PRIORITY_BOOST = 100_000` を
+    /// 受ける libakaza 候補に**桁違いに負けて**いた。
+    ///
+    /// 結果として、ユーザーが「進行」を何度確定しても、libakaza が出す
+    /// 「信仰」(score ~99,900) が常に top に来るバグ発生
+    /// (実機検証 2026-06-09: 「あと無限回繰り返すのでしょうか?」報告)。
+    ///
+    /// 修正: 学習データは libakaza の BOOST より高い領域 (200_000+) で
+    /// スコアリングし、**ユーザーが 1 回でも選んだら必ず top に来る**ようにする。
+    /// 頻度・時間減衰は同じレンジ内で相対順位を決める。
     #[must_use]
     pub fn score(&self) -> i32 {
+        const LEARNING_PRIORITY_BOOST: i32 = 200_000;
+
         let now = current_timestamp();
         let age_days = (now.saturating_sub(self.last_used)) / (24 * 60 * 60);
 
-        // 基本スコア: 使用回数 × 10
-        let base_score = (self.count as i32) * 10;
+        // 頻度部: 使用回数 × 10
+        let frequency_part = (self.count as i32).saturating_mul(10);
 
-        // 時間減衰: 1日ごとに1点減少（最大30点）
+        // 時間減衰: 1 日ごとに 1 点減少 (最大 30 点)。長期間使わないものは
+        // 同じ学習データ内で下位に落ちるが、それでも libakaza には勝つ。
         let decay = std::cmp::min(age_days as i32, 30);
 
-        base_score - decay + 1000 // 学習データは高優先
+        LEARNING_PRIORITY_BOOST + frequency_part - decay
     }
 }
 
@@ -80,6 +97,25 @@ mod tests {
     fn test_score_calculation() {
         let entry = FrequencyEntry::new("日本", "にほん");
         let score = entry.score();
-        assert!(score > 1000); // 基本スコア + 学習ボーナス
+        // 学習データは libakaza BOOST (100_000) を超える領域でスコアリングされる
+        assert!(
+            score > 100_000,
+            "学習スコアは libakaza BOOST より高くあるべき"
+        );
+        assert!(
+            score > 200_000,
+            "1 回の使用でも 200_000 以上 (LEARNING_PRIORITY_BOOST)"
+        );
+    }
+
+    #[test]
+    fn test_score_grows_with_count() {
+        let mut entry = FrequencyEntry::new("進行", "しんこう");
+        let score_1 = entry.score();
+        for _ in 0..10 {
+            entry.increment();
+        }
+        let score_11 = entry.score();
+        assert!(score_11 > score_1, "使用回数が増えるとスコアも上がる");
     }
 }

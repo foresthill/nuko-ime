@@ -1,6 +1,5 @@
 //! 変換エンジン本体
 
-#[cfg(feature = "akaza")]
 use std::path::Path;
 
 #[cfg(feature = "akaza")]
@@ -92,6 +91,37 @@ impl ConversionEngine {
     #[must_use]
     pub fn has_libakaza(&self) -> bool {
         self.libakaza.is_some()
+    }
+
+    /// 学習データの永続化パスを設定する。
+    ///
+    /// パスが指す JSON ファイルがあれば内容を読み込み、以降の `commit()` で
+    /// 自動的に save される。プラットフォーム層が起動時に 1 度呼ぶ想定。
+    ///
+    /// ファイル不在時は新規作成扱い (= 空学習データから開始)。
+    ///
+    /// # エラー
+    /// ファイルが存在するが JSON パースに失敗した場合。
+    /// パスが存在しないこと自体はエラーにしない。
+    pub fn set_learning_path(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        // ファイルがあれば load してエントリを引き継ぐ
+        if path.exists() {
+            self.learning = LearningManager::load(path)?;
+            tracing::info!(
+                path = %path.display(),
+                entries = self.learning.entry_count(),
+                "学習データを load"
+            );
+        } else {
+            // 新規: ManagerにPathだけ設定して以降のsaveを有効化
+            self.learning.set_path(path);
+            tracing::info!(
+                path = %path.display(),
+                "学習データの永続化パスを設定 (ファイル不在、新規開始)"
+            );
+        }
+        Ok(())
     }
 
     /// かなを漢字に変換
@@ -250,6 +280,13 @@ impl ConversionEngine {
     /// * `context` - 変換コンテキスト
     pub fn commit(&mut self, candidate: &Candidate, context: &ConversionContext) -> Result<()> {
         self.learning.record(candidate, context)?;
+        // 学習データの永続化が設定されていれば自動 save。失敗は warn にとどめ
+        // commit 自体は成功扱い (= 学習はメモリには載った)。
+        if self.learning.has_path() {
+            if let Err(e) = self.learning.save() {
+                tracing::warn!(error = %e, "学習データ save 失敗 (in-memory のみ保持)");
+            }
+        }
         Ok(())
     }
 

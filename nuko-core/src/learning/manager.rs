@@ -89,6 +89,12 @@ impl LearningManager {
         self.path = Some(path.as_ref().to_path_buf());
     }
 
+    /// 保存先パスが設定されているか
+    #[must_use]
+    pub fn has_path(&self) -> bool {
+        self.path.is_some()
+    }
+
     /// 変換結果を記録
     pub fn record(&mut self, candidate: &Candidate, _context: &ConversionContext) -> Result<()> {
         let mut data = self.frequency_data.write();
