@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, Bool, NSObjectProtocol, Sel};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker};
-use objc2_app_kit::{NSEvent, NSScreen};
+use objc2_app_kit::{NSEvent, NSEventType, NSScreen};
 use objc2_foundation::{NSArray, NSPoint, NSRange, NSString};
 use objc2_input_method_kit::{IMKInputController, IMKServer};
 use tracing::{debug, error, info, warn};
@@ -203,12 +203,82 @@ define_class!(
             }
         }
 
+        /// 生 NSEvent を受け取って独自処理する。
+        ///
+        /// IMK は通常 keyDown を `inputText:`/`didCommandBySelector:` に変換するが、
+        /// 矢印キーや「かな」キーなど特殊キーは届かない / 別経路に流れる場合がある
+        /// (実機検証 2026-06-10):
+        ///
+        /// - **← →**: composition + panel 表示中でも `moveLeft:` / `moveRight:` セレクタが
+        ///   ログに現れない → ここで直接捕まえて文節フォーカス移動を実装
+        /// - **「かな」キー (keyCode 104)**: 押下直後に Space イベントが漏れて
+        ///   `inputText: " "` が来る現象あり → ここで keyDown を検知してガード設定
+        ///
+        /// 戻り値 Bool::YES = 完全に処理した (IMK の以降の処理を停止)
+        /// Bool::NO = 通常の IMK 処理に流す
+        #[unsafe(method(handleEvent:client:))]
+        fn handle_event(&self, event: Option<&NSEvent>, sender: Option<&AnyObject>) -> Bool {
+            self._handle_event_impl(event, sender)
+        }
     }
 );
 
 // --- メソッド実装 ---
 
+/// 「かな」キー押下から Space leak を破棄する時間 (ms)
+const KANA_GUARD_MS: u128 = 300;
+
+/// macOS Japanese keyboard の物理キー keyCode
+const KEY_CODE_LEFT_ARROW: u16 = 123;
+const KEY_CODE_RIGHT_ARROW: u16 = 124;
+const KEY_CODE_KANA: u16 = 104;
+
 impl NukoInputController {
+    /// handleEvent:client: の実装
+    fn _handle_event_impl(&self, event: Option<&NSEvent>, sender: Option<&AnyObject>) -> Bool {
+        let Some(event) = event else { return Bool::NO };
+
+        let event_type = event.r#type();
+        if event_type != NSEventType::KeyDown {
+            return Bool::NO;
+        }
+
+        let key_code = event.keyCode();
+        debug_log(&format!("handleEvent keyDown: keyCode={key_code}"));
+
+        match key_code {
+            KEY_CODE_LEFT_ARROW => {
+                // segmented モード中のみ反応 (= 単一文節時はホストに矢印移動を任せる)
+                let in_segmented = self.ivars().state.borrow().segmented.is_some();
+                if !in_segmented {
+                    return Bool::NO;
+                }
+                if let Some(client) = sender {
+                    self.handle_segment_focus_shift(client, /*forward=*/ false);
+                }
+                Bool::YES
+            }
+            KEY_CODE_RIGHT_ARROW => {
+                let in_segmented = self.ivars().state.borrow().segmented.is_some();
+                if !in_segmented {
+                    return Bool::NO;
+                }
+                if let Some(client) = sender {
+                    self.handle_segment_focus_shift(client, /*forward=*/ true);
+                }
+                Bool::YES
+            }
+            KEY_CODE_KANA => {
+                // 「かな」キー押下を記録 → 直後の Space leak をガードで破棄
+                self.ivars().state.borrow_mut().kana_pressed_at = Some(std::time::Instant::now());
+                debug_log("kana key (keyCode 104) detected, setting guard");
+                // 入力ソース切替は OS に委ねるため Bool::NO で通常 IMK 処理に流す
+                Bool::NO
+            }
+            _ => Bool::NO,
+        }
+    }
+
     /// inputText:client: の実装
     fn _input_text_impl(&self, string: Option<&NSString>, sender: Option<&AnyObject>) -> Bool {
         let Some(ns_str) = string else {
@@ -260,6 +330,15 @@ impl NukoInputController {
                 }
             }
 
+            // 「かな」キー押下直後の Space leak も破棄 (2026-06-10 報告)
+            if let Some(kana_at) = state.kana_pressed_at {
+                if kana_at.elapsed().as_millis() < KANA_GUARD_MS {
+                    state.kana_pressed_at = None; // 1 shot で消費
+                    debug_log("space: discard (kana key guard, likely kana key leak)");
+                    return Bool::YES;
+                }
+            }
+
             if state.candidates.is_some() {
                 let mut new_idx = None;
                 if let Some(ref mut candidates) = state.candidates {
@@ -294,13 +373,18 @@ impl NukoInputController {
 
         // 数字キー 1-9: 候補表示中なら該当 line の候補を確定する
         // (一般的な日本語 IME の慣例。IMKCandidates のデフォルト selectionKeys と一致)
+        //
+        // segmented モード時は **focused 文節で line N を選択 → 全文連結で確定**。
+        // これをしないと「こうそくでうってると」で 1-9 押下時に focused 文節
+        // (= 「こうそく」) の surface だけ commit され、残り「でうってると」が消失
+        // (2026-06-10 ユーザー報告で再発確認)。
         if state.candidates.is_some() && text.chars().count() == 1 {
             if let Some(digit_char) = text.chars().next() {
                 if ('1'..='9').contains(&digit_char) {
                     let line_idx = (digit_char as usize) - ('1' as usize);
-                    // borrow checker 回避: 学習に必要な情報を先に取り出してから
-                    // 別スコープで with_engine_mut を呼ぶ
-                    let selected: Option<Candidate> = {
+
+                    // candidates から line_idx を選択
+                    let selected_cand: Option<Candidate> = {
                         if let Some(candidates) = state.candidates.as_mut() {
                             if line_idx < candidates.iter().count() {
                                 candidates.select(line_idx);
@@ -312,13 +396,34 @@ impl NukoInputController {
                             None
                         }
                     };
-                    if let Some(selected) = selected {
+
+                    if let Some(picked) = selected_cand {
+                        // segmented モード: focused 文節に sync back + 全文 commit
+                        let commit_text;
+                        let learn_targets: Vec<Candidate>;
+                        if let Some(segmented) = state.segmented.as_mut() {
+                            let focused = segmented.focused;
+                            if let Some(seg) = segmented.segments.get_mut(focused) {
+                                seg.select(line_idx);
+                            }
+                            commit_text = segmented.current_surface();
+                            learn_targets = segmented
+                                .segments
+                                .iter()
+                                .filter_map(|s| s.current().cloned())
+                                .collect();
+                        } else {
+                            commit_text = picked.surface.clone();
+                            learn_targets = vec![picked.clone()];
+                        }
+
                         let ctx_snapshot = state.context.clone();
-                        with_engine_mut(|engine| {
-                            let _ = engine.commit(&selected, &ctx_snapshot);
-                        });
-                        state.context.push_prev_word(&selected.surface);
-                        let commit_text = selected.surface.clone();
+                        for c in &learn_targets {
+                            with_engine_mut(|engine| {
+                                let _ = engine.commit(c, &ctx_snapshot);
+                            });
+                        }
+                        state.context.push_prev_word(&commit_text);
                         state.reset();
                         drop(state);
                         Self::hide_candidate_panel();
@@ -328,8 +433,7 @@ impl NukoInputController {
                         ));
                         return Bool::YES;
                     }
-                    // 数字 1-9 だが候補数を超えるなど → fallthrough して既存の
-                    // 「文字入力 = 確定 + 新規入力開始」パスへ
+                    // 数字 1-9 だが候補数を超えるなど → fallthrough
                 }
             }
         }
@@ -404,13 +508,23 @@ impl NukoInputController {
         }
 
         // 候補選択中に文字を打ったら確定して新しい入力開始
+        //
+        // segmented モード時は **全文連結 commit** を使う (= focused 文節だけの
+        // partial commit で残り消失するバグ回避、2026-06-10 ユーザー報告)。
         if state.candidates.is_some() {
-            let commit_text = state
-                .candidates
-                .as_ref()
-                .and_then(|c| c.selected())
-                .map(|s| s.surface.clone())
-                .unwrap_or_else(|| state.composition.clone());
+            // segmented モード: focused に sync back してから current_surface()
+            let segmented_commit_text: Option<String> =
+                state.segmented.as_ref().map(|s| s.current_surface());
+            let commit_text = if let Some(t) = segmented_commit_text {
+                t
+            } else {
+                state
+                    .candidates
+                    .as_ref()
+                    .and_then(|c| c.selected())
+                    .map(|s| s.surface.clone())
+                    .unwrap_or_else(|| state.composition.clone())
+            };
 
             if let Some(ref candidates) = state.candidates {
                 if let Some(selected) = candidates.selected() {

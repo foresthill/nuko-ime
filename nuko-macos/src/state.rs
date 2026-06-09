@@ -175,6 +175,12 @@ pub struct InputState {
     /// 活性化から短時間以内の Space は「ショートカットの漏れ」と判定して
     /// 破棄する目的で記録する。
     pub activated_at: Option<Instant>,
+    /// 直近の「かな」キー押下時刻 (handleEvent: で keyCode 104 を検知して記録)
+    ///
+    /// macOS Japanese keyboard の「かな」キーを押した直後、なぜか Space イベント
+    /// が inputText: に漏れて入ることが確認された (2026-06-09 ユーザー報告)。
+    /// 「かな」キー押下から短時間以内の Space は「漏れ」と判定して破棄するため記録。
+    pub kana_pressed_at: Option<Instant>,
 }
 
 impl InputState {
@@ -188,6 +194,7 @@ impl InputState {
             is_composing: false,
             japanese_mode: true, // デフォルトは日本語入力モード
             activated_at: None,
+            kana_pressed_at: None,
         }
     }
 
