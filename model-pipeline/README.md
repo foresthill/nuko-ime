@@ -125,7 +125,9 @@ model-pipeline/
 │   └── SKK-JISYO.akaza  # 手書き seed 辞書 (上流流用、Phase 2-E で自前置換)
 │                        # ※ akaza-data make-dict が dict/SKK-JISYO.akaza を
 │                        #    ハードコードで探すため、ディレクトリ名は dict/ 固定
-├── scripts/             # 前処理ヘルパー (Python/シェル、Phase 2-C で追加)
+├── scripts/             # 前処理ヘルパー (Python/シェル)
+│   └── sudachi_to_corpus.py  # SudachiDict 漢字普通名詞 → corpus 形式抽出
+│                             # (上流 make-dict が落とす漢字熟語を救う)
 ├── tools/               # cargo install 先 (gitignore)
 ├── work/                # ダウンロード/展開の中間ファイル (gitignore)
 └── data/                # 最終生成モデル (gitignore、Release に添付)
