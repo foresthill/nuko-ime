@@ -22,12 +22,14 @@
 
 - **高速**: Rust製による高速な変換処理を目指す
 - **軽量**: 最小限のメモリ使用量を目指す
-- **学習機能**: ユーザーの入力パターンに適応 (実装中)
+- **学習機能**: ユーザーの入力パターンに適応 (頻度ベースを実装済、AI 蒸留は将来)
 - **プライバシー重視**: 完全オフライン動作、データは端末内のみ
+- **候補ウィンドウ**: 自前 NSPanel ベースで複数候補を一覧表示、数字 1-9 で直接選択
 - **マルチプラットフォーム指向**: 現在は **macOS** で開発中。Linux / Windows は将来対応予定
 
 > [!NOTE]
-> ぬこIMEは現在 **開発初期段階** です。実機で動作するのは macOS のみで、かな漢字変換エンジンは統合中です。
+> ぬこIMEは現在 **開発初期段階** です。実機で動作するのは macOS のみ。
+> 変換エンジン (libakaza) は統合済で、日常入力レベルの実用域には到達しています。
 > 詳細は [ロードマップ](docs/ROADMAP.md) を参照してください。
 
 ## インストール
@@ -54,6 +56,24 @@ FEATURES=akaza ./nuko-macos/scripts/install.sh
 libakaza バックエンドの **モデル生成・配置手順** は
 [`model-pipeline/README.md`](model-pipeline/README.md) を参照してください。
 
+### モデル更新時の反映 (2 種類)
+
+Rust コード変更時は `install.sh` で `.app` 再ビルド。libakaza モデル更新時は以下のファイル配置 + `killall NukoIME`:
+
+```bash
+MODEL_DIR="$HOME/Library/Application Support/nuko-ime/akaza-model"
+cp -v model-pipeline/data/SKK-JISYO.akaza \
+      model-pipeline/data/unigram.model \
+      model-pipeline/data/bigram.model \
+      model-pipeline/data/bigram.model.scores \
+      model-pipeline/data/skip_bigram.model \
+      model-pipeline/data/skip_bigram.model.scores \
+      "$MODEL_DIR/"
+killall NukoIME
+```
+
+**`*.scores` ファイル 2 つも必須** (合計 6 ファイル)。漏らすと libakaza が silent fail して静的辞書フォールバックになる。
+
 ## 使い方
 
 インストール後、システムの入力ソース設定から「ぬこIME」を追加してください。
@@ -62,11 +82,14 @@ libakaza バックエンドの **モデル生成・配置手順** は
 
 | キー | 動作 |
 |-----|------|
-| Space | 変換 |
-| Enter | 確定 |
+| Space | 変換 / 候補表示中は次候補へ巡回 |
+| ↓ | 次候補 (候補表示中) |
+| ↑ | 前候補 (候補表示中) |
+| 数字 1-9 | 該当行の候補を直接確定 |
+| Enter | 現在の選択を確定 |
+| Escape | 変換をキャンセル |
 | Tab | 次の候補 |
 | Shift+Tab | 前の候補 |
-| Escape | キャンセル |
 | F7 | カタカナ変換 |
 | F8 | 半角カタカナ変換 |
 | F9 | 全角英数変換 |
@@ -126,6 +149,7 @@ Apache License 2.0 または MIT License のデュアルライセンスです。
 
 ## 関連リンク
 
+- [開発ノート (CLAUDE.md)](CLAUDE.md) — ビルド/デプロイ手順・落とし穴
 - [アーキテクチャ](docs/ARCHITECTURE.md) — 現在の構成
 - [ロードマップ](docs/ROADMAP.md) — Phase 別の実装順序
 - [将来機能](docs/FUTURE_FEATURES.md)
