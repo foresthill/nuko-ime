@@ -504,35 +504,30 @@ impl NukoInputController {
 
         // 候補選択中に文字を打ったら確定して新しい入力開始
         //
-        // segmented モード時は **全文連結 commit** を使う (= focused 文節だけの
-        // partial commit で残り消失するバグ回避、2026-06-10 ユーザー報告)。
+        // 決定ロジックは純粋関数 `crate::commit::decide_commit` に委譲。
+        // segmented モード時の全文連結 + 全文節の個別学習は decide_commit が保証。
+        //
+        // 旧コード (PR #51) では commit_text は segmented.current_surface() を使っていたが
+        // 学習は candidates.selected (= focused 文節だけ) しか記録しない潜在バグがあった。
+        // decide_commit 経由にすることで **全 segment の選択候補を個別に学習** するように。
         if state.candidates.is_some() {
-            // segmented モード: focused に sync back してから current_surface()
-            let segmented_commit_text: Option<String> =
-                state.segmented.as_ref().map(|s| s.current_surface());
-            let commit_text = if let Some(t) = segmented_commit_text {
-                t
-            } else {
-                state
-                    .candidates
-                    .as_ref()
-                    .and_then(|c| c.selected())
-                    .map(|s| s.surface.clone())
-                    .unwrap_or_else(|| state.composition.clone())
-            };
+            let decision = crate::commit::decide_commit(&state);
 
-            if let Some(ref candidates) = state.candidates {
-                if let Some(selected) = candidates.selected() {
-                    with_engine_mut(|engine| {
-                        let _ = engine.commit(selected, &state.context);
-                    });
-                }
+            // 副作用: 各 segment (segmented 時) ないし selected (flat 時) を学習
+            let ctx_snapshot = state.context.clone();
+            for c in &decision.learn_targets {
+                with_engine_mut(|engine| {
+                    let _ = engine.commit(c, &ctx_snapshot);
+                });
+            }
+            if !decision.commit_text.is_empty() {
+                state.context.push_prev_word(&decision.commit_text);
             }
 
             state.reset();
             drop(state);
             Self::hide_candidate_panel();
-            Self::insert_text_on_client(client, &commit_text);
+            Self::insert_text_on_client(client, &decision.commit_text);
 
             // 新しい文字の入力を開始
             let mut state = self.ivars().state.borrow_mut();
