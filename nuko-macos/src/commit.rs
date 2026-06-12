@@ -99,6 +99,59 @@ pub fn decide_commit(state: &InputState) -> CommitDecision {
     }
 }
 
+/// 数字 1-9 キーが押された時の commit 決定 (テスト基盤 #2)。
+///
+/// `digit` が `'1'..='9'` で、かつ `state.candidates` の `line_idx (= digit - '1')`
+/// 番目の候補が存在するときのみ `Some(CommitDecision)` を返す。
+///
+/// segmented モード時は **focused 文節に line_idx を反映してから全文連結**
+/// (= 既存の数字ハンドラのデータ消失バグを防ぐ。PR #51 で fix した挙動を
+/// 純粋関数として固定化)。
+///
+/// 純粋関数: `state` は immut borrow、segmented mode 時は内部で clone して
+/// mutate するため呼び出し側の状態は変わらない。
+///
+/// # 戻り値
+///
+/// - `Some(decision)` — 数字選択可能、commit してよい
+/// - `None` — 数字でない / 範囲外 / 候補無し
+///   呼び出し側は別経路 (= 「他文字打鍵で auto-commit」) にフォールバックする
+#[must_use]
+pub fn decide_digit_select_and_commit(state: &InputState, digit: char) -> Option<CommitDecision> {
+    if !('1'..='9').contains(&digit) {
+        return None;
+    }
+    let line_idx = (digit as usize) - ('1' as usize);
+
+    let candidates = state.candidates.as_ref()?;
+    if line_idx >= candidates.iter().count() {
+        return None;
+    }
+
+    // segmented モード: focused 文節に line_idx を反映 → 全文連結
+    if let Some(segmented) = state.segmented.as_ref() {
+        let mut new_segmented = segmented.clone();
+        if let Some(seg) = new_segmented.focused_segment_mut() {
+            seg.select(line_idx);
+        }
+        return Some(CommitDecision {
+            commit_text: new_segmented.current_surface(),
+            learn_targets: new_segmented
+                .segments
+                .iter()
+                .filter_map(|s| s.current().cloned())
+                .collect(),
+        });
+    }
+
+    // flat モード: line_idx の候補だけ
+    let picked = candidates.iter().nth(line_idx)?.clone();
+    Some(CommitDecision {
+        commit_text: picked.surface.clone(),
+        learn_targets: vec![picked],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     //! `decide_commit` の不変条件テスト群。
@@ -392,5 +445,158 @@ mod tests {
         let mut state = composing_state("にほん");
         state.context = ConversionContext::default();
         let _ = decide_commit(&state); // panic しないこと
+    }
+
+    // -- decide_digit_select_and_commit のテスト群 ------------------------
+    //
+    // 守りたい不変条件:
+    //
+    // a. 数字でないキー入力では `None` を返す
+    // b. 範囲外 line (= 候補数 < line_idx) では `None`
+    // c. candidates 無しでは `None`
+    // d. **segmented モード時は focused 文節に line_idx を反映 → 全文連結**
+    //    (= データ消失防止の本丸、PR #51 で fix した挙動)
+    // e. **flat モード時は line_idx の候補だけ commit**
+    // f. **副作用なし** — 元の state は変わらない
+
+    #[test]
+    fn digit_returns_none_for_non_digit() {
+        let state = flat_state(vec![cand("日本", "にほん", 100)]);
+        assert!(decide_digit_select_and_commit(&state, 'a').is_none());
+        assert!(decide_digit_select_and_commit(&state, '0').is_none()); // 0 は対象外
+        assert!(decide_digit_select_and_commit(&state, ' ').is_none());
+    }
+
+    #[test]
+    fn digit_returns_none_when_no_candidates() {
+        let state = composing_state("にほん");
+        assert!(decide_digit_select_and_commit(&state, '1').is_none());
+    }
+
+    #[test]
+    fn digit_returns_none_when_out_of_range() {
+        // 候補 2 件しか無いのに '3' を押すと None
+        let state = flat_state(vec![
+            cand("日本", "にほん", 100),
+            cand("二本", "にほん", 80),
+        ]);
+        assert!(decide_digit_select_and_commit(&state, '3').is_none());
+    }
+
+    #[test]
+    fn digit_flat_mode_selects_line() {
+        let state = flat_state(vec![
+            cand("日本", "にほん", 100),
+            cand("二本", "にほん", 80),
+            cand("にほん", "にほん", -100),
+        ]);
+
+        let d = decide_digit_select_and_commit(&state, '2').unwrap();
+        assert_eq!(d.commit_text, "二本", "★ '2' で line 1 (= 二本) を確定");
+        assert_eq!(d.learn_targets.len(), 1);
+    }
+
+    #[test]
+    fn digit_segmented_mode_full_sentence_with_chosen_line() {
+        // 「わたしのなまえ」: 文節 0 (= わたし) で焦点
+        // candidates は focused 文節の候補リスト
+        let mut state = segmented_state(
+            vec![
+                Segment::new(
+                    "わたし",
+                    vec![cand("私", "わたし", 100), cand("渡し", "わたし", 80)],
+                ),
+                Segment::new("の", vec![cand("の", "の", 100)]),
+                Segment::new("なまえ", vec![cand("名前", "なまえ", 100)]),
+            ],
+            0,
+        );
+        // controller は focused 文節の候補リストを state.candidates に load する
+        let mut list = CandidateList::new();
+        for c in &state.segmented.as_ref().unwrap().segments[0].candidates {
+            list.push(c.clone());
+        }
+        state.candidates = Some(list);
+
+        // '2' で line 1 (= 渡し) を選ぶ → 全文「渡しの名前」になることを保証
+        let d = decide_digit_select_and_commit(&state, '2').unwrap();
+        assert_eq!(
+            d.commit_text, "渡しの名前",
+            "★ segmented モード: focused 文節 0 の line 1 (= 渡し) + 他文節 (の / 名前) を連結"
+        );
+        assert_eq!(d.learn_targets.len(), 3, "★ 各文節の選択を個別に学習");
+    }
+
+    #[test]
+    fn digit_segmented_mode_no_data_loss_pattern() {
+        // 「こうそくでうってると」 PR #49/51 のデータ消失バグパターン
+        let mut state = segmented_state(
+            vec![
+                Segment::new(
+                    "こうそく",
+                    vec![cand("高速", "こうそく", 100), cand("拘束", "こうそく", 80)],
+                ),
+                Segment::new("で", vec![cand("で", "で", 100)]),
+                Segment::new("うって", vec![cand("打って", "うって", 100)]),
+                Segment::new("る", vec![cand("る", "る", 100)]),
+                Segment::new("と", vec![cand("と", "と", 100)]),
+            ],
+            0,
+        );
+        let mut list = CandidateList::new();
+        for c in &state.segmented.as_ref().unwrap().segments[0].candidates {
+            list.push(c.clone());
+        }
+        state.candidates = Some(list);
+
+        // '1' で line 0 (= 高速) を確定 → 全文「高速で打ってると」
+        let d = decide_digit_select_and_commit(&state, '1').unwrap();
+        assert_eq!(
+            d.commit_text, "高速で打ってると",
+            "★ 焦点 0 で '1' を押しても残り文節 (で/打って/る/と) は消失しない"
+        );
+    }
+
+    #[test]
+    fn digit_does_not_mutate_state() {
+        let state = flat_state(vec![
+            cand("日本", "にほん", 100),
+            cand("二本", "にほん", 80),
+        ]);
+        let original_selected = state.candidates.as_ref().unwrap().selected_index();
+
+        let _ = decide_digit_select_and_commit(&state, '2');
+        assert_eq!(
+            state.candidates.as_ref().unwrap().selected_index(),
+            original_selected,
+            "★ 純粋関数: state は変化しない"
+        );
+    }
+
+    #[test]
+    fn digit_segmented_does_not_mutate_state() {
+        let mut state = segmented_state(
+            vec![Segment::new(
+                "わたし",
+                vec![cand("私", "わたし", 100), cand("渡し", "わたし", 80)],
+            )],
+            0,
+        );
+        let mut list = CandidateList::new();
+        for c in &state.segmented.as_ref().unwrap().segments[0].candidates {
+            list.push(c.clone());
+        }
+        state.candidates = Some(list);
+
+        let original_focused = state.segmented.as_ref().unwrap().focused;
+        let original_seg0_sel = state.segmented.as_ref().unwrap().segments[0].selected;
+
+        let _ = decide_digit_select_and_commit(&state, '2');
+        assert_eq!(state.segmented.as_ref().unwrap().focused, original_focused);
+        assert_eq!(
+            state.segmented.as_ref().unwrap().segments[0].selected,
+            original_seg0_sel,
+            "★ segmented モードでも state は変化しない (内部で clone)"
+        );
     }
 }

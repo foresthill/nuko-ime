@@ -17,7 +17,7 @@ use objc2_foundation::{NSArray, NSPoint, NSRange, NSString};
 use objc2_input_method_kit::{IMKInputController, IMKServer};
 use tracing::{debug, error, info, warn};
 
-use nuko_core::conversion::{Candidate, CandidateList};
+use nuko_core::conversion::CandidateList;
 
 use crate::state::{
     ensure_custom_panel, with_custom_panel, with_engine, with_engine_mut, InputState,
@@ -391,67 +391,45 @@ impl NukoInputController {
         // 数字キー 1-9: 候補表示中なら該当 line の候補を確定する
         // (一般的な日本語 IME の慣例。IMKCandidates のデフォルト selectionKeys と一致)
         //
-        // segmented モード時は **focused 文節で line N を選択 → 全文連結で確定**。
-        // これをしないと「こうそくでうってると」で 1-9 押下時に focused 文節
-        // (= 「こうそく」) の surface だけ commit され、残り「でうってると」が消失
-        // (2026-06-10 ユーザー報告で再発確認)。
+        // 決定ロジックは純粋関数 `crate::commit::decide_digit_select_and_commit` に
+        // 委譲。`unit test` でカバー済み (segmented mode のデータ消失防止含む)。
         if state.candidates.is_some() && text.chars().count() == 1 {
             if let Some(digit_char) = text.chars().next() {
-                if ('1'..='9').contains(&digit_char) {
+                if let Some(decision) =
+                    crate::commit::decide_digit_select_and_commit(&state, digit_char)
+                {
                     let line_idx = (digit_char as usize) - ('1' as usize);
 
-                    // candidates から line_idx を選択
-                    let selected_cand: Option<Candidate> = {
-                        if let Some(candidates) = state.candidates.as_mut() {
-                            if line_idx < candidates.iter().count() {
-                                candidates.select(line_idx);
-                                candidates.selected().cloned()
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    };
-
-                    if let Some(picked) = selected_cand {
-                        // segmented モード: focused 文節に sync back + 全文 commit
-                        let commit_text;
-                        let learn_targets: Vec<Candidate>;
-                        if let Some(segmented) = state.segmented.as_mut() {
-                            let focused = segmented.focused;
-                            if let Some(seg) = segmented.segments.get_mut(focused) {
-                                seg.select(line_idx);
-                            }
-                            commit_text = segmented.current_surface();
-                            learn_targets = segmented
-                                .segments
-                                .iter()
-                                .filter_map(|s| s.current().cloned())
-                                .collect();
-                        } else {
-                            commit_text = picked.surface.clone();
-                            learn_targets = vec![picked.clone()];
-                        }
-
-                        let ctx_snapshot = state.context.clone();
-                        for c in &learn_targets {
-                            with_engine_mut(|engine| {
-                                let _ = engine.commit(c, &ctx_snapshot);
-                            });
-                        }
-                        state.context.push_prev_word(&commit_text);
-                        state.reset();
-                        drop(state);
-                        Self::hide_candidate_panel();
-                        Self::insert_text_on_client(client, &commit_text);
-                        debug_log(&format!(
-                            "digit-{digit_char}: committed line {line_idx} = '{commit_text}'"
-                        ));
-                        return Bool::YES;
+                    // 副作用: 状態を decide の決定に合わせて更新
+                    if let Some(candidates) = state.candidates.as_mut() {
+                        candidates.select(line_idx);
                     }
-                    // 数字 1-9 だが候補数を超えるなど → fallthrough
+                    if let Some(segmented) = state.segmented.as_mut() {
+                        let focused = segmented.focused;
+                        if let Some(seg) = segmented.segments.get_mut(focused) {
+                            seg.select(line_idx);
+                        }
+                    }
+
+                    // 副作用: 学習
+                    let ctx_snapshot = state.context.clone();
+                    for c in &decision.learn_targets {
+                        with_engine_mut(|engine| {
+                            let _ = engine.commit(c, &ctx_snapshot);
+                        });
+                    }
+                    state.context.push_prev_word(&decision.commit_text);
+                    state.reset();
+                    drop(state);
+                    Self::hide_candidate_panel();
+                    Self::insert_text_on_client(client, &decision.commit_text);
+                    debug_log(&format!(
+                        "digit-{digit_char}: committed line {line_idx} = '{}'",
+                        decision.commit_text
+                    ));
+                    return Bool::YES;
                 }
+                // 数字 1-9 だが候補数を超える等 → fallthrough
             }
         }
 
