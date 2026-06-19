@@ -599,4 +599,75 @@ mod tests {
             "★ segmented モードでも state は変化しない (内部で clone)"
         );
     }
+
+    // -- auto-commit (他文字打鍵時) のテスト群 ---------------------------
+    //
+    // 「候補表示中に新しい文字を打ったら現在の候補を確定して新しい入力を始める」パス。
+    // 決定ロジックは `decide_commit` を使い回せるので、ここでは
+    // **auto-commit 経路特有の不変条件** を追加検証する:
+    //
+    // - segmented モード時、auto-commit でも **全 segment が学習対象** になる
+    //   (旧コード PR #51 は commit_text だけ全文で、学習は focused 文節のみ
+    //   = 潜在バグがあった)
+    // - flat モード時は 1 件の selected を学習
+
+    #[test]
+    fn auto_commit_segmented_learns_all_segments_not_just_focused() {
+        // 「よろしくお願いいたします」で focused=2 (= いたします) で auto-commit
+        // 学習対象は **全 3 segment** であるべき (= 文節 0/1 も学習されてしかるべき)
+        let state = segmented_state(
+            vec![
+                Segment::new("よろしく", vec![cand("宜しく", "よろしく", 100)]),
+                Segment::new("おねがい", vec![cand("お願い", "おねがい", 100)]),
+                Segment::new("いたします", vec![cand("致します", "いたします", 100)]),
+            ],
+            2, // focus = 最後の segment
+        );
+
+        let d = decide_commit(&state);
+        assert_eq!(d.commit_text, "宜しくお願い致します");
+        assert_eq!(
+            d.learn_targets.len(),
+            3,
+            "★ auto-commit でも全 segment が learn_targets に入る (旧コードは 1 件しか記録してなかった)"
+        );
+        // 順序保証
+        assert_eq!(d.learn_targets[0].surface, "宜しく");
+        assert_eq!(d.learn_targets[1].surface, "お願い");
+        assert_eq!(d.learn_targets[2].surface, "致します");
+    }
+
+    #[test]
+    fn auto_commit_flat_mode_learns_only_selected() {
+        // flat モードでは learn_targets = 1 件 (selected のみ)
+        let state = flat_state(vec![
+            cand("日本", "にほん", 100),
+            cand("二本", "にほん", 80),
+        ]);
+        let d = decide_commit(&state);
+        assert_eq!(d.learn_targets.len(), 1);
+        assert_eq!(d.learn_targets[0].surface, "日本");
+    }
+
+    #[test]
+    fn auto_commit_after_focus_shift_still_commits_full_sentence() {
+        // ←→ で焦点を動かした後でも auto-commit で全文が commit される
+        // = 焦点を変えただけで前半 segment が消えるバグの防止
+        let mut state = segmented_state(
+            vec![
+                Segment::new("わたし", vec![cand("私", "わたし", 100)]),
+                Segment::new("の", vec![cand("の", "の", 100)]),
+                Segment::new("なまえ", vec![cand("名前", "なまえ", 100)]),
+            ],
+            0,
+        );
+        // 焦点を 2 に動かす
+        state.segmented.as_mut().unwrap().focus(2);
+
+        let d = decide_commit(&state);
+        assert_eq!(
+            d.commit_text, "私の名前",
+            "★ 焦点が末尾でも全文連結 (= 焦点位置に依存しない)"
+        );
+    }
 }
