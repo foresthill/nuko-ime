@@ -19,7 +19,7 @@ use tracing::{debug, error, info, warn};
 
 use nuko_core::conversion::CandidateList;
 
-use crate::commit::CommandAction;
+use crate::commit::{CommandAction, SpaceAction};
 use crate::state::{
     ensure_custom_panel, with_custom_panel, with_engine, with_engine_mut, InputState,
 };
@@ -226,9 +226,6 @@ define_class!(
 
 // --- メソッド実装 ---
 
-/// 「かな」キー押下から Space leak を破棄する時間 (ms)
-const KANA_GUARD_MS: u128 = 300;
-
 /// macOS Japanese keyboard の物理キー keyCode
 const KEY_CODE_LEFT_ARROW: u16 = 123;
 const KEY_CODE_RIGHT_ARROW: u16 = 124;
@@ -335,58 +332,64 @@ impl NukoInputController {
         // 150ms の活性化ガードは引き続き有効 ("かな" キーが本物の Space と
         // 紛らわしいパスでホストに渡る場合の防御)。
         if text == " " {
-            // 活性化直後の Space は破棄 (ソース切替の漏れ対策)
-            const ACTIVATION_GUARD_MS: u128 = 150;
-            if let Some(activated_at) = state.activated_at {
-                if activated_at.elapsed().as_millis() < ACTIVATION_GUARD_MS
-                    && state.candidates.is_none()
-                    && !state.is_composing
-                {
+            // Space キーの分岐決定は純粋関数 `crate::commit::decide_space_action`
+            // に委譲 (テスト基盤 #5)。経過時間の計測だけここで行い、閾値比較を
+            // 含む判定ロジックは純粋関数側に集約する。
+            let activation_elapsed_ms = state.activated_at.map(|t| t.elapsed().as_millis());
+            let kana_elapsed_ms = state.kana_pressed_at.map(|t| t.elapsed().as_millis());
+            let action = crate::commit::decide_space_action(
+                state.candidates.is_some(),
+                state.is_composing,
+                activation_elapsed_ms,
+                kana_elapsed_ms,
+            );
+
+            match action {
+                SpaceAction::DiscardActivationGuard => {
+                    // 活性化直後の Space は破棄 (ソース切替の漏れ対策)
                     state.activated_at = None; // 1 shot で消費
                     debug_log("space: discard (activation guard, likely source-switch leak)");
                     return Bool::YES;
                 }
-            }
-
-            // 「かな」キー押下直後の Space leak も破棄 (2026-06-10 報告)
-            if let Some(kana_at) = state.kana_pressed_at {
-                if kana_at.elapsed().as_millis() < KANA_GUARD_MS {
+                SpaceAction::DiscardKanaGuard => {
+                    // 「かな」キー押下直後の Space leak も破棄 (2026-06-10 報告)
                     state.kana_pressed_at = None; // 1 shot で消費
                     debug_log("space: discard (kana key guard, likely kana key leak)");
                     return Bool::YES;
                 }
-            }
-
-            if state.candidates.is_some() {
-                let mut new_idx = None;
-                if let Some(ref mut candidates) = state.candidates {
-                    candidates.select_next();
-                    new_idx = Some(candidates.selected_index());
-                    let surface = candidates
-                        .selected()
-                        .map(|s| s.surface.clone())
-                        .unwrap_or_default();
-                    debug_log(&format!("space: cycle to next candidate '{surface}'"));
+                SpaceAction::CycleNextCandidate => {
+                    let mut new_idx = None;
+                    if let Some(ref mut candidates) = state.candidates {
+                        candidates.select_next();
+                        new_idx = Some(candidates.selected_index());
+                        let surface = candidates
+                            .selected()
+                            .map(|s| s.surface.clone())
+                            .unwrap_or_default();
+                        debug_log(&format!("space: cycle to next candidate '{surface}'"));
+                        drop(state);
+                        Self::set_marked_text_on_client(client, &surface);
+                    }
+                    // パネル内部の青ハイライトも同期 (IMK の default routing が
+                    // 効かない環境向けに明示的に呼ぶ)
+                    if let Some(idx) = new_idx {
+                        self.sync_panel_selection(idx);
+                    }
+                    return Bool::YES;
+                }
+                SpaceAction::Convert => {
                     drop(state);
-                    Self::set_marked_text_on_client(client, &surface);
+                    self.do_convert(client);
+                    return Bool::YES;
                 }
-                // パネル内部の青ハイライトも同期 (IMK の default routing が
-                // 効かない環境向けに明示的に呼ぶ)
-                if let Some(idx) = new_idx {
-                    self.sync_panel_selection(idx);
+                SpaceAction::PassThrough => {
+                    // 未確定状態 (= 入力中でない、候補も無い): ホストに任せる。
+                    // = macOS 標準の半角スペース挿入 (ことえり相当)。
+                    drop(state);
+                    debug_log("space: passthrough to host (no composition)");
+                    return Bool::NO;
                 }
-                return Bool::YES;
             }
-            if state.is_composing {
-                drop(state);
-                self.do_convert(client);
-                return Bool::YES;
-            }
-            // 未確定状態 (= 入力中でない、候補も無い): ホストに任せる。
-            // = macOS 標準の半角スペース挿入 (ことえり相当)。
-            drop(state);
-            debug_log("space: passthrough to host (no composition)");
-            return Bool::NO;
         }
 
         // 数字キー 1-9: 候補表示中なら該当 line の候補を確定する
