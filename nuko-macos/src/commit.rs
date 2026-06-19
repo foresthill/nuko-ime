@@ -213,6 +213,83 @@ pub fn decide_command(selector_name: &std::ffi::CStr, is_composing: bool) -> Com
     }
 }
 
+/// activation guard 閾値 (ms)。IME 活性化直後のこの時間内に来た Space は、
+/// ソース切替ショートカット (Ctrl+Space) 由来の「漏れ」と判定して握り潰す。
+pub const ACTIVATION_GUARD_MS: u128 = 150;
+
+/// kana guard 閾値 (ms)。「かな」キー押下直後のこの時間内に来た Space は、
+/// かなキー由来の「漏れ」と判定して握り潰す (2026-06-10 報告)。
+pub const KANA_GUARD_MS: u128 = 300;
+
+/// Space キーが日本語モードで押されたときに実行すべきアクション (テスト基盤 #5)。
+///
+/// `_input_text_impl` の Space 分岐は、活性化ガード・かなガードという
+/// **タイミング依存の握り潰し** と、候補巡回 / 変換 / パススルーの分岐が
+/// 絡んでいて過去にバグを生んできた。判定だけを純粋関数 `decide_space_action`
+/// に切り出して固定化する。
+///
+/// 副作用 (activated_at の消費 / 候補巡回 / do_convert / marked text 更新) は
+/// 引き続き呼び出し側の責務。本 enum は「何をすべきか」だけを表す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceAction {
+    /// 活性化ガード発火 → `activated_at` を消費して握り潰す (`Bool::YES`)
+    DiscardActivationGuard,
+    /// かなガード発火 → `kana_pressed_at` を消費して握り潰す (`Bool::YES`)
+    DiscardKanaGuard,
+    /// 候補表示中 → 次候補へ巡回 (`Bool::YES`)
+    CycleNextCandidate,
+    /// 未確定文字列あり → 変換実行 (`Bool::YES`)
+    Convert,
+    /// それ以外 → ホストにパススルー (= macOS 標準の半角スペース, `Bool::NO`)
+    PassThrough,
+}
+
+/// Space キーの状態から実行すべきアクションを返す。
+///
+/// `activation_elapsed_ms` / `kana_elapsed_ms` は対応するタイムスタンプが
+/// `None` (未設定) なら `None` を渡す。経過時間と閾値の比較は本関数が行う。
+///
+/// ## 守りたい不変条件 (= 過去のバグから抽出)
+///
+/// 1. **活性化ガードは「候補も未確定も無い」ときだけ発火** — 変換中や候補表示中の
+///    Space を握り潰すと、変換・巡回ができなくなる (= 致命的)。
+/// 2. **かなガードは候補/未確定に関わらず発火** — かなキー漏れは状態を問わず
+///    握り潰す (既存挙動。PR 履歴の意図を保存)。
+/// 3. **優先順は 活性化ガード → かなガード → 候補巡回 → 変換 → パススルー**。
+/// 4. **タイムスタンプ未設定 (`None`) ならそのガードはスキップ**。
+///
+/// 純粋関数: 入力は `bool` と `Option<u128>` のみ。`Instant` / ObjC 不要。
+#[must_use]
+pub fn decide_space_action(
+    has_candidates: bool,
+    is_composing: bool,
+    activation_elapsed_ms: Option<u128>,
+    kana_elapsed_ms: Option<u128>,
+) -> SpaceAction {
+    // 不変条件 1: 活性化ガードは候補も未確定も無いときだけ
+    if let Some(ms) = activation_elapsed_ms {
+        if ms < ACTIVATION_GUARD_MS && !has_candidates && !is_composing {
+            return SpaceAction::DiscardActivationGuard;
+        }
+    }
+    // 不変条件 2: かなガードは状態を問わず発火
+    if let Some(ms) = kana_elapsed_ms {
+        if ms < KANA_GUARD_MS {
+            return SpaceAction::DiscardKanaGuard;
+        }
+    }
+    // 候補表示中 → 巡回
+    if has_candidates {
+        return SpaceAction::CycleNextCandidate;
+    }
+    // 未確定あり → 変換
+    if is_composing {
+        return SpaceAction::Convert;
+    }
+    // それ以外 → パススルー
+    SpaceAction::PassThrough
+}
+
 #[cfg(test)]
 mod tests {
     //! `decide_commit` の不変条件テスト群。
@@ -813,6 +890,116 @@ mod tests {
             decide_command(c"insertNewline:", false),
             CommandAction::PassThrough,
             "★ 未変換状態の Enter は IME が触らずアプリに渡す"
+        );
+    }
+
+    // -- テスト基盤 #5: decide_space_action の不変条件テスト群 --
+
+    /// 不変条件 1: 活性化ガードは「候補も未確定も無い」ときだけ発火
+    #[test]
+    fn activation_guard_fires_only_when_idle() {
+        // 候補なし・未確定なし・閾値内 → 発火
+        assert_eq!(
+            decide_space_action(false, false, Some(0), None),
+            SpaceAction::DiscardActivationGuard,
+        );
+        assert_eq!(
+            decide_space_action(false, false, Some(ACTIVATION_GUARD_MS - 1), None),
+            SpaceAction::DiscardActivationGuard,
+        );
+    }
+
+    /// 不変条件 1 (裏): 変換中・候補表示中は活性化ガードを発火させない
+    /// (= 変換中の Space を握り潰して変換不能にするバグの防止)
+    #[test]
+    fn activation_guard_does_not_fire_while_busy() {
+        // 未確定あり → 活性化ガードはスキップ → Convert
+        assert_eq!(
+            decide_space_action(false, true, Some(0), None),
+            SpaceAction::Convert,
+            "★ 変換中の Space は握り潰さず変換する"
+        );
+        // 候補表示中 → 活性化ガードはスキップ → 巡回
+        assert_eq!(
+            decide_space_action(true, false, Some(0), None),
+            SpaceAction::CycleNextCandidate,
+            "★ 候補表示中の Space は握り潰さず巡回する"
+        );
+    }
+
+    /// 活性化ガードは閾値を過ぎたら発火しない
+    #[test]
+    fn activation_guard_expires_after_threshold() {
+        assert_eq!(
+            decide_space_action(false, false, Some(ACTIVATION_GUARD_MS), None),
+            SpaceAction::PassThrough,
+            "★ 閾値ちょうど以降は素の Space としてパススルー",
+        );
+        assert_eq!(
+            decide_space_action(false, false, Some(ACTIVATION_GUARD_MS + 1000), None),
+            SpaceAction::PassThrough,
+        );
+    }
+
+    /// 不変条件 2: かなガードは候補/未確定に関わらず発火 (既存挙動の保存)
+    #[test]
+    fn kana_guard_fires_regardless_of_state() {
+        assert_eq!(
+            decide_space_action(false, false, None, Some(0)),
+            SpaceAction::DiscardKanaGuard,
+        );
+        // 候補表示中でもかなガードが優先 (= かなキー漏れの握り潰し)
+        assert_eq!(
+            decide_space_action(true, false, None, Some(0)),
+            SpaceAction::DiscardKanaGuard,
+            "★ かなガードは候補表示中でも発火 (既存挙動)",
+        );
+        // 変換中でもかなガードが優先
+        assert_eq!(
+            decide_space_action(false, true, None, Some(KANA_GUARD_MS - 1)),
+            SpaceAction::DiscardKanaGuard,
+        );
+    }
+
+    /// かなガードは閾値を過ぎたら発火しない
+    #[test]
+    fn kana_guard_expires_after_threshold() {
+        // 候補なし・未確定なし・かな閾値超過 → パススルー
+        assert_eq!(
+            decide_space_action(false, false, None, Some(KANA_GUARD_MS)),
+            SpaceAction::PassThrough,
+        );
+    }
+
+    /// 不変条件 3: 優先順は 活性化 → かな → 候補 → 変換 → パススルー
+    #[test]
+    fn space_action_precedence() {
+        // 活性化ガードとかなガードが両方閾値内 (かつ idle) → 活性化が優先
+        assert_eq!(
+            decide_space_action(false, false, Some(0), Some(0)),
+            SpaceAction::DiscardActivationGuard,
+            "★ 活性化ガードがかなガードより優先",
+        );
+        // 候補と未確定が両方真 → 候補巡回が優先 (ガード無し)
+        assert_eq!(
+            decide_space_action(true, true, None, None),
+            SpaceAction::CycleNextCandidate,
+            "★ 候補表示が変換より優先",
+        );
+    }
+
+    /// 不変条件 4: タイムスタンプ未設定ならガードはスキップ
+    #[test]
+    fn no_timestamps_skips_guards() {
+        // 何も無い → パススルー (= macOS 標準の半角スペース)
+        assert_eq!(
+            decide_space_action(false, false, None, None),
+            SpaceAction::PassThrough,
+        );
+        // 未確定だけ → 変換
+        assert_eq!(
+            decide_space_action(false, true, None, None),
+            SpaceAction::Convert,
         );
     }
 }
