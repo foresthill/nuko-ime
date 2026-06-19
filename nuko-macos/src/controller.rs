@@ -19,6 +19,7 @@ use tracing::{debug, error, info, warn};
 
 use nuko_core::conversion::CandidateList;
 
+use crate::commit::CommandAction;
 use crate::state::{
     ensure_custom_panel, with_custom_panel, with_engine, with_engine_mut, InputState,
 };
@@ -579,80 +580,79 @@ impl NukoInputController {
             return Bool::NO;
         };
 
-        // かな/英数キーのセレクタ処理
+        // セレクタ名 + composing 状態 → アクションの決定は純粋関数
+        // `crate::commit::decide_command` に委譲 (テスト基盤 #4)。
+        // 非 composing 時は必ず PassThrough になる不変条件もそこで保証。
         let sel_name = selector.name();
+        let action = crate::commit::decide_command(sel_name, is_composing);
 
-        // 未確定状態でない場合は基本パススルー
-        if !is_composing {
-            return Bool::NO;
-        }
-
-        // セレクタ名を C 文字列リテラルで比較
-        let insert_newline = c"insertNewline:";
-        let cancel_op = c"cancelOperation:";
-        let delete_back = c"deleteBackward:";
-        let move_down = c"moveDown:";
-        let move_up = c"moveUp:";
-        let move_left = c"moveLeft:";
-        let move_right = c"moveRight:";
-
-        if sel_name == insert_newline {
-            // Enter: 確定
-            self.do_commit(client);
-            Bool::YES
-        } else if sel_name == cancel_op {
-            // Escape: 取消
-            self.do_cancel(client);
-            Bool::YES
-        } else if sel_name == delete_back {
-            // Backspace: 削除
-            self.do_backspace(client);
-            Bool::YES
-        } else if sel_name == move_left {
-            // Left: 文節フォーカスを前へ (segmented モードのみ)
-            self.handle_segment_focus_shift(client, /*forward=*/ false)
-        } else if sel_name == move_right {
-            // Right: 文節フォーカスを後ろへ (segmented モードのみ)
-            self.handle_segment_focus_shift(client, /*forward=*/ true)
-        } else if sel_name == move_down {
-            // Down: 次候補
-            let mut new_idx = None;
-            let mut state = self.ivars().state.borrow_mut();
-            if let Some(ref mut candidates) = state.candidates {
-                candidates.select_next();
-                new_idx = Some(candidates.selected_index());
-                if let Some(selected) = candidates.selected() {
-                    let surface = selected.surface.clone();
-                    drop(state);
-                    Self::set_marked_text_on_client(client, &surface);
+        match action {
+            CommandAction::PassThrough => Bool::NO,
+            CommandAction::Commit => {
+                // Enter: 確定
+                self.do_commit(client);
+                Bool::YES
+            }
+            CommandAction::Cancel => {
+                // Escape: 取消
+                self.do_cancel(client);
+                Bool::YES
+            }
+            CommandAction::Backspace => {
+                // Backspace: 削除
+                self.do_backspace(client);
+                Bool::YES
+            }
+            CommandAction::FocusShiftLeft => {
+                // Left: 文節フォーカスを前へ (segmented モードのみ)
+                self.handle_segment_focus_shift(client, /*forward=*/ false)
+            }
+            CommandAction::FocusShiftRight => {
+                // Right: 文節フォーカスを後ろへ (segmented モードのみ)
+                self.handle_segment_focus_shift(client, /*forward=*/ true)
+            }
+            CommandAction::SelectNext => {
+                // Down: 次候補
+                let mut new_idx = None;
+                let mut state = self.ivars().state.borrow_mut();
+                if let Some(ref mut candidates) = state.candidates {
+                    candidates.select_next();
+                    new_idx = Some(candidates.selected_index());
+                    if let Some(selected) = candidates.selected() {
+                        let surface = selected.surface.clone();
+                        drop(state);
+                        Self::set_marked_text_on_client(client, &surface);
+                    }
                 }
-            }
-            if let Some(idx) = new_idx {
-                self.sync_panel_selection(idx);
-            }
-            Bool::YES
-        } else if sel_name == move_up {
-            // Up: 前候補
-            let mut new_idx = None;
-            let mut state = self.ivars().state.borrow_mut();
-            if let Some(ref mut candidates) = state.candidates {
-                candidates.select_prev();
-                new_idx = Some(candidates.selected_index());
-                if let Some(selected) = candidates.selected() {
-                    let surface = selected.surface.clone();
-                    drop(state);
-                    Self::set_marked_text_on_client(client, &surface);
+                if let Some(idx) = new_idx {
+                    self.sync_panel_selection(idx);
                 }
+                Bool::YES
             }
-            if let Some(idx) = new_idx {
-                self.sync_panel_selection(idx);
+            CommandAction::SelectPrev => {
+                // Up: 前候補
+                let mut new_idx = None;
+                let mut state = self.ivars().state.borrow_mut();
+                if let Some(ref mut candidates) = state.candidates {
+                    candidates.select_prev();
+                    new_idx = Some(candidates.selected_index());
+                    if let Some(selected) = candidates.selected() {
+                        let surface = selected.surface.clone();
+                        drop(state);
+                        Self::set_marked_text_on_client(client, &surface);
+                    }
+                }
+                if let Some(idx) = new_idx {
+                    self.sync_panel_selection(idx);
+                }
+                Bool::YES
             }
-            Bool::YES
-        } else {
-            debug_log(&format!("unhandled selector: {sel_name:?}"));
-            // 未知のセレクタ: 確定してパススルー
-            self.do_commit(client);
-            Bool::NO
+            CommandAction::CommitAndPassThrough => {
+                debug_log(&format!("unhandled selector: {sel_name:?}"));
+                // 未知のセレクタ: 確定してパススルー
+                self.do_commit(client);
+                Bool::NO
+            }
         }
     }
 
