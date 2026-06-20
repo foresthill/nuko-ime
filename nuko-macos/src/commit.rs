@@ -290,6 +290,77 @@ pub fn decide_space_action(
     SpaceAction::PassThrough
 }
 
+/// Backspace キーが押されたときに実行すべきアクション (テスト基盤 #6)。
+///
+/// `do_backspace` は「変換結果クリア → ローマ字バッファ削除 → composition 末尾
+/// 削除 → 入力終了」という **どのバッファが残っているかで決まる状態機械**。
+/// この分岐だけを純粋関数 `decide_backspace` に切り出して固定化する。
+///
+/// バッファの実際の mutation (candidates/segmented を None に、romaji.clear、
+/// composition.pop) と client への描画は引き続き呼び出し側の責務。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackspaceAction {
+    /// 変換結果 (flat / segmented) をクリアして未確定文字列の表示に戻す。
+    /// composition 自体は消さない (= 1 段階だけ戻す)。
+    ClearConversion,
+    /// ローマ字バッファをクリア。composition が残らないので入力終了。
+    ClearRomajiEndComposing,
+    /// ローマ字バッファをクリアし、残る composition を再表示。
+    ClearRomajiRedisplay,
+    /// composition 末尾 1 文字を削除した結果、空になり入力終了。
+    PopCompositionEndComposing,
+    /// composition 末尾 1 文字を削除し、残りを再表示。
+    PopCompositionRedisplay,
+    /// 削除対象が何も無い → 入力終了 (空文字 insert)。
+    EndComposing,
+}
+
+/// Backspace 時に削除すべき対象を決める。
+///
+/// ## 守りたい不変条件
+///
+/// 1. **変換結果があるときは composition を消さず「変換前」に 1 段階戻すだけ** —
+///    変換結果と未確定かなを一気に消すと打ち直しになる (= UX 劣化)。
+/// 2. **削除の優先順は 変換結果 → ローマ字バッファ → composition → 入力終了**。
+/// 3. **削除して空になったら必ず入力終了 (`is_composing=false`)** — 空の
+///    composition のまま composing が残ると以後の入力が壊れる。
+///
+/// 純粋関数: 入力は `bool` と `usize` のみ。
+///
+/// # 引数
+/// - `has_conversion` — `candidates` か `segmented` のどちらかが存在するか
+/// - `romaji_empty` — ローマ字 (子音待ち等) バッファが空か
+/// - `composition_char_count` — 未確定かな文字列の **文字数** (バイト数ではない)
+#[must_use]
+pub fn decide_backspace(
+    has_conversion: bool,
+    romaji_empty: bool,
+    composition_char_count: usize,
+) -> BackspaceAction {
+    // 1. 変換結果があれば 1 段階戻すだけ
+    if has_conversion {
+        return BackspaceAction::ClearConversion;
+    }
+    // 2. ローマ字バッファ (子音待ち等) を削除
+    if !romaji_empty {
+        return if composition_char_count == 0 {
+            BackspaceAction::ClearRomajiEndComposing
+        } else {
+            BackspaceAction::ClearRomajiRedisplay
+        };
+    }
+    // 3. composition 末尾を 1 文字削除
+    if composition_char_count > 0 {
+        return if composition_char_count == 1 {
+            BackspaceAction::PopCompositionEndComposing
+        } else {
+            BackspaceAction::PopCompositionRedisplay
+        };
+    }
+    // 4. 何も無い → 入力終了
+    BackspaceAction::EndComposing
+}
+
 #[cfg(test)]
 mod tests {
     //! `decide_commit` の不変条件テスト群。
@@ -1000,6 +1071,79 @@ mod tests {
         assert_eq!(
             decide_space_action(false, true, None, None),
             SpaceAction::Convert,
+        );
+    }
+
+    // -- テスト基盤 #6: decide_backspace の不変条件テスト群 --
+
+    /// 不変条件 1+2: 変換結果があれば、他のバッファ状態に関わらず ClearConversion
+    /// (= 変換前に 1 段階戻すだけ。composition を一気に消さない)
+    #[test]
+    fn backspace_conversion_clears_one_step_only() {
+        // composition / romaji がどんな状態でも変換結果が最優先
+        assert_eq!(
+            decide_backspace(true, true, 0),
+            BackspaceAction::ClearConversion,
+        );
+        assert_eq!(
+            decide_backspace(true, false, 5),
+            BackspaceAction::ClearConversion,
+            "★ 変換結果は他バッファより優先 (1 段階だけ戻す)",
+        );
+    }
+
+    /// ローマ字バッファ削除: composition が残るかで分岐
+    #[test]
+    fn backspace_romaji_branch() {
+        // 変換結果なし・ローマ字あり・composition 空 → 入力終了
+        assert_eq!(
+            decide_backspace(false, false, 0),
+            BackspaceAction::ClearRomajiEndComposing,
+        );
+        // 変換結果なし・ローマ字あり・composition 残る → 再表示
+        assert_eq!(
+            decide_backspace(false, false, 3),
+            BackspaceAction::ClearRomajiRedisplay,
+        );
+    }
+
+    /// composition 末尾削除: 削除後に空になるかで分岐
+    #[test]
+    fn backspace_composition_branch() {
+        // 1 文字だけ → 削除すると空 → 入力終了
+        assert_eq!(
+            decide_backspace(false, true, 1),
+            BackspaceAction::PopCompositionEndComposing,
+        );
+        // 2 文字以上 → 削除しても残る → 再表示
+        assert_eq!(
+            decide_backspace(false, true, 2),
+            BackspaceAction::PopCompositionRedisplay,
+        );
+        assert_eq!(
+            decide_backspace(false, true, 10),
+            BackspaceAction::PopCompositionRedisplay,
+        );
+    }
+
+    /// 不変条件: 何も無ければ入力終了
+    #[test]
+    fn backspace_nothing_ends_composing() {
+        assert_eq!(
+            decide_backspace(false, true, 0),
+            BackspaceAction::EndComposing,
+        );
+    }
+
+    /// 不変条件 2 (優先順): ローマ字 > composition
+    /// (ローマ字バッファに子音待ちがあるなら先にそれを消す)
+    #[test]
+    fn backspace_romaji_takes_priority_over_composition() {
+        // ローマ字あり かつ composition もある → ローマ字側 (Redisplay)
+        assert_eq!(
+            decide_backspace(false, false, 3),
+            BackspaceAction::ClearRomajiRedisplay,
+            "★ 子音待ちのローマ字を composition より先に削除",
         );
     }
 }
