@@ -1029,28 +1029,16 @@ impl NukoInputController {
 
         {
             let mut state = self.ivars().state.borrow_mut();
-            // 1. 現在の focused に candidates の selected を sync back
-            //    (borrow checker 回避のため、まず candidates から index を取り出してから segmented を mut 借用)
+            // sync back + focus 移動の判定は純粋関数
+            // `crate::commit::apply_segment_focus_shift` に委譲 (テスト基盤 #7)。
+            // (borrow checker 回避のため、まず candidates から index を取り出してから segmented を mut 借用)
             let candidates_sel = state.candidates.as_ref().map(|c| c.selected_index());
             if let Some(segmented) = state.segmented.as_mut() {
-                if let Some(sel) = candidates_sel {
-                    let focused = segmented.focused;
-                    if let Some(seg) = segmented.segments.get_mut(focused) {
-                        seg.select(sel);
-                    }
-                }
-                // 2. focus を動かす (wrap)
-                if forward {
-                    segmented.focus_next();
-                } else {
-                    segmented.focus_prev();
-                }
-                new_focused = Some(segmented.focused);
-                new_surface = Some(segmented.current_surface());
-                new_candidates = Some(Self::candidate_list_from_segment(
-                    segmented,
-                    segmented.focused,
-                ));
+                let (focused, surface) =
+                    crate::commit::apply_segment_focus_shift(segmented, candidates_sel, forward);
+                new_focused = Some(focused);
+                new_surface = Some(surface);
+                new_candidates = Some(Self::candidate_list_from_segment(segmented, focused));
             }
             if let Some(list) = new_candidates.take() {
                 state.candidates = Some(list);
