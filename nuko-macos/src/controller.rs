@@ -19,7 +19,7 @@ use tracing::{debug, error, info, warn};
 
 use nuko_core::conversion::CandidateList;
 
-use crate::commit::{CommandAction, SpaceAction};
+use crate::commit::{BackspaceAction, CommandAction, SpaceAction};
 use crate::state::{
     ensure_custom_panel, with_custom_panel, with_engine, with_engine_mut, InputState,
 };
@@ -887,48 +887,54 @@ impl NukoInputController {
     fn do_backspace(&self, client: &AnyObject) {
         let mut state = self.ivars().state.borrow_mut();
 
-        if state.candidates.is_some() || state.segmented.is_some() {
-            // 変換結果 (flat / segmented 両方) をクリアして未確定文字列の表示に戻す
-            state.candidates = None;
-            state.segmented = None;
-            let display = state.display_text();
-            drop(state);
-            Self::hide_candidate_panel();
-            Self::set_marked_text_on_client(client, &display);
-            return;
-        }
+        // 削除対象の決定は純粋関数 `crate::commit::decide_backspace` に委譲
+        // (テスト基盤 #6)。実際の mutation と描画はここで行う。
+        let action = crate::commit::decide_backspace(
+            state.candidates.is_some() || state.segmented.is_some(),
+            state.romaji.buffer().is_empty(),
+            state.composition.chars().count(),
+        );
 
-        if !state.romaji.buffer().is_empty() {
-            state.romaji.clear();
-            if state.composition.is_empty() {
+        match action {
+            BackspaceAction::ClearConversion => {
+                // 変換結果 (flat / segmented 両方) をクリアして未確定表示に戻す
+                state.candidates = None;
+                state.segmented = None;
+                let display = state.display_text();
+                drop(state);
+                Self::hide_candidate_panel();
+                Self::set_marked_text_on_client(client, &display);
+            }
+            BackspaceAction::ClearRomajiEndComposing => {
+                state.romaji.clear();
                 state.is_composing = false;
                 drop(state);
                 Self::insert_text_on_client(client, "");
-            } else {
+            }
+            BackspaceAction::ClearRomajiRedisplay => {
+                state.romaji.clear();
                 let display = state.display_text();
                 drop(state);
                 Self::set_marked_text_on_client(client, &display);
             }
-            return;
-        }
-
-        if !state.composition.is_empty() {
-            state.composition.pop();
-            if state.composition.is_empty() {
+            BackspaceAction::PopCompositionEndComposing => {
+                state.composition.pop();
                 state.is_composing = false;
                 drop(state);
                 Self::insert_text_on_client(client, "");
-            } else {
+            }
+            BackspaceAction::PopCompositionRedisplay => {
+                state.composition.pop();
                 let display = state.display_text();
                 drop(state);
                 Self::set_marked_text_on_client(client, &display);
             }
-            return;
+            BackspaceAction::EndComposing => {
+                state.is_composing = false;
+                drop(state);
+                Self::insert_text_on_client(client, "");
+            }
         }
-
-        state.is_composing = false;
-        drop(state);
-        Self::insert_text_on_client(client, "");
     }
 
     // --- 候補ウィンドウ (singleton CustomCandidatePanel) ---------------
