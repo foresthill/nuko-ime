@@ -22,7 +22,7 @@
 //! パスがすべてこの関数を使うように移行することで、データ消失バグ
 //! (= focused 文節だけ commit して残り消える系) を unit test で catch できる。
 
-use nuko_core::conversion::Candidate;
+use nuko_core::conversion::{Candidate, SegmentedConversion};
 
 use crate::state::InputState;
 
@@ -359,6 +359,51 @@ pub fn decide_backspace(
     }
     // 4. 何も無い → 入力終了
     BackspaceAction::EndComposing
+}
+
+/// 文節フォーカスを動かす (テスト基盤 #7)。
+///
+/// `handle_segment_focus_shift` の中核ロジック。`←` / `→` で文節フォーカスを
+/// 移動する際、**移動する前に現在 focused 文節の選択候補を flat candidates の
+/// 選択 index で sync back** してから移動する。この sync back を怠ると、
+/// 文節を移動した瞬間に直前の文節で選んでいた候補が捨てられる
+/// (= データ消失バグ。PR #51 系の再発防止)。
+///
+/// 処理:
+/// 1. `candidates_selected_index` が `Some(sel)` なら、現在 focused 文節を
+///    `sel` 番目の候補に確定 (sync back)。
+/// 2. `forward` に従って focus を wrap 移動 (`focus_next` / `focus_prev`)。
+/// 3. 移動後の `(focused index, 全文 surface)` を返す。
+///
+/// 純粋関数: `&mut SegmentedConversion` を mutate するが ObjC / I/O は無く、
+/// 入力が同じなら出力も同じ。新文節の候補リスト生成 (UI 関心事) と marked text
+/// 更新は呼び出し側の責務。
+///
+/// # 戻り値
+/// `(新しい focused index, 全文節の現在選択を連結した surface)`
+#[must_use]
+pub fn apply_segment_focus_shift(
+    segmented: &mut SegmentedConversion,
+    candidates_selected_index: Option<usize>,
+    forward: bool,
+) -> (usize, String) {
+    // 1. 現在 focused 文節に flat candidates の選択を sync back
+    //    (= 移動で選択を捨てないための本丸)
+    if let Some(sel) = candidates_selected_index {
+        let focused = segmented.focused;
+        if let Some(seg) = segmented.segments.get_mut(focused) {
+            seg.select(sel);
+        }
+    }
+
+    // 2. focus を wrap 移動
+    if forward {
+        segmented.focus_next();
+    } else {
+        segmented.focus_prev();
+    }
+
+    (segmented.focused, segmented.current_surface())
 }
 
 #[cfg(test)]
@@ -1145,5 +1190,95 @@ mod tests {
             BackspaceAction::ClearRomajiRedisplay,
             "★ 子音待ちのローマ字を composition より先に削除",
         );
+    }
+
+    // -- テスト基盤 #7: apply_segment_focus_shift の不変条件テスト群 --
+
+    /// 「わたしのなまえ」3 文節を作る (seg0/seg2 は 2 候補)
+    fn three_segments() -> SegmentedConversion {
+        SegmentedConversion::new(vec![
+            Segment::new(
+                "わたし",
+                vec![cand("私", "わたし", 100), cand("わたし", "わたし", 90)],
+            ),
+            Segment::new("の", vec![cand("の", "の", 100)]),
+            Segment::new(
+                "なまえ",
+                vec![cand("名前", "なまえ", 100), cand("生え", "なまえ", 90)],
+            ),
+        ])
+    }
+
+    /// 不変条件: forward は wrap して 0→1→2→0 と巡回
+    #[test]
+    fn focus_shift_forward_wraps() {
+        let mut sc = three_segments();
+        sc.focus(0);
+        let (f, _) = apply_segment_focus_shift(&mut sc, None, true);
+        assert_eq!(f, 1);
+        let (f, _) = apply_segment_focus_shift(&mut sc, None, true);
+        assert_eq!(f, 2);
+        let (f, _) = apply_segment_focus_shift(&mut sc, None, true);
+        assert_eq!(f, 0, "★ 末尾から先頭へ wrap");
+    }
+
+    /// 不変条件: backward は wrap して 0→2→1→0 と巡回
+    #[test]
+    fn focus_shift_backward_wraps() {
+        let mut sc = three_segments();
+        sc.focus(0);
+        let (f, _) = apply_segment_focus_shift(&mut sc, None, false);
+        assert_eq!(f, 2, "★ 先頭から末尾へ wrap");
+        let (f, _) = apply_segment_focus_shift(&mut sc, None, false);
+        assert_eq!(f, 1);
+    }
+
+    /// 不変条件 (本丸): 移動前に現在文節の選択が sync back される
+    /// = 文節を移動しても直前の選択が捨てられない (データ消失防止)
+    #[test]
+    fn focus_shift_syncs_back_current_selection() {
+        let mut sc = three_segments();
+        sc.focus(0);
+        // focused=0 で flat candidates の 2 番目 (= "わたし") を選んだ状態を渡す
+        let (focused, surface) = apply_segment_focus_shift(&mut sc, Some(1), true);
+
+        assert_eq!(focused, 1, "focus は次へ移動");
+        // seg0 の選択が idx1 (= "わたし") に確定されているはず
+        assert_eq!(
+            sc.segments[0].current().unwrap().surface,
+            "わたし",
+            "★ 移動前に focused 文節の選択が sync back された",
+        );
+        assert_eq!(
+            surface, "わたしの名前",
+            "★ 全文 surface に sync back した選択が反映される",
+        );
+    }
+
+    /// candidates_selected_index が None なら sync back せず選択は既定のまま
+    #[test]
+    fn focus_shift_none_index_does_not_change_selection() {
+        let mut sc = three_segments();
+        sc.focus(0);
+        let _ = apply_segment_focus_shift(&mut sc, None, true);
+        assert_eq!(
+            sc.segments[0].current().unwrap().surface,
+            "私",
+            "★ None なら seg0 の選択は既定 (idx0) のまま",
+        );
+    }
+
+    /// 単一文節なら forward/backward どちらでも focus は自分に留まる
+    #[test]
+    fn focus_shift_single_segment_stays() {
+        let mut sc = SegmentedConversion::new(vec![Segment::new(
+            "にほん",
+            vec![cand("日本", "にほん", 100)],
+        )]);
+        sc.focus(0);
+        let (f, _) = apply_segment_focus_shift(&mut sc, None, true);
+        assert_eq!(f, 0, "★ 単一文節は wrap して自分に戻る");
+        let (f, _) = apply_segment_focus_shift(&mut sc, None, false);
+        assert_eq!(f, 0);
     }
 }
