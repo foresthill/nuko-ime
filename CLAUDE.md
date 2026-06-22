@@ -52,6 +52,28 @@ killall NukoIME
 
 `*.scores` ファイル (`bigram.model.scores` / `skip_bigram.model.scores`) も**必須 6 ファイル**。漏らすと libakaza が silent fail して静的辞書フォールバックになる (= 「ガリガリした候補しか出ない」症状)。
 
+## 実機 smoke test (`controller.rs` を触ったら**必須**)
+
+**ユニットテストも CI も実機の IMK 経由入力を一切検証しない。** `commit.rs` の純粋関数テストが全部緑でも「打てるか」は保証されない。IMK の FFI 境界・方式違反 (落とし穴 #9) のバグは緑のまま main に潜伏し、実機投入で初めて発覚する (2026-06-20 の #51/#52 大デグレが実例)。
+
+**ルール: `nuko-macos/src/controller.rs` (= IMK 境界) を変更した PR は、マージ前に実機 smoke test を必須とする。**
+
+ヘルパースクリプトで build → install → 再起動まで自動化し、チェックリストを表示する:
+
+```bash
+./nuko-macos/scripts/smoke-test.sh        # release ビルドで install + 再起動 + チェックリスト
+./nuko-macos/scripts/smoke-test.sh --debug # debug ビルド (panic=unwind+シンボル) で /tmp にログ採取
+```
+
+手で打って確認する最低項目 (スクリプトが表示):
+
+1. 入力ソースを NukoIME に切替 → 「にほんご」打鍵 → **ローマ字がかなに変換される** (打てる)
+2. Space → 変換、Enter → 確定、Backspace → 1 文字削除
+3. 数キー打鍵しても **プロセスが crash しない** (`pgrep NukoIME` が生きている)
+4. (segmented 変換時) ←→ で文節移動
+
+`--debug` モードは謎 crash の調査用。`panic=abort`+`strip` のリリースと違い、objc2 の `panic_verify` と `RUST_BACKTRACE=full` が panic 箇所を `file:line` で吐く。crash 後 `/tmp/nuko_smoke_debug.log` を読む。
+
 ## 確定した技術的落とし穴 (一次ソース確認済)
 
 ### 1. IMKCandidates は使えない
@@ -116,6 +138,23 @@ PR #40 で `convert_k_best(reading, None, k=9)` に切替。各 `KBestPath` が�
 6. 半角カタカナ
 
 の 6 パスがあり、surface 一致 dedup を **全パスで**しないと「ニホンゴ」×3 のような重複が並ぶ (PR #39)。
+
+### 9. IMK のイベント受信は 3 方式の排他 — `handleEvent:client:` を方式 1 に被せない
+
+`IMKServerInput` のイベント受信には **3 方式**あり、入力メソッドは**そのうち 1 つだけ**を選んで実装する設計 (Apple 一次ソース: `IMKInputController.h` / [objc2-input-method-kit の doc コメント](https://docs.rs/objc2-input-method-kit) — *"This is not a formal protocol by choice. … An input method should choose one of those ways and implement the appropriate methods."*):
+
+1. `inputText:client:` + `didCommandBySelector:client:` (キーバインド方式) ← **nuko はこれ**
+2. `inputText:key:modifiers:client:`
+3. `handleEvent:client:` (生 NSEvent を直接受信)
+
+**方式を混ぜると壊れる:**
+
+- 方式 1 を実装済みのところに方式 3 (`handleEvent:client:`) を**追加で被せる**と、IMK は `inputText:` を呼ばなくなり **日本語が全く打てなくなる** (PR #51 の大デグレ)。
+- さらに `IMKInputController` は `handleEvent:client:` の**実装を持たない** (ヘッダに宣言はあるが実体は IMKServer 側)。なので「処理しないキーを super に流す」つもりで `msg_send![super(self), handleEvent:client:]` を呼ぶと **`invalid message send … method not found` で abort (crash)** する (PR #52)。
+
+経緯: PR #51 (方式 3 を被せる) → PR #52 (super 呼出で直そうとして crash) → **PR #60 で `handleEvent:client:` override を完全撤去し方式 1 単独へ戻して根治** (2026-06-20、実機初投入で発覚)。矢印キーは方式 1 の `didCommandBySelector:` (`moveLeft:`/`moveRight:`) で受ける。
+
+**デバッグのコツ**: リリースは `panic=abort` + `strip` で crash 箇所が見えない。`msg_send!` の型/セレクタ不整合は **デバッグビルド (`cargo build`、`panic=unwind` + シンボル付き) の objc2 `panic_verify`** が炙り出す。リリースで謎 crash したら、debug バイナリを `.app` に差し込んで `RUST_BACKTRACE=full ./NukoIME 2>log` で再現するのが最短 (詳細は下記「実機 smoke test」)。
 
 ## 静的辞書とモデル辞書の補完関係
 
