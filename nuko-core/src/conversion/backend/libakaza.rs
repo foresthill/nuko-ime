@@ -207,11 +207,33 @@ impl LibakazaBackend {
     /// - libakaza が空文節列を返した → 空の `SegmentedConversion`
     /// - 正常 → 文節ごとに candidates が cost 昇順で並んだ `SegmentedConversion`
     pub fn convert_segmented(&self, reading: &str) -> Result<SegmentedConversion> {
+        self.convert_segmented_inner(reading, None)
+    }
+
+    /// 文節境界を **強制** して変換する (文節伸縮 = Shift+←→ 用)。
+    ///
+    /// `force_ranges` は読み (`reading`) のバイトオフセット範囲列。
+    /// [`crate::conversion::extend_clause`] の `extend_right` / `extend_left` が
+    /// 返す範囲をそのまま渡す。libakaza は各範囲を 1 文節として変換する。
+    pub fn convert_segmented_forced(
+        &self,
+        reading: &str,
+        force_ranges: &[std::ops::Range<usize>],
+    ) -> Result<SegmentedConversion> {
+        self.convert_segmented_inner(reading, Some(force_ranges))
+    }
+
+    /// `convert_segmented` / `convert_segmented_forced` の共通実装。
+    fn convert_segmented_inner(
+        &self,
+        reading: &str,
+        force_ranges: Option<&[std::ops::Range<usize>]>,
+    ) -> Result<SegmentedConversion> {
         if reading.is_empty() {
             return Ok(SegmentedConversion::default());
         }
 
-        let segments = self.engine.convert(reading, None).map_err(|e| {
+        let segments = self.engine.convert(reading, force_ranges).map_err(|e| {
             NukoError::Conversion(format!("libakaza 変換に失敗 (reading={reading}): {e}"))
         })?;
 

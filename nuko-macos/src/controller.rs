@@ -576,6 +576,14 @@ impl NukoInputController {
                 }
                 Bool::YES
             }
+            CommandAction::ResizeSegmentLeft => {
+                // Shift+Left: focused 文節を縮める (segmented モードのみ)
+                self.handle_segment_resize(client, /*extend_right=*/ false)
+            }
+            CommandAction::ResizeSegmentRight => {
+                // Shift+Right: focused 文節を伸ばす (segmented モードのみ)
+                self.handle_segment_resize(client, /*extend_right=*/ true)
+            }
             CommandAction::CommitAndPassThrough => {
                 debug_log(&format!("unhandled selector: {sel_name:?}"));
                 // 未知のセレクタ: 確定してパススルー
@@ -980,6 +988,61 @@ impl NukoInputController {
             self.show_candidate_panel(client);
         }
 
+        Bool::YES
+    }
+
+    /// focused 文節を伸縮する (Shift+→ で伸長 / Shift+← で縮小、segmented モードのみ)。
+    ///
+    /// libakaza に `force_ranges` で再変換させ、新しい `SegmentedConversion` に
+    /// 差し替えて marked text と panel を更新する。
+    ///
+    /// segmented でない / これ以上伸縮できない / akaza 無効の場合は何もせず
+    /// `Bool::YES` で消費する (未確定中に host の選択範囲拡張を呼ばないため)。
+    fn handle_segment_resize(&self, client: &AnyObject, extend_right: bool) -> Bool {
+        // 1. 現在の segmented を clone で取り出す (engine 呼び出し中に state を借りないため)
+        let segmented = {
+            let state = self.ivars().state.borrow();
+            state.segmented.clone()
+        };
+        let Some(segmented) = segmented else {
+            // segmented でない (単一文節 / flat) → no-op 消費
+            return Bool::YES;
+        };
+
+        // 2. エンジンで伸縮再変換 (akaza 有効時のみ実効)
+        #[cfg(feature = "akaza")]
+        let resized = with_engine(|engine| engine.resize_segment(&segmented, extend_right));
+        #[cfg(not(feature = "akaza"))]
+        let resized: nuko_core::error::Result<
+            Option<nuko_core::conversion::SegmentedConversion>,
+        > = {
+            let _ = (&segmented, extend_right);
+            Ok(None)
+        };
+
+        let new_seg = match resized {
+            Ok(Some(s)) => s,
+            Ok(None) => return Bool::YES, // 伸縮不可: 消費して no-op
+            Err(e) => {
+                debug_log(&format!("handle_segment_resize: error {e}"));
+                return Bool::YES;
+            }
+        };
+
+        // 3. state 差し替え + UI 更新
+        let surface = new_seg.current_surface();
+        let focused = new_seg.focused;
+        let focused_candidates = Self::candidate_list_from_segment(&new_seg, focused);
+        {
+            let mut state = self.ivars().state.borrow_mut();
+            state.segmented = Some(new_seg);
+            state.candidates = Some(focused_candidates);
+        }
+        debug_log(&format!(
+            "handle_segment_resize: extend_right={extend_right} focused={focused} surface='{surface}'"
+        ));
+        Self::set_marked_text_on_client(client, &surface);
+        self.show_candidate_panel(client);
         Bool::YES
     }
 

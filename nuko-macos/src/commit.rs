@@ -179,6 +179,10 @@ pub enum CommandAction {
     SelectNext,
     /// Up (`moveUp:`) → 前候補
     SelectPrev,
+    /// Shift+Left (`moveLeftAndModifySelection:`) → focused 文節を縮める (segmented のみ)
+    ResizeSegmentLeft,
+    /// Shift+Right (`moveRightAndModifySelection:`) → focused 文節を伸ばす (segmented のみ)
+    ResizeSegmentRight,
     /// 未知のセレクタ → 確定してからパススルー (`Bool::NO`)
     CommitAndPassThrough,
 }
@@ -209,6 +213,9 @@ pub fn decide_command(selector_name: &std::ffi::CStr, is_composing: bool) -> Com
         b"moveRight:" => CommandAction::FocusShiftRight,
         b"moveDown:" => CommandAction::SelectNext,
         b"moveUp:" => CommandAction::SelectPrev,
+        // Shift+←→ (文節伸縮)。macOS は selection 拡張のセレクタとして配送する。
+        b"moveLeftAndModifySelection:" => CommandAction::ResizeSegmentLeft,
+        b"moveRightAndModifySelection:" => CommandAction::ResizeSegmentRight,
         _ => CommandAction::CommitAndPassThrough,
     }
 }
@@ -965,6 +972,14 @@ mod tests {
             (c"moveRight:", CommandAction::FocusShiftRight),
             (c"moveDown:", CommandAction::SelectNext),
             (c"moveUp:", CommandAction::SelectPrev),
+            (
+                c"moveLeftAndModifySelection:",
+                CommandAction::ResizeSegmentLeft,
+            ),
+            (
+                c"moveRightAndModifySelection:",
+                CommandAction::ResizeSegmentRight,
+            ),
         ];
         for (sel, expected) in cases {
             assert_eq!(

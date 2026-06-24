@@ -243,6 +243,55 @@ impl ConversionEngine {
         }
     }
 
+    /// 文節境界を伸縮して再変換する (Shift+→ / Shift+← 用、libakaza 有効時のみ)。
+    ///
+    /// 現在の `segmented` の各文節読みと `focused` から
+    /// [`crate::conversion::extend_clause`] で `force_ranges` を計算し、libakaza に
+    /// 強制境界で再変換させる。`extend_right = true` で focused 文節を右に伸ばし、
+    /// `false` で左に縮める (左隣を伸ばす)。
+    ///
+    /// # 戻り値
+    /// - `Ok(Some(_))` — 伸縮後の新しい `SegmentedConversion` (focused は維持)
+    /// - `Ok(None)` — libakaza 無効 / 入力が空 / これ以上伸縮できない
+    #[cfg(feature = "akaza")]
+    pub fn resize_segment(
+        &self,
+        segmented: &SegmentedConversion,
+        extend_right: bool,
+    ) -> Result<Option<SegmentedConversion>> {
+        let Some(backend) = &self.libakaza else {
+            return Ok(None);
+        };
+        let readings: Vec<&str> = segmented
+            .segments
+            .iter()
+            .map(|s| s.reading.as_str())
+            .collect();
+        if readings.is_empty() {
+            return Ok(None);
+        }
+
+        let force = if extend_right {
+            crate::conversion::extend_clause::extend_right(&readings, segmented.focused)
+        } else {
+            crate::conversion::extend_clause::extend_left(&readings, segmented.focused)
+        };
+        if force.is_empty() {
+            return Ok(None);
+        }
+
+        let full_reading = readings.concat();
+        let mut new_seg = backend.convert_segmented_forced(&full_reading, &force)?;
+        if new_seg.is_empty() {
+            return Ok(None);
+        }
+
+        // フォーカス位置を維持 (文節数が減るケースがあるのでクランプ)
+        let new_focus = segmented.focused.min(new_seg.segments.len() - 1);
+        new_seg.focus(new_focus);
+        Ok(Some(new_seg))
+    }
+
     /// 予測変換（入力途中で候補を提示）
     ///
     /// # 引数
