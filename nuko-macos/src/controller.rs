@@ -615,11 +615,33 @@ impl NukoInputController {
     /// replacementRange.location = NSNotFound で「現在のマークテキストを置換」を指示。
     /// (0,0) を渡すと macOS はドキュメント先頭に書こうとするため未確定文字列が見えない。
     fn set_marked_text_on_client(client: &AnyObject, text: &str) {
-        let ns_string = NSString::from_str(text);
         let text_len = text.encode_utf16().count();
-        let sel_range = NSRange::new(text_len, 0);
+        // カーソルを末尾に置く (= フォーカス文節という概念がない flat 表示)
+        Self::set_marked_text_with_selection(client, text, NSRange::new(text_len, 0));
+    }
+
+    /// segmented モード用: フォーカス文節を `selectionRange` で示して描画する。
+    ///
+    /// `focus_start` / `focus_len` は marked text 内の UTF-16 範囲
+    /// ([`SegmentedConversion::focused_surface_range_utf16`])。多くのアプリは
+    /// この範囲を太線/ハイライトで描き、「今どの文節を編集中か」が分かる。
+    fn set_marked_text_focused(
+        client: &AnyObject,
+        text: &str,
+        focus_start: usize,
+        focus_len: usize,
+    ) {
+        Self::set_marked_text_with_selection(client, text, NSRange::new(focus_start, focus_len));
+    }
+
+    /// `setMarkedText:selectionRange:replacementRange:` の共通ラッパ。
+    fn set_marked_text_with_selection(client: &AnyObject, text: &str, sel_range: NSRange) {
+        let ns_string = NSString::from_str(text);
         let rep_range = NSRange::new(NS_NOT_FOUND, 0);
-        debug_log(&format!("setMarkedText: '{text}' (utf16_len={text_len})"));
+        debug_log(&format!(
+            "setMarkedText: '{text}' sel=({},{})",
+            sel_range.location, sel_range.length
+        ));
         unsafe {
             let _: () = msg_send![
                 client,
@@ -685,12 +707,13 @@ impl NukoInputController {
                     segmented.segments.len()
                 ));
                 let surface = segmented.current_surface();
+                let (focus_start, focus_len) = segmented.focused_surface_range_utf16();
                 let focused_candidates =
                     Self::candidate_list_from_segment(&segmented, segmented.focused);
                 state.segmented = Some(segmented);
                 state.candidates = Some(focused_candidates);
                 drop(state);
-                Self::set_marked_text_on_client(client, &surface);
+                Self::set_marked_text_focused(client, &surface, focus_start, focus_len);
                 self.show_candidate_panel(client);
                 return;
             }
@@ -960,6 +983,7 @@ impl NukoInputController {
         let mut new_focused: Option<usize> = None;
         let mut new_surface: Option<String> = None;
         let mut new_candidates: Option<CandidateList> = None;
+        let mut new_focus_range: Option<(usize, usize)> = None;
 
         {
             let mut state = self.ivars().state.borrow_mut();
@@ -972,6 +996,7 @@ impl NukoInputController {
                     crate::commit::apply_segment_focus_shift(segmented, candidates_sel, forward);
                 new_focused = Some(focused);
                 new_surface = Some(surface);
+                new_focus_range = Some(segmented.focused_surface_range_utf16());
                 new_candidates = Some(Self::candidate_list_from_segment(segmented, focused));
             }
             if let Some(list) = new_candidates.take() {
@@ -979,11 +1004,13 @@ impl NukoInputController {
             }
         }
 
-        if let (Some(focused), Some(surface)) = (new_focused, new_surface) {
+        if let (Some(focused), Some(surface), Some((start, len))) =
+            (new_focused, new_surface, new_focus_range)
+        {
             debug_log(&format!(
                 "handle_segment_focus_shift: forward={forward} new_focused={focused}"
             ));
-            Self::set_marked_text_on_client(client, &surface);
+            Self::set_marked_text_focused(client, &surface, start, len);
             // panel を新文節の候補で再描画
             self.show_candidate_panel(client);
         }
@@ -1032,6 +1059,7 @@ impl NukoInputController {
         // 3. state 差し替え + UI 更新
         let surface = new_seg.current_surface();
         let focused = new_seg.focused;
+        let (focus_start, focus_len) = new_seg.focused_surface_range_utf16();
         let focused_candidates = Self::candidate_list_from_segment(&new_seg, focused);
         {
             let mut state = self.ivars().state.borrow_mut();
@@ -1041,7 +1069,7 @@ impl NukoInputController {
         debug_log(&format!(
             "handle_segment_resize: extend_right={extend_right} focused={focused} surface='{surface}'"
         ));
-        Self::set_marked_text_on_client(client, &surface);
+        Self::set_marked_text_focused(client, &surface, focus_start, focus_len);
         self.show_candidate_panel(client);
         Bool::YES
     }
