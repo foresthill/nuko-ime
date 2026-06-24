@@ -288,14 +288,10 @@ impl NukoInputController {
                     if let Some(ref mut candidates) = state.candidates {
                         candidates.select_next();
                         new_idx = Some(candidates.selected_index());
-                        let surface = candidates
-                            .selected()
-                            .map(|s| s.surface.clone())
-                            .unwrap_or_default();
-                        debug_log(&format!("space: cycle to next candidate '{surface}'"));
-                        drop(state);
-                        Self::set_marked_text_on_client(client, &surface);
                     }
+                    drop(state);
+                    // segmented モードでは全文表示 (他文節を消さない)。
+                    self.refresh_marked_after_selection(client);
                     // パネル内部の青ハイライトも同期 (IMK の default routing が
                     // 効かない環境向けに明示的に呼ぶ)
                     if let Some(idx) = new_idx {
@@ -543,16 +539,15 @@ impl NukoInputController {
             CommandAction::SelectNext => {
                 // Down: 次候補
                 let mut new_idx = None;
-                let mut state = self.ivars().state.borrow_mut();
-                if let Some(ref mut candidates) = state.candidates {
-                    candidates.select_next();
-                    new_idx = Some(candidates.selected_index());
-                    if let Some(selected) = candidates.selected() {
-                        let surface = selected.surface.clone();
-                        drop(state);
-                        Self::set_marked_text_on_client(client, &surface);
+                {
+                    let mut state = self.ivars().state.borrow_mut();
+                    if let Some(ref mut candidates) = state.candidates {
+                        candidates.select_next();
+                        new_idx = Some(candidates.selected_index());
                     }
                 }
+                // segmented モードでは全文表示 (他文節を消さない)。
+                self.refresh_marked_after_selection(client);
                 if let Some(idx) = new_idx {
                     self.sync_panel_selection(idx);
                 }
@@ -561,16 +556,15 @@ impl NukoInputController {
             CommandAction::SelectPrev => {
                 // Up: 前候補
                 let mut new_idx = None;
-                let mut state = self.ivars().state.borrow_mut();
-                if let Some(ref mut candidates) = state.candidates {
-                    candidates.select_prev();
-                    new_idx = Some(candidates.selected_index());
-                    if let Some(selected) = candidates.selected() {
-                        let surface = selected.surface.clone();
-                        drop(state);
-                        Self::set_marked_text_on_client(client, &surface);
+                {
+                    let mut state = self.ivars().state.borrow_mut();
+                    if let Some(ref mut candidates) = state.candidates {
+                        candidates.select_prev();
+                        new_idx = Some(candidates.selected_index());
                     }
                 }
+                // segmented モードでは全文表示 (他文節を消さない)。
+                self.refresh_marked_after_selection(client);
                 if let Some(idx) = new_idx {
                     self.sync_panel_selection(idx);
                 }
@@ -632,6 +626,40 @@ impl NukoInputController {
         focus_len: usize,
     ) {
         Self::set_marked_text_with_selection(client, text, NSRange::new(focus_start, focus_len));
+    }
+
+    /// 候補選択 (Space / ↑↓) が変わった後に marked text を更新する。
+    ///
+    /// **日本語 IME の大原則: 変換中の他文節はそのまま、変換対象の文節のみ変わる。**
+    /// そのため segmented モードでは、選択を focused 文節に反映した上で
+    /// **全文節を連結した文** を表示する (focused をハイライト)。
+    /// 選択候補の surface 単体を表示すると他の文節が画面から消えてしまう
+    /// (実機バグ報告 2026-06)。flat モードでは選択候補をそのまま表示する。
+    fn refresh_marked_after_selection(&self, client: &AnyObject) {
+        let mut state = self.ivars().state.borrow_mut();
+        let Some(sel_idx) = state.candidates.as_ref().map(CandidateList::selected_index) else {
+            return;
+        };
+
+        if let Some(segmented) = state.segmented.as_mut() {
+            // segmented: focused 文節に選択を反映 → 全文表示 (focused をハイライト)
+            if let Some(seg) = segmented.focused_segment_mut() {
+                seg.select(sel_idx);
+            }
+            let surface = segmented.current_surface();
+            let (start, len) = segmented.focused_surface_range_utf16();
+            drop(state);
+            Self::set_marked_text_focused(client, &surface, start, len);
+        } else if let Some(surface) = state
+            .candidates
+            .as_ref()
+            .and_then(CandidateList::selected)
+            .map(|s| s.surface.clone())
+        {
+            // flat: 選択候補そのまま
+            drop(state);
+            Self::set_marked_text_on_client(client, &surface);
+        }
     }
 
     /// `setMarkedText:selectionRange:replacementRange:` の共通ラッパ。
