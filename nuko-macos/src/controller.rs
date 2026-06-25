@@ -288,14 +288,10 @@ impl NukoInputController {
                     if let Some(ref mut candidates) = state.candidates {
                         candidates.select_next();
                         new_idx = Some(candidates.selected_index());
-                        let surface = candidates
-                            .selected()
-                            .map(|s| s.surface.clone())
-                            .unwrap_or_default();
-                        debug_log(&format!("space: cycle to next candidate '{surface}'"));
-                        drop(state);
-                        Self::set_marked_text_on_client(client, &surface);
                     }
+                    drop(state);
+                    // segmented モードでは全文表示 (他文節を消さない)。
+                    self.refresh_marked_after_selection(client);
                     // パネル内部の青ハイライトも同期 (IMK の default routing が
                     // 効かない環境向けに明示的に呼ぶ)
                     if let Some(idx) = new_idx {
@@ -543,16 +539,15 @@ impl NukoInputController {
             CommandAction::SelectNext => {
                 // Down: 次候補
                 let mut new_idx = None;
-                let mut state = self.ivars().state.borrow_mut();
-                if let Some(ref mut candidates) = state.candidates {
-                    candidates.select_next();
-                    new_idx = Some(candidates.selected_index());
-                    if let Some(selected) = candidates.selected() {
-                        let surface = selected.surface.clone();
-                        drop(state);
-                        Self::set_marked_text_on_client(client, &surface);
+                {
+                    let mut state = self.ivars().state.borrow_mut();
+                    if let Some(ref mut candidates) = state.candidates {
+                        candidates.select_next();
+                        new_idx = Some(candidates.selected_index());
                     }
                 }
+                // segmented モードでは全文表示 (他文節を消さない)。
+                self.refresh_marked_after_selection(client);
                 if let Some(idx) = new_idx {
                     self.sync_panel_selection(idx);
                 }
@@ -561,20 +556,27 @@ impl NukoInputController {
             CommandAction::SelectPrev => {
                 // Up: 前候補
                 let mut new_idx = None;
-                let mut state = self.ivars().state.borrow_mut();
-                if let Some(ref mut candidates) = state.candidates {
-                    candidates.select_prev();
-                    new_idx = Some(candidates.selected_index());
-                    if let Some(selected) = candidates.selected() {
-                        let surface = selected.surface.clone();
-                        drop(state);
-                        Self::set_marked_text_on_client(client, &surface);
+                {
+                    let mut state = self.ivars().state.borrow_mut();
+                    if let Some(ref mut candidates) = state.candidates {
+                        candidates.select_prev();
+                        new_idx = Some(candidates.selected_index());
                     }
                 }
+                // segmented モードでは全文表示 (他文節を消さない)。
+                self.refresh_marked_after_selection(client);
                 if let Some(idx) = new_idx {
                     self.sync_panel_selection(idx);
                 }
                 Bool::YES
+            }
+            CommandAction::ResizeSegmentLeft => {
+                // Shift+Left: focused 文節を縮める (segmented モードのみ)
+                self.handle_segment_resize(client, /*extend_right=*/ false)
+            }
+            CommandAction::ResizeSegmentRight => {
+                // Shift+Right: focused 文節を伸ばす (segmented モードのみ)
+                self.handle_segment_resize(client, /*extend_right=*/ true)
             }
             CommandAction::CommitAndPassThrough => {
                 debug_log(&format!("unhandled selector: {sel_name:?}"));
@@ -607,11 +609,67 @@ impl NukoInputController {
     /// replacementRange.location = NSNotFound で「現在のマークテキストを置換」を指示。
     /// (0,0) を渡すと macOS はドキュメント先頭に書こうとするため未確定文字列が見えない。
     fn set_marked_text_on_client(client: &AnyObject, text: &str) {
-        let ns_string = NSString::from_str(text);
         let text_len = text.encode_utf16().count();
-        let sel_range = NSRange::new(text_len, 0);
+        // カーソルを末尾に置く (= フォーカス文節という概念がない flat 表示)
+        Self::set_marked_text_with_selection(client, text, NSRange::new(text_len, 0));
+    }
+
+    /// segmented モード用: フォーカス文節を `selectionRange` で示して描画する。
+    ///
+    /// `focus_start` / `focus_len` は marked text 内の UTF-16 範囲
+    /// ([`SegmentedConversion::focused_surface_range_utf16`])。多くのアプリは
+    /// この範囲を太線/ハイライトで描き、「今どの文節を編集中か」が分かる。
+    fn set_marked_text_focused(
+        client: &AnyObject,
+        text: &str,
+        focus_start: usize,
+        focus_len: usize,
+    ) {
+        Self::set_marked_text_with_selection(client, text, NSRange::new(focus_start, focus_len));
+    }
+
+    /// 候補選択 (Space / ↑↓) が変わった後に marked text を更新する。
+    ///
+    /// **日本語 IME の大原則: 変換中の他文節はそのまま、変換対象の文節のみ変わる。**
+    /// そのため segmented モードでは、選択を focused 文節に反映した上で
+    /// **全文節を連結した文** を表示する (focused をハイライト)。
+    /// 選択候補の surface 単体を表示すると他の文節が画面から消えてしまう
+    /// (実機バグ報告 2026-06)。flat モードでは選択候補をそのまま表示する。
+    fn refresh_marked_after_selection(&self, client: &AnyObject) {
+        let mut state = self.ivars().state.borrow_mut();
+        let Some(sel_idx) = state.candidates.as_ref().map(CandidateList::selected_index) else {
+            return;
+        };
+
+        if let Some(segmented) = state.segmented.as_mut() {
+            // segmented: focused 文節に選択を反映 → 全文表示 (focused をハイライト)
+            if let Some(seg) = segmented.focused_segment_mut() {
+                seg.select(sel_idx);
+            }
+            let surface = segmented.current_surface();
+            let (start, len) = segmented.focused_surface_range_utf16();
+            drop(state);
+            Self::set_marked_text_focused(client, &surface, start, len);
+        } else if let Some(surface) = state
+            .candidates
+            .as_ref()
+            .and_then(CandidateList::selected)
+            .map(|s| s.surface.clone())
+        {
+            // flat: 選択候補そのまま
+            drop(state);
+            Self::set_marked_text_on_client(client, &surface);
+        }
+    }
+
+    /// `setMarkedText:selectionRange:replacementRange:` の共通ラッパ。
+    fn set_marked_text_with_selection(client: &AnyObject, text: &str, sel_range: NSRange) {
+        let ns_string = NSString::from_str(text);
         let rep_range = NSRange::new(NS_NOT_FOUND, 0);
-        debug_log(&format!("setMarkedText: '{text}' (utf16_len={text_len})"));
+        debug_log(&format!(
+            "setMarkedText: '{text}' sel=({},{})",
+            sel_range.location, sel_range.length
+        ));
         unsafe {
             let _: () = msg_send![
                 client,
@@ -677,12 +735,13 @@ impl NukoInputController {
                     segmented.segments.len()
                 ));
                 let surface = segmented.current_surface();
+                let (focus_start, focus_len) = segmented.focused_surface_range_utf16();
                 let focused_candidates =
                     Self::candidate_list_from_segment(&segmented, segmented.focused);
                 state.segmented = Some(segmented);
                 state.candidates = Some(focused_candidates);
                 drop(state);
-                Self::set_marked_text_on_client(client, &surface);
+                Self::set_marked_text_focused(client, &surface, focus_start, focus_len);
                 self.show_candidate_panel(client);
                 return;
             }
@@ -871,14 +930,14 @@ impl NukoInputController {
     /// `firstRectForCharacterRange:actualRange:` で marked text の screen 座標を
     /// 取得してパネルを直下に配置する。
     fn show_candidate_panel(&self, client: &AnyObject) {
-        let snapshot: Option<(Vec<String>, usize)> = {
+        let snapshot = {
             let state = self.ivars().state.borrow();
             state.candidates.as_ref().map(|c| {
                 let items: Vec<String> = c.iter().map(|x| x.surface.clone()).collect();
-                (items, c.selected_index())
+                (items, c.selected_index(), Self::panel_segments(&state))
             })
         };
-        let Some((items, selected)) = snapshot else {
+        let Some((items, selected, seg_info)) = snapshot else {
             return;
         };
         let position = Self::caret_screen_point(client);
@@ -890,7 +949,11 @@ impl NukoInputController {
         ));
         with_custom_panel(|panel| {
             if let Some(panel) = panel {
-                panel.set_candidates(&items, selected);
+                if let Some((segs, focused)) = &seg_info {
+                    panel.set_candidates_segmented(&items, selected, segs, *focused);
+                } else {
+                    panel.set_candidates(&items, selected);
+                }
                 let visible = panel.show_at(position);
                 debug_log(&format!(
                     "show_candidate_panel: after show_at isVisible={visible}"
@@ -899,6 +962,21 @@ impl NukoInputController {
                 debug_log("show_candidate_panel: panel not initialized");
             }
         });
+    }
+
+    /// segmented モードのとき、パネルヘッダ用に全文節の現在 surface と focused を返す。
+    /// 単一文節 (segment 数 1) は分割表示の意味がないので `None` (= ヘッダ無し)。
+    fn panel_segments(state: &InputState) -> Option<(Vec<String>, usize)> {
+        let segmented = state.segmented.as_ref()?;
+        if segmented.segments.len() < 2 {
+            return None;
+        }
+        let segs: Vec<String> = segmented
+            .segments
+            .iter()
+            .map(|s| s.surface().unwrap_or_default().to_string())
+            .collect();
+        Some((segs, segmented.focused))
     }
 
     /// 候補ウィンドウを隠す (singleton; 全 controller から共有)
@@ -918,21 +996,25 @@ impl NukoInputController {
     /// `set_candidates` を呼び直して再描画する (selected も同時に反映)。
     /// state borrow と panel borrow を別スコープに分けて RefCell の二重借用を回避。
     fn sync_panel_selection(&self, _line_number: usize) {
-        let snapshot: Option<(Vec<String>, usize)> = {
+        let snapshot = {
             let state = self.ivars().state.borrow();
             state.candidates.as_ref().map(|c| {
                 let items: Vec<String> = c.iter().map(|x| x.surface.clone()).collect();
-                (items, c.selected_index())
+                (items, c.selected_index(), Self::panel_segments(&state))
             })
         };
-        let Some((items, selected)) = snapshot else {
+        let Some((items, selected, seg_info)) = snapshot else {
             return;
         };
         debug_log(&format!("sync_panel_selection: selected={selected}"));
         with_custom_panel(|panel| {
             if let Some(panel) = panel {
                 if panel.is_visible() {
-                    panel.set_candidates(&items, selected);
+                    if let Some((segs, focused)) = &seg_info {
+                        panel.set_candidates_segmented(&items, selected, segs, *focused);
+                    } else {
+                        panel.set_candidates(&items, selected);
+                    }
                 }
             }
         });
@@ -952,6 +1034,7 @@ impl NukoInputController {
         let mut new_focused: Option<usize> = None;
         let mut new_surface: Option<String> = None;
         let mut new_candidates: Option<CandidateList> = None;
+        let mut new_focus_range: Option<(usize, usize)> = None;
 
         {
             let mut state = self.ivars().state.borrow_mut();
@@ -964,6 +1047,7 @@ impl NukoInputController {
                     crate::commit::apply_segment_focus_shift(segmented, candidates_sel, forward);
                 new_focused = Some(focused);
                 new_surface = Some(surface);
+                new_focus_range = Some(segmented.focused_surface_range_utf16());
                 new_candidates = Some(Self::candidate_list_from_segment(segmented, focused));
             }
             if let Some(list) = new_candidates.take() {
@@ -971,15 +1055,73 @@ impl NukoInputController {
             }
         }
 
-        if let (Some(focused), Some(surface)) = (new_focused, new_surface) {
+        if let (Some(focused), Some(surface), Some((start, len))) =
+            (new_focused, new_surface, new_focus_range)
+        {
             debug_log(&format!(
                 "handle_segment_focus_shift: forward={forward} new_focused={focused}"
             ));
-            Self::set_marked_text_on_client(client, &surface);
+            Self::set_marked_text_focused(client, &surface, start, len);
             // panel を新文節の候補で再描画
             self.show_candidate_panel(client);
         }
 
+        Bool::YES
+    }
+
+    /// focused 文節を伸縮する (Shift+→ で伸長 / Shift+← で縮小、segmented モードのみ)。
+    ///
+    /// libakaza に `force_ranges` で再変換させ、新しい `SegmentedConversion` に
+    /// 差し替えて marked text と panel を更新する。
+    ///
+    /// segmented でない / これ以上伸縮できない / akaza 無効の場合は何もせず
+    /// `Bool::YES` で消費する (未確定中に host の選択範囲拡張を呼ばないため)。
+    fn handle_segment_resize(&self, client: &AnyObject, extend_right: bool) -> Bool {
+        // 1. 現在の segmented を clone で取り出す (engine 呼び出し中に state を借りないため)
+        let segmented = {
+            let state = self.ivars().state.borrow();
+            state.segmented.clone()
+        };
+        let Some(segmented) = segmented else {
+            // segmented でない (単一文節 / flat) → no-op 消費
+            return Bool::YES;
+        };
+
+        // 2. エンジンで伸縮再変換 (akaza 有効時のみ実効)
+        #[cfg(feature = "akaza")]
+        let resized = with_engine(|engine| engine.resize_segment(&segmented, extend_right));
+        #[cfg(not(feature = "akaza"))]
+        let resized: nuko_core::error::Result<
+            Option<nuko_core::conversion::SegmentedConversion>,
+        > = {
+            let _ = (&segmented, extend_right);
+            Ok(None)
+        };
+
+        let new_seg = match resized {
+            Ok(Some(s)) => s,
+            Ok(None) => return Bool::YES, // 伸縮不可: 消費して no-op
+            Err(e) => {
+                debug_log(&format!("handle_segment_resize: error {e}"));
+                return Bool::YES;
+            }
+        };
+
+        // 3. state 差し替え + UI 更新
+        let surface = new_seg.current_surface();
+        let focused = new_seg.focused;
+        let (focus_start, focus_len) = new_seg.focused_surface_range_utf16();
+        let focused_candidates = Self::candidate_list_from_segment(&new_seg, focused);
+        {
+            let mut state = self.ivars().state.borrow_mut();
+            state.segmented = Some(new_seg);
+            state.candidates = Some(focused_candidates);
+        }
+        debug_log(&format!(
+            "handle_segment_resize: extend_right={extend_right} focused={focused} surface='{surface}'"
+        ));
+        Self::set_marked_text_focused(client, &surface, focus_start, focus_len);
+        self.show_candidate_panel(client);
         Bool::YES
     }
 

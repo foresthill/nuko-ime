@@ -144,6 +144,29 @@ impl SegmentedConversion {
             .concat()
     }
 
+    /// `current_surface()` 内における **フォーカス文節の UTF-16 範囲** を返す。
+    ///
+    /// macOS の `setMarkedText:selectionRange:` に渡してフォーカス文節を
+    /// ハイライト表示するための (開始, 長さ)。単位は UTF-16 コードユニット
+    /// (NSString の length 互換)。フォーカス前の全文節の surface 長を積算した
+    /// 開始位置と、フォーカス文節自身の surface 長を返す。
+    #[must_use]
+    pub fn focused_surface_range_utf16(&self) -> (usize, usize) {
+        let start: usize = self
+            .segments
+            .iter()
+            .take(self.focused)
+            .filter_map(Segment::surface)
+            .map(|s| s.encode_utf16().count())
+            .sum();
+        let len = self
+            .segments
+            .get(self.focused)
+            .and_then(Segment::surface)
+            .map_or(0, |s| s.encode_utf16().count());
+        (start, len)
+    }
+
     /// フォーカス中の文節
     #[must_use]
     pub fn focused_segment(&self) -> Option<&Segment> {
@@ -441,5 +464,23 @@ mod tests {
         // 任意 focus 後も current_surface は全文節を返す
         sc.focus(1);
         assert_eq!(sc.current_surface(), "ΑΒΓ");
+    }
+
+    #[test]
+    fn focused_surface_range_tracks_focus() {
+        // 「私」「の」「名前」: surface は 1/1/2 文字 (BMP なので utf16=文字数)
+        let mut sc = SegmentedConversion::new(vec![
+            Segment::new("わたし", vec![cand("私", "わたし", 100)]),
+            Segment::new("の", vec![cand("の", "の", 100)]),
+            Segment::new("なまえ", vec![cand("名前", "なまえ", 100)]),
+        ]);
+        assert_eq!(sc.current_surface(), "私の名前");
+
+        sc.focus(0);
+        assert_eq!(sc.focused_surface_range_utf16(), (0, 1), "私 = [0,1)");
+        sc.focus(1);
+        assert_eq!(sc.focused_surface_range_utf16(), (1, 1), "の = [1,2)");
+        sc.focus(2);
+        assert_eq!(sc.focused_surface_range_utf16(), (2, 2), "名前 = [2,4)");
     }
 }

@@ -99,12 +99,21 @@ pub fn decide_commit(state: &InputState) -> CommitDecision {
     }
 }
 
+/// 候補パネル 1 ページに表示する候補数 (数字キー 1-9 に対応)。
+///
+/// 候補が多いとき、パネルは selected を含む 1 ページ分 (この件数) だけ表示し、
+/// 数字キー 1-9 は **現在ページ内の** 候補を選ぶ。候補パネル描画
+/// ([`crate::candidate_panel`]) とこの digit 選択ロジックで同じ値を使う。
+pub const CANDIDATE_PAGE_SIZE: usize = 9;
+
 /// 数字 1-9 キーが押された時の commit 決定 (テスト基盤 #2)。
 ///
-/// `digit` が `'1'..='9'` で、かつ `state.candidates` の `line_idx (= digit - '1')`
-/// 番目の候補が存在するときのみ `Some(CommitDecision)` を返す。
+/// `digit` が `'1'..='9'` で、かつ **現在ページ内** の対応候補が存在するときのみ
+/// `Some(CommitDecision)` を返す。現在ページは `selected_index` から決まる
+/// (`page = selected / CANDIDATE_PAGE_SIZE`)。digit は **ページ内位置** を指すので、
+/// 絶対 index = `page * CANDIDATE_PAGE_SIZE + (digit - '1')`。
 ///
-/// segmented モード時は **focused 文節に line_idx を反映してから全文連結**
+/// segmented モード時は **focused 文節に絶対 index を反映してから全文連結**
 /// (= 既存の数字ハンドラのデータ消失バグを防ぐ。PR #51 で fix した挙動を
 /// 純粋関数として固定化)。
 ///
@@ -121,9 +130,12 @@ pub fn decide_digit_select_and_commit(state: &InputState, digit: char) -> Option
     if !('1'..='9').contains(&digit) {
         return None;
     }
-    let line_idx = (digit as usize) - ('1' as usize);
+    let in_page = (digit as usize) - ('1' as usize);
 
     let candidates = state.candidates.as_ref()?;
+    // 現在表示中ページの先頭 + ページ内位置 = 絶対 index
+    let page_start = (candidates.selected_index() / CANDIDATE_PAGE_SIZE) * CANDIDATE_PAGE_SIZE;
+    let line_idx = page_start + in_page;
     if line_idx >= candidates.iter().count() {
         return None;
     }
@@ -179,6 +191,10 @@ pub enum CommandAction {
     SelectNext,
     /// Up (`moveUp:`) → 前候補
     SelectPrev,
+    /// Shift+Left (`moveLeftAndModifySelection:`) → focused 文節を縮める (segmented のみ)
+    ResizeSegmentLeft,
+    /// Shift+Right (`moveRightAndModifySelection:`) → focused 文節を伸ばす (segmented のみ)
+    ResizeSegmentRight,
     /// 未知のセレクタ → 確定してからパススルー (`Bool::NO`)
     CommitAndPassThrough,
 }
@@ -209,6 +225,9 @@ pub fn decide_command(selector_name: &std::ffi::CStr, is_composing: bool) -> Com
         b"moveRight:" => CommandAction::FocusShiftRight,
         b"moveDown:" => CommandAction::SelectNext,
         b"moveUp:" => CommandAction::SelectPrev,
+        // Shift+←→ (文節伸縮)。macOS は selection 拡張のセレクタとして配送する。
+        b"moveLeftAndModifySelection:" => CommandAction::ResizeSegmentLeft,
+        b"moveRightAndModifySelection:" => CommandAction::ResizeSegmentRight,
         _ => CommandAction::CommitAndPassThrough,
     }
 }
@@ -750,6 +769,39 @@ mod tests {
         assert_eq!(d.learn_targets.len(), 1);
     }
 
+    /// 数字キーは「現在表示中ページ内」の候補を選ぶ (候補が多くてページ送りした時)。
+    #[test]
+    fn digit_selects_within_current_page() {
+        // 15 候補。page は CANDIDATE_PAGE_SIZE(9) ごと。
+        let cands: Vec<Candidate> = (0..15).map(|i| cand(&format!("c{i}"), "x", 100)).collect();
+        let mut state = flat_state(cands);
+        // selected を index 10 (= 2 ページ目, page_start=9) に移動
+        for _ in 0..10 {
+            state.candidates.as_mut().unwrap().select_next();
+        }
+        assert_eq!(state.candidates.as_ref().unwrap().selected_index(), 10);
+
+        // '1' は page_start(9) → c9、'2' → c10
+        assert_eq!(
+            decide_digit_select_and_commit(&state, '1')
+                .unwrap()
+                .commit_text,
+            "c9",
+            "★ '1' は現在ページ先頭 (絶対 index 9)",
+        );
+        assert_eq!(
+            decide_digit_select_and_commit(&state, '2')
+                .unwrap()
+                .commit_text,
+            "c10",
+        );
+        // 2 ページ目は c9..c14 の 6 件。'7' は範囲外 (9+6=15) → None
+        assert!(
+            decide_digit_select_and_commit(&state, '7').is_none(),
+            "★ ページ内に存在しない番号は None",
+        );
+    }
+
     #[test]
     fn digit_segmented_mode_full_sentence_with_chosen_line() {
         // 「わたしのなまえ」: 文節 0 (= わたし) で焦点
@@ -965,6 +1017,14 @@ mod tests {
             (c"moveRight:", CommandAction::FocusShiftRight),
             (c"moveDown:", CommandAction::SelectNext),
             (c"moveUp:", CommandAction::SelectPrev),
+            (
+                c"moveLeftAndModifySelection:",
+                CommandAction::ResizeSegmentLeft,
+            ),
+            (
+                c"moveRightAndModifySelection:",
+                CommandAction::ResizeSegmentRight,
+            ),
         ];
         for (sel, expected) in cases {
             assert_eq!(

@@ -6,6 +6,7 @@ pub mod backend;
 mod candidate;
 mod context;
 mod engine;
+pub mod extend_clause;
 mod segment;
 
 pub use candidate::{Candidate, CandidateList, CandidateSource};

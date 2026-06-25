@@ -25,6 +25,8 @@ use objc2_foundation::{
     NSCopying, NSDictionary, NSMutableAttributedString, NSPoint, NSRange, NSRect, NSSize, NSString,
 };
 
+use crate::commit::CANDIDATE_PAGE_SIZE;
+
 /// 候補ウィンドウのサイズ計算用定数
 const DEFAULT_WIDTH: f64 = 280.0;
 const LINE_HEIGHT: f64 = 22.0;
@@ -99,17 +101,38 @@ impl CustomCandidatePanel {
         Self { panel, label }
     }
 
-    /// 候補リストと選択 index を更新し、パネルサイズを内容に合わせる
+    /// 候補リストと選択 index を更新し、パネルサイズを内容に合わせる (flat モード)。
     pub fn set_candidates(&self, items: &[String], selected: usize) {
+        self.render(None, items, selected);
+    }
+
+    /// 候補リスト + **文節分割ヘッダ** を表示する (segmented モード)。
+    ///
+    /// パネル先頭に全文節を並べ、`focused` 文節を `【 】` + 背景色で強調する。
+    /// 「今どの文節を変換しているか」をアプリの marked text 描画に依存せず示すため
+    /// (Electron 等は selectionRange を描かない。実機検証 2026-06)。
+    pub fn set_candidates_segmented(
+        &self,
+        items: &[String],
+        selected: usize,
+        segments: &[String],
+        focused: usize,
+    ) {
+        self.render(Some((segments, focused)), items, selected);
+    }
+
+    /// 内部: ヘッダ有無を問わず描画 + 高さ調整。
+    fn render(&self, header: Option<(&[String], usize)>, items: &[String], selected: usize) {
         if items.is_empty() {
             self.hide();
             return;
         }
-        let attr = build_attributed_string(items, selected);
+        // 候補が多くても 1 ページ (CANDIDATE_PAGE_SIZE 件) ぶんだけ描く。
+        // 実際に描画した行数を受け取って高さに使う。
+        let (attr, line_count) = build_attributed_string(header, items, selected);
         self.label.setAttributedStringValue(&attr);
 
-        // 行数に合わせて高さ調整。幅は固定。
-        let height = (items.len() as f64) * LINE_HEIGHT + PADDING * 2.0;
+        let height = (line_count as f64) * LINE_HEIGHT + PADDING * 2.0;
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(DEFAULT_WIDTH, height));
         self.label.setFrame(frame);
         self.panel.setContentSize(frame.size);
@@ -141,33 +164,81 @@ impl CustomCandidatePanel {
     }
 }
 
-/// 候補リストを 1 つの NSAttributedString にフォーマットする。
+/// 候補リスト (+任意の文節ヘッダ) を 1 つの NSAttributedString にフォーマットする。
 ///
-/// - 各行は「{1-9 で選べる場合は番号}. {surface}」の形式
-/// - 選択中の行には背景色 (`selectedTextBackgroundColor`) を付与
+/// 候補が `CANDIDATE_PAGE_SIZE` 件を超えるときは、**`selected` を含む 1 ページ分だけ**
+/// 表示する (数字キー 1-9 に対応)。複数ページあるときは末尾にページ表示
+/// (`p / total`) を付け、「まだ候補がある」ことを示す。戻り値は
+/// `(属性文字列, 実際に描いた行数)` で、行数はパネル高さ計算に使う。
+///
+/// - `header = Some((segments, focused))` のとき、先頭行に全文節を並べ、focused 文節を
+///   `【 】` で囲って背景色で強調する (segmented モードの「どこを変換中か」表示)
+/// - 各候補行は「{ページ内番号 1-9}. {surface}」の形式
+/// - 選択中の候補行には背景色 (`selectedTextBackgroundColor`) を付与
 /// - 行頭マーカ ▶ も付ける (背景色が薄いテーマでも視覚的に分かるよう)
 fn build_attributed_string(
+    header: Option<(&[String], usize)>,
     items: &[String],
     selected: usize,
-) -> Retained<NSMutableAttributedString> {
+) -> (Retained<NSMutableAttributedString>, usize) {
     let mut combined = String::new();
-    let mut line_ranges: Vec<(usize, usize)> = Vec::with_capacity(items.len());
+    // 文節ヘッダの focused 範囲 / 選択候補行の範囲 (utf16: start, len)。背景強調に使う。
+    let mut header_focus_range: Option<(usize, usize)> = None;
+    let mut selected_line_range: Option<(usize, usize)> = None;
+    let mut line_count: usize = 0;
 
-    for (i, item) in items.iter().enumerate() {
-        let marker = if i == selected { "▶ " } else { "  " };
-        let num = if i < 9 {
-            format!("{}. ", i + 1)
-        } else {
-            "   ".to_string()
-        };
-        let line = format!("{marker}{num}{item}");
-        let start_utf16 = combined.encode_utf16().count();
-        combined.push_str(&line);
-        let end_utf16 = combined.encode_utf16().count();
-        if i + 1 < items.len() {
-            combined.push('\n');
+    // 行間の改行を「2 行目以降の先頭」に入れるためのヘルパ。
+    let newline_if_needed = |s: &mut String| {
+        if !s.is_empty() {
+            s.push('\n');
         }
-        line_ranges.push((start_utf16, end_utf16));
+    };
+
+    // 1. 文節ヘッダ
+    if let Some((segments, focused)) = header {
+        for (i, seg) in segments.iter().enumerate() {
+            if i > 0 {
+                combined.push(' ');
+            }
+            if i == focused {
+                let start = combined.encode_utf16().count();
+                combined.push('【');
+                combined.push_str(seg);
+                combined.push('】');
+                let len = combined.encode_utf16().count() - start;
+                header_focus_range = Some((start, len));
+            } else {
+                combined.push_str(seg);
+            }
+        }
+        line_count += 1;
+    }
+
+    // 2. 候補ページ (selected を含む 1 ページぶんだけ)
+    let page = selected / CANDIDATE_PAGE_SIZE;
+    let page_start = page * CANDIDATE_PAGE_SIZE;
+    let page_end = (page_start + CANDIDATE_PAGE_SIZE).min(items.len());
+    let page_count = items.len().div_ceil(CANDIDATE_PAGE_SIZE);
+    let in_page_selected = selected - page_start;
+
+    for (j, item) in items[page_start..page_end].iter().enumerate() {
+        newline_if_needed(&mut combined);
+        let marker = if j == in_page_selected { "▶ " } else { "  " };
+        let line = format!("{marker}{}. {item}", j + 1);
+        let start = combined.encode_utf16().count();
+        combined.push_str(&line);
+        let end = combined.encode_utf16().count();
+        if j == in_page_selected {
+            selected_line_range = Some((start, end - start));
+        }
+        line_count += 1;
+    }
+
+    // 3. ページ表示 (複数ページのときだけ「まだ候補がある」と分かるように)
+    if page_count > 1 {
+        newline_if_needed(&mut combined);
+        combined.push_str(&format!("    {} / {}", page + 1, page_count));
+        line_count += 1;
     }
 
     let ns_str = NSString::from_str(&combined);
@@ -191,19 +262,22 @@ fn build_attributed_string(
         }
     }
 
-    // 選択中候補の行に背景色を上書き
-    if let Some((start, end)) = line_ranges.get(selected) {
-        let length = end - start;
-        if length > 0 {
+    // 文節ヘッダの focused 文節に背景色 (= どこを変換中かを強調)
+    // 選択中候補の行に背景色
+    for (start, len) in [header_focus_range, selected_line_range]
+        .into_iter()
+        .flatten()
+    {
+        if len > 0 {
             unsafe {
                 let bg_color = NSColor::selectedTextBackgroundColor();
                 let key = NSBackgroundColorAttributeName.copy();
                 let value: &AnyObject = (*bg_color).as_ref();
                 let dict = NSDictionary::from_slices(&[&*key], &[value]);
-                attr_string.addAttributes_range(&dict, NSRange::new(*start, length));
+                attr_string.addAttributes_range(&dict, NSRange::new(start, len));
             }
         }
     }
 
-    attr_string
+    (attr_string, line_count)
 }
