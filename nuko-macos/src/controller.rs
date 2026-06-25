@@ -930,14 +930,14 @@ impl NukoInputController {
     /// `firstRectForCharacterRange:actualRange:` で marked text の screen 座標を
     /// 取得してパネルを直下に配置する。
     fn show_candidate_panel(&self, client: &AnyObject) {
-        let snapshot: Option<(Vec<String>, usize)> = {
+        let snapshot = {
             let state = self.ivars().state.borrow();
             state.candidates.as_ref().map(|c| {
                 let items: Vec<String> = c.iter().map(|x| x.surface.clone()).collect();
-                (items, c.selected_index())
+                (items, c.selected_index(), Self::panel_segments(&state))
             })
         };
-        let Some((items, selected)) = snapshot else {
+        let Some((items, selected, seg_info)) = snapshot else {
             return;
         };
         let position = Self::caret_screen_point(client);
@@ -949,7 +949,11 @@ impl NukoInputController {
         ));
         with_custom_panel(|panel| {
             if let Some(panel) = panel {
-                panel.set_candidates(&items, selected);
+                if let Some((segs, focused)) = &seg_info {
+                    panel.set_candidates_segmented(&items, selected, segs, *focused);
+                } else {
+                    panel.set_candidates(&items, selected);
+                }
                 let visible = panel.show_at(position);
                 debug_log(&format!(
                     "show_candidate_panel: after show_at isVisible={visible}"
@@ -958,6 +962,21 @@ impl NukoInputController {
                 debug_log("show_candidate_panel: panel not initialized");
             }
         });
+    }
+
+    /// segmented モードのとき、パネルヘッダ用に全文節の現在 surface と focused を返す。
+    /// 単一文節 (segment 数 1) は分割表示の意味がないので `None` (= ヘッダ無し)。
+    fn panel_segments(state: &InputState) -> Option<(Vec<String>, usize)> {
+        let segmented = state.segmented.as_ref()?;
+        if segmented.segments.len() < 2 {
+            return None;
+        }
+        let segs: Vec<String> = segmented
+            .segments
+            .iter()
+            .map(|s| s.surface().unwrap_or_default().to_string())
+            .collect();
+        Some((segs, segmented.focused))
     }
 
     /// 候補ウィンドウを隠す (singleton; 全 controller から共有)
@@ -977,21 +996,25 @@ impl NukoInputController {
     /// `set_candidates` を呼び直して再描画する (selected も同時に反映)。
     /// state borrow と panel borrow を別スコープに分けて RefCell の二重借用を回避。
     fn sync_panel_selection(&self, _line_number: usize) {
-        let snapshot: Option<(Vec<String>, usize)> = {
+        let snapshot = {
             let state = self.ivars().state.borrow();
             state.candidates.as_ref().map(|c| {
                 let items: Vec<String> = c.iter().map(|x| x.surface.clone()).collect();
-                (items, c.selected_index())
+                (items, c.selected_index(), Self::panel_segments(&state))
             })
         };
-        let Some((items, selected)) = snapshot else {
+        let Some((items, selected, seg_info)) = snapshot else {
             return;
         };
         debug_log(&format!("sync_panel_selection: selected={selected}"));
         with_custom_panel(|panel| {
             if let Some(panel) = panel {
                 if panel.is_visible() {
-                    panel.set_candidates(&items, selected);
+                    if let Some((segs, focused)) = &seg_info {
+                        panel.set_candidates_segmented(&items, selected, segs, *focused);
+                    } else {
+                        panel.set_candidates(&items, selected);
+                    }
                 }
             }
         });

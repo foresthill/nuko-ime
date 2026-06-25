@@ -99,17 +99,39 @@ impl CustomCandidatePanel {
         Self { panel, label }
     }
 
-    /// 候補リストと選択 index を更新し、パネルサイズを内容に合わせる
+    /// 候補リストと選択 index を更新し、パネルサイズを内容に合わせる (flat モード)。
     pub fn set_candidates(&self, items: &[String], selected: usize) {
+        self.render(None, items, selected);
+    }
+
+    /// 候補リスト + **文節分割ヘッダ** を表示する (segmented モード)。
+    ///
+    /// パネル先頭に全文節を並べ、`focused` 文節を `【 】` + 背景色で強調する。
+    /// 「今どの文節を変換しているか」をアプリの marked text 描画に依存せず示すため
+    /// (Electron 等は selectionRange を描かない。実機検証 2026-06)。
+    pub fn set_candidates_segmented(
+        &self,
+        items: &[String],
+        selected: usize,
+        segments: &[String],
+        focused: usize,
+    ) {
+        self.render(Some((segments, focused)), items, selected);
+    }
+
+    /// 内部: ヘッダ有無を問わず描画 + 高さ調整。
+    fn render(&self, header: Option<(&[String], usize)>, items: &[String], selected: usize) {
         if items.is_empty() {
             self.hide();
             return;
         }
-        let attr = build_attributed_string(items, selected);
+        let attr = build_attributed_string(header, items, selected);
         self.label.setAttributedStringValue(&attr);
 
-        // 行数に合わせて高さ調整。幅は固定。
-        let height = (items.len() as f64) * LINE_HEIGHT + PADDING * 2.0;
+        // 行数に合わせて高さ調整 (ヘッダがあれば 1 行ぶん加算)。幅は固定。
+        let header_lines = usize::from(header.is_some());
+        let line_count = items.len() + header_lines;
+        let height = (line_count as f64) * LINE_HEIGHT + PADDING * 2.0;
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(DEFAULT_WIDTH, height));
         self.label.setFrame(frame);
         self.panel.setContentSize(frame.size);
@@ -141,16 +163,42 @@ impl CustomCandidatePanel {
     }
 }
 
-/// 候補リストを 1 つの NSAttributedString にフォーマットする。
+/// 候補リスト (+任意の文節ヘッダ) を 1 つの NSAttributedString にフォーマットする。
 ///
-/// - 各行は「{1-9 で選べる場合は番号}. {surface}」の形式
-/// - 選択中の行には背景色 (`selectedTextBackgroundColor`) を付与
+/// - `header = Some((segments, focused))` のとき、先頭行に全文節を並べ、focused 文節を
+///   `【 】` で囲って背景色で強調する (segmented モードの「どこを変換中か」表示)
+/// - 各候補行は「{1-9 で選べる場合は番号}. {surface}」の形式
+/// - 選択中の候補行には背景色 (`selectedTextBackgroundColor`) を付与
 /// - 行頭マーカ ▶ も付ける (背景色が薄いテーマでも視覚的に分かるよう)
 fn build_attributed_string(
+    header: Option<(&[String], usize)>,
     items: &[String],
     selected: usize,
 ) -> Retained<NSMutableAttributedString> {
     let mut combined = String::new();
+    // 文節ヘッダの focused 範囲 (utf16: start, len)。背景強調に使う。
+    let mut header_focus_range: Option<(usize, usize)> = None;
+
+    if let Some((segments, focused)) = header {
+        for (i, seg) in segments.iter().enumerate() {
+            if i > 0 {
+                combined.push(' ');
+            }
+            if i == focused {
+                let start = combined.encode_utf16().count();
+                combined.push('【');
+                combined.push_str(seg);
+                combined.push('】');
+                let len = combined.encode_utf16().count() - start;
+                header_focus_range = Some((start, len));
+            } else {
+                combined.push_str(seg);
+            }
+        }
+        // ヘッダと候補リストを改行で区切る (items は必ず 1 つ以上ある前提)
+        combined.push('\n');
+    }
+
     let mut line_ranges: Vec<(usize, usize)> = Vec::with_capacity(items.len());
 
     for (i, item) in items.iter().enumerate() {
@@ -188,6 +236,19 @@ fn build_attributed_string(
             let value: &AnyObject = (*fg_color).as_ref();
             let dict = NSDictionary::from_slices(&[&*key], &[value]);
             attr_string.addAttributes_range(&dict, NSRange::new(0, total_len));
+        }
+    }
+
+    // 文節ヘッダの focused 文節に背景色 (= どこを変換中かを強調)
+    if let Some((start, len)) = header_focus_range {
+        if len > 0 {
+            unsafe {
+                let bg_color = NSColor::selectedTextBackgroundColor();
+                let key = NSBackgroundColorAttributeName.copy();
+                let value: &AnyObject = (*bg_color).as_ref();
+                let dict = NSDictionary::from_slices(&[&*key], &[value]);
+                attr_string.addAttributes_range(&dict, NSRange::new(start, len));
+            }
         }
     }
 
