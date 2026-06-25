@@ -4,13 +4,28 @@
 //! libakaza の `convert(yomi, Some(force_ranges))` に渡す **バイトオフセットの
 //! 範囲列** を、各文節の読みとフォーカス位置だけから計算する。
 //!
+//! ## 操作の方向 (重要な仕様)
+//!
+//! **`extend_left` / `extend_right` はどちらも「focused 文節の右端だけ」を動かす。
+//! 左端は決して動かさない。**
+//!
+//! - **Shift+→ (`extend_right`)**: focused の右端を 1 文字 **右** へ = focused を伸ばす
+//!   (右隣から 1 文字もらう)。
+//! - **Shift+← (`extend_left`)**: focused の右端を 1 文字 **左** へ = focused を縮める
+//!   (末尾 1 文字を右隣に渡す。末尾文節なら新文節を作る)。
+//!
+//! これは Google 日本語入力等の標準で、「いま自分がどこの区切りを調整しているか」が
+//! 直感的になる。**左端を動かすとユーザーが混乱する**ため、この方針に統一している
+//! (ユーザー要望 2026-06-25。CLAUDE.md「文節伸縮の仕様」にも明記)。
+//!
 //! ## 出典
 //!
-//! アルゴリズムは akaza (MIT, Copyright (c) 2023 Tokuhiro Matsuno) の
-//! `libakaza/src/extend_clause.rs` を、ぬこIME の文節読み (`&[&str]`) に
-//! 合わせて移植したもの。akaza は本体候補 (`clause[0].yomi`) のみを参照する
-//! ので、読み文字列の配列だけで等価に計算できる。
-//! 本プロジェクトのライセンス (Apache-2.0 OR MIT) と MIT は互換。
+//! `extend_right` のアルゴリズムは akaza (MIT, Copyright (c) 2023 Tokuhiro Matsuno) の
+//! `libakaza/src/extend_clause.rs` を、ぬこIME の文節読み (`&[&str]`) に合わせて移植した
+//! もの (akaza は本体候補 `clause[0].yomi` のみ参照するので読み配列で等価)。
+//! `extend_left` は akaza が focused>0 で **左端** を動かす実装だったため、「右端のみ
+//! 動かす」方針に作り替えている。本プロジェクトのライセンス (Apache-2.0 OR MIT) と
+//! MIT は互換。
 //!
 //! ## 不変条件
 //!
@@ -75,90 +90,54 @@ pub fn extend_right(readings: &[&str], focused: usize) -> Vec<Range<usize>> {
     ranges
 }
 
-/// focused 文節の左境界を **左** に動かす (= focused を 1 文字縮める / 左隣を縮める)。
+/// focused 文節の **右端を 1 文字左** へ動かす (= focused を 1 文字縮める)。
 ///
-/// - `focused == 0`: 一番左の文節の末尾 1 文字を切り出して新しい文節にする。
-/// - `focused > 0`: 左隣の末尾 1 文字を focused に移す (focused が左に伸びる)。
+/// 縮めた末尾 1 文字は **右隣の文節の先頭** に移る。focused が末尾文節のときは、
+/// その 1 文字で **新しい文節を右に作る**。focused が 1 文字しかないときは縮められ
+/// ないので現状維持。
 ///
-/// 縮められない (1 文字しかない等) 場合は現状維持。
+/// **設計方針 (重要): `extend_left` / `extend_right` はどちらも「focused 文節の
+/// 右端だけ」を動かす。左端は決して動かさない。** これは Google 日本語入力等の
+/// 標準挙動で、「いま自分がどこの区切りを調整しているか」が直感的になる。
+/// (akaza 由来の旧実装は focused>0 で左端を動かしていたが、ユーザーから「左が
+/// 増えると混乱する」と指摘され 2026-06-25 にこの方針へ統一した。)
 #[must_use]
 pub fn extend_left(readings: &[&str], focused: usize) -> Vec<Range<usize>> {
     if readings.is_empty() {
         return Vec::new();
     }
+    let f = focused.min(readings.len() - 1);
 
-    // 文節が 1 個だけ: 末尾 1 文字を別文節に切り出す。
-    if readings.len() == 1 {
-        let yomi = readings[0];
-        return match yomi.chars().last() {
-            // 2 文字以上 (= 切り出してもどちらも空にならない) のときだけ分割。
-            Some(last) if yomi.chars().count() > 1 => {
-                let head = yomi.len() - last.len_utf8();
-                vec![0..head, head..yomi.len()]
-            }
-            _ => keep_current(readings),
-        };
+    // focused の末尾 1 文字。1 文字以下なら右端を左に動かせない (空になる) → 現状維持。
+    let Some(last) = readings[f].chars().last() else {
+        return keep_current(readings);
+    };
+    if readings[f].chars().count() <= 1 {
+        return keep_current(readings);
     }
+    let last_len = last.len_utf8();
 
-    if focused == 0 {
-        // 一番左がフォーカス: 左文節を 1 文字短くする ([ab][c] → [a][bc])。
-        if readings[0].chars().count() == 1 {
-            return keep_current(readings);
-        }
-        let mut ranges: Vec<Range<usize>> = Vec::new();
-        let mut offset = 0;
-        for (i, &yomi) in readings.iter().enumerate() {
-            if i == focused {
-                let Some(last) = yomi.chars().last() else {
-                    return keep_current(readings);
-                };
-                ranges.push(offset..offset + yomi.len() - last.len_utf8());
-            } else if i == focused + 1 {
-                let Some(prev_last) = readings[i - 1].chars().last() else {
-                    return keep_current(readings);
-                };
-                let prev_last_len = prev_last.len_utf8();
-                let start = offset - prev_last_len;
-                let end = start + (yomi.len() + prev_last_len);
-                if start < end {
-                    ranges.push(start..end);
-                }
-            } else {
-                ranges.push(offset..offset + yomi.len());
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    let mut offset = 0;
+    for (i, &yomi) in readings.iter().enumerate() {
+        if i == f {
+            // focused: 末尾 1 文字を削る
+            ranges.push(offset..offset + yomi.len() - last_len);
+            if f + 1 == readings.len() {
+                // focused が末尾文節: 削った 1 文字で新しい文節を作る
+                let start = offset + yomi.len() - last_len;
+                ranges.push(start..offset + yomi.len());
             }
-            offset += yomi.len();
+        } else if i == f + 1 {
+            // 右隣: focused から移ってきた 1 文字を先頭に足す
+            let start = offset - last_len;
+            ranges.push(start..offset + yomi.len());
+        } else {
+            ranges.push(offset..offset + yomi.len());
         }
-        ranges
-    } else {
-        // 2 番目以降がフォーカス: 左隣の末尾 1 文字を focused に移す。
-        let mut ranges: Vec<Range<usize>> = Vec::new();
-        let mut offset = 0;
-        for (i, &yomi) in readings.iter().enumerate() {
-            let (start, end) = if i == focused {
-                let Some(prev_last) = readings[i - 1].chars().last() else {
-                    return keep_current(readings);
-                };
-                let prev_last_len = prev_last.len_utf8();
-                let start = offset - prev_last_len;
-                let end = start + yomi.len() + prev_last_len;
-                (start, end)
-            } else if i == focused - 1 {
-                let Some(last) = yomi.chars().last() else {
-                    return keep_current(readings);
-                };
-                let start = offset;
-                let end = offset + (yomi.len() - last.len_utf8());
-                (start, end)
-            } else {
-                (offset, offset + yomi.len())
-            };
-            if start < end {
-                ranges.push(start..end);
-            }
-            offset += yomi.len();
-        }
-        ranges
+        offset += yomi.len();
     }
+    ranges
 }
 
 #[cfg(test)]
@@ -228,10 +207,58 @@ mod tests {
     }
 
     #[test]
-    fn left_focus1_moves_boundary_left() {
-        // [わたし][の] focus=1 → [わた][しの]
-        let r = extend_left(&["わたし", "の"], 1);
-        assert_eq!(sliced(&["わたし", "の"], &r), vec!["わた", "しの"]);
+    fn left_focus_shrinks_right_edge_moves_char_to_next() {
+        // 仕様: focused の右端を 1 文字左へ。末尾文字は右隣の先頭に移る。
+        // [わたし][なまえ] focus=0 → [わた][しなまえ]
+        let r = extend_left(&["わたし", "なまえ"], 0);
+        assert_eq!(sliced(&["わたし", "なまえ"], &r), vec!["わた", "しなまえ"]);
+    }
+
+    #[test]
+    fn left_focus1_shrinks_focused_not_left_neighbor() {
+        // ★ 重要: focused>0 でも「左隣」ではなく focused 自身の右端を縮める。
+        // [わたし][なまえ][です] focus=1 → [わたし][なま][えです]
+        // (旧 akaza 実装は [わた][しなまえ][です] のように左端を動かしていた)
+        let r = extend_left(&["わたし", "なまえ", "です"], 1);
+        assert_eq!(
+            sliced(&["わたし", "なまえ", "です"], &r),
+            vec!["わたし", "なま", "えです"],
+        );
+    }
+
+    #[test]
+    fn left_focus_on_last_segment_creates_new_segment() {
+        // 末尾文節を縮めると、削った 1 文字で新しい文節ができる。
+        // [わたし][なまえ] focus=1 → [わたし][なま][え]
+        let r = extend_left(&["わたし", "なまえ"], 1);
+        assert_eq!(
+            sliced(&["わたし", "なまえ"], &r),
+            vec!["わたし", "なま", "え"]
+        );
+    }
+
+    #[test]
+    fn left_single_char_focused_keeps() {
+        // focused が 1 文字なら縮められない (空になるため現状維持)。
+        // [わたし][の][なまえ] focus=1 (=「の」) → 変化なし
+        let r = extend_left(&["わたし", "の", "なまえ"], 1);
+        assert_eq!(
+            sliced(&["わたし", "の", "なまえ"], &r),
+            vec!["わたし", "の", "なまえ"],
+        );
+    }
+
+    #[test]
+    fn left_then_right_roundtrips() {
+        // 右端を 1 縮めて 1 伸ばせば元に戻る (focused 維持)。
+        let base = ["わたし", "なまえ"];
+        let shrunk = extend_left(&base, 0); // [わた][しなまえ]
+        assert_eq!(sliced(&base, &shrunk), vec!["わた", "しなまえ"]);
+        // shrunk の読みで focus=0 を右伸長 → 元の [わたし][なまえ]
+        let readings: Vec<String> = sliced(&base, &shrunk);
+        let refs: Vec<&str> = readings.iter().map(String::as_str).collect();
+        let grown = extend_right(&refs, 0);
+        assert_eq!(sliced(&refs, &grown), vec!["わたし", "なまえ"]);
     }
 
     #[test]

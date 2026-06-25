@@ -156,6 +156,23 @@ PR #40 で `convert_k_best(reading, None, k=9)` に切替。各 `KBestPath` が�
 
 **デバッグのコツ**: リリースは `panic=abort` + `strip` で crash 箇所が見えない。`msg_send!` の型/セレクタ不整合は **デバッグビルド (`cargo build`、`panic=unwind` + シンボル付き) の objc2 `panic_verify`** が炙り出す。リリースで謎 crash したら、debug バイナリを `.app` に差し込んで `RUST_BACKTRACE=full ./NukoIME 2>log` で再現するのが最短 (詳細は下記「実機 smoke test」)。
 
+## 文節伸縮の仕様 (Shift+←→) — **右端だけを動かす**
+
+**確定した重要仕様 (ユーザー要望 2026-06-25)。変更するときは必ずこの方針を守ること。**
+
+文節境界の手動調整 (`Shift+←` / `Shift+→`) は、**常に「focused 文節の右端だけ」を動かす**。左端は決して動かさない。
+
+| キー | 操作 | 挙動 |
+|------|------|------|
+| **Shift+→** | focused の右端を 1 文字 **右** へ | focused を**伸ばす**。右隣から 1 文字もらう |
+| **Shift+←** | focused の右端を 1 文字 **左** へ | focused を**縮める**。末尾 1 文字を右隣に渡す (末尾文節なら新文節を作る) |
+
+これは Google 日本語入力等の標準。**「いま自分がどこの区切りを調整しているか」が直感的**になる。
+
+**やってはいけないこと**: focused が 2 番目以降のとき `Shift+←` で**左端**を動かす (左隣を縮めて自分を左に伸ばす) のは禁止。「左が増えるとどこを調整しているか分からなくなって混乱する」とユーザーから明確に指摘されている。akaza 由来の `extend_clause.rs` の旧実装はこれをやっていたので、`extend_left` を「右端のみ動かす」に作り替えた。
+
+実装: [`nuko-core/src/conversion/extend_clause.rs`](nuko-core/src/conversion/extend_clause.rs) の `extend_right` / `extend_left` (純粋関数、テスト付き) → `ConversionEngine::resize_segment` → controller の `handle_segment_resize`。
+
 ## 静的辞書とモデル辞書の補完関係
 
 `nuko-core/src/dictionary/system.rs` は **ハードコードの静的辞書** (現在約 230 エントリ)。libakaza モデルの dict (SKK-JISYO.akaza、~1M エントリ) が大規模だが、まだ拾いきれない日常頻出語が出てくる。
