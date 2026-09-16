@@ -47,3 +47,4 @@ learning.json
 *.dmg
 *.tar.gz
 *.zip
+/dist/
