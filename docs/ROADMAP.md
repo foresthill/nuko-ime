@@ -82,7 +82,7 @@ libakaza 本体は MIT、上流 corpus-stats は CC BY-SA + PD + IPADIC BSD-3 �
 
 ## Phase 3 — 学習機構 (FUTURE_FEATURES §8 と一致)
 
-詳細設計は [`FUTURE_FEATURES.md` §8](FUTURE_FEATURES.md) を参照。
+**具体アーキテクチャは [`LEARNING_ARCHITECTURE.md`](LEARNING_ARCHITECTURE.md) を参照**(データモデル・データフロー・ビルド順)。フレームワークは [`FUTURE_FEATURES.md` §8](FUTURE_FEATURES.md)。
 
 - [ ] Stage 1: `proptest` 不変条件 (現 nuko-core にも適用可)
 - [ ] Stage 2: ログ取得基盤 (成功/失敗、デフォルト OFF、ローカル保存)
