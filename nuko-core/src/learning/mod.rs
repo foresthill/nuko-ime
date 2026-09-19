@@ -4,5 +4,7 @@
 
 mod frequency;
 mod manager;
+pub mod observation;
 
 pub use manager::LearningManager;
+pub use observation::{ObservationEvent, ObservationLog};

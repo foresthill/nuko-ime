@@ -1,4 +1,5 @@
 use nuko_core::conversion::{CandidateList, ConversionContext, SegmentedConversion};
+use nuko_core::learning::ObservationLog;
 use nuko_core::prelude::*;
 use objc2::MainThreadMarker;
 use std::cell::RefCell;
@@ -81,6 +82,50 @@ where
     F: FnOnce(&mut ConversionEngine) -> R,
 {
     ENGINE.with(|cell| f(&mut cell.borrow_mut()))
+}
+
+// --- Layer 1: 観察ログ (オプトイン・ローカル) ---------------------------
+//
+// docs/LEARNING_ARCHITECTURE.md の Layer 1。確定/訂正イベントをローカルの
+// observations.jsonl に追記する。**プライバシー既定は「何も記録しない」**。
+//
+// オプトイン方式 (MVP・依存ゼロ): app support dir に marker ファイル
+// `OBSERVE_ENABLED` が存在すれば有効。無ければ無効 (既定)。
+//   有効化: touch "$HOME/Library/Application Support/nuko-ime/OBSERVE_ENABLED"
+//   無効化: 上記ファイルを削除
+// (トグル UI は将来。docs/LEARNING_ARCHITECTURE.md §7 参照)
+thread_local! {
+    static OBSERVATION_LOG: ObservationLog = build_observation_log();
+}
+
+/// `~/Library/Application Support/nuko-ime/` を返す (HOME 取得失敗時 None)。
+fn nuko_app_support_dir() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(
+        std::path::PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("nuko-ime"),
+    )
+}
+
+fn build_observation_log() -> ObservationLog {
+    let Some(dir) = nuko_app_support_dir() else {
+        return ObservationLog::disabled();
+    };
+    let enabled = dir.join("OBSERVE_ENABLED").exists();
+    tracing::info!(enabled, "観察ログ (Layer 1) オプトイン状態");
+    ObservationLog::new(enabled, dir.join("observations.jsonl"))
+}
+
+/// 観察ログ (Layer 1) へのアクセスを提供する。
+///
+/// `record` はオプトイン無効時 (既定) は完全な no-op(ファイルも作らない)。
+pub fn with_observation<F, R>(f: F) -> R
+where
+    F: FnOnce(&ObservationLog) -> R,
+{
+    OBSERVATION_LOG.with(f)
 }
 
 #[cfg(feature = "akaza")]

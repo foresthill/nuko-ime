@@ -18,10 +18,12 @@ use objc2_input_method_kit::{IMKInputController, IMKServer};
 use tracing::{debug, error, info, warn};
 
 use nuko_core::conversion::CandidateList;
+use nuko_core::learning::ObservationEvent;
 
 use crate::commit::{BackspaceAction, CommandAction, SpaceAction};
 use crate::state::{
-    ensure_custom_panel, with_custom_panel, with_engine, with_engine_mut, InputState,
+    ensure_custom_panel, with_custom_panel, with_engine, with_engine_mut, with_observation,
+    InputState,
 };
 
 /// NSNotFound 相当値 (IMK の replacementRange で使用)
@@ -847,6 +849,9 @@ impl NukoInputController {
             state.context.push_prev_word(&decision.commit_text);
         }
 
+        // Layer 1 観察ログ用に、確定前の読み (かな) を控える (reset で消えるため)。
+        let reading = state.composition.clone();
+
         state.reset();
         drop(state);
 
@@ -854,6 +859,18 @@ impl NukoInputController {
 
         if !decision.commit_text.is_empty() {
             Self::insert_text_on_client(client, &decision.commit_text);
+
+            // Layer 1: 観察ログに確定イベントを記録 (オプトイン無効なら no-op)。
+            if !reading.is_empty() {
+                with_observation(|log| {
+                    if let Err(e) = log.record(&ObservationEvent::commit(
+                        reading.as_str(),
+                        decision.commit_text.as_str(),
+                    )) {
+                        debug_log(&format!("観察ログ記録エラー: {e}"));
+                    }
+                });
+            }
         }
     }
 
