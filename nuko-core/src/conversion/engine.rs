@@ -10,7 +10,7 @@ use super::{Candidate, CandidateList, CandidateSource, ConversionContext};
 use crate::dictionary::DictionaryManager;
 use crate::error::{NukoError, Result};
 use crate::input::{to_halfwidth_katakana, to_katakana};
-use crate::learning::LearningManager;
+use crate::learning::{CorrectionStore, LearningManager};
 
 /// libakaza 由来候補に上乗せする優先度ブースト。
 ///
@@ -39,6 +39,8 @@ pub struct ConversionEngine {
     /// libakaza バックエンド (`akaza` feature 有効時のみ)
     #[cfg(feature = "akaza")]
     libakaza: Option<LibakazaBackend>,
+    /// Layer 2 訂正学習の個人選好 (変換時に候補へ bias)。空なら変換は無変化。
+    corrections: CorrectionStore,
 }
 
 impl ConversionEngine {
@@ -52,6 +54,7 @@ impl ConversionEngine {
             learning: LearningManager::new()?,
             #[cfg(feature = "akaza")]
             libakaza: None,
+            corrections: CorrectionStore::default(),
         })
     }
 
@@ -83,7 +86,21 @@ impl ConversionEngine {
             dictionary,
             learning,
             libakaza,
+            corrections: CorrectionStore::default(),
         })
+    }
+
+    /// Layer 2 訂正選好を設定する(変換時に該当候補へ bias)。
+    pub fn set_corrections(&mut self, corrections: CorrectionStore) {
+        tracing::info!(count = corrections.len(), "訂正選好 (Layer 2) を設定");
+        self.corrections = corrections;
+    }
+
+    /// `corrections.toml` から選好を load する(無ければ空)。
+    pub fn load_corrections(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        self.corrections = CorrectionStore::load(path)?;
+        tracing::info!(count = self.corrections.len(), "訂正選好 (Layer 2) を load");
+        Ok(())
     }
 
     /// libakaza バックエンドが有効か (= load 成功して保持されているか)
@@ -205,6 +222,17 @@ impl ConversionEngine {
                     .with_score(-95)
                     .with_source(CandidateSource::System),
             );
+        }
+
+        // Layer 2: 個人選好 (訂正学習) の bias をソート前に加算する。
+        // 選好が無い候補は bias=0 = 無変化なので、corrections が空なら挙動は完全に不変。
+        if !self.corrections.is_empty() {
+            for c in candidates.iter_mut() {
+                let bias = self.corrections.bias(reading, &c.surface);
+                if bias != 0 {
+                    c.score = c.score.saturating_add(bias);
+                }
+            }
         }
 
         // スコア順にソート
@@ -376,6 +404,44 @@ mod tests {
         // かなそのまま、カタカナの候補は必ず含まれる
         assert!(candidates.iter().any(|c| c.surface == "にほん"));
         assert!(candidates.iter().any(|c| c.surface == "ニホン"));
+    }
+
+    /// Layer 2: 訂正選好の bias で候補順が変わり、選好を外せば元に戻る (非破壊)。
+    #[test]
+    fn corrections_bias_reorders_and_is_reversible() {
+        use crate::learning::{extract_corrections, CorrectionStore, ObservationEvent};
+
+        let mut engine = ConversionEngine::new().unwrap();
+        let ctx = ConversionContext::new();
+
+        // ベースライン: カタカナ「ニホン」は通常先頭ではない
+        let base = engine.convert("にほん", &ctx).unwrap();
+        let base_first = base.selected().unwrap().surface.clone();
+        assert!(base.iter().any(|c| c.surface == "ニホン"));
+        assert_ne!(base_first, "ニホン", "前提: 素では ニホン は先頭でない");
+
+        // 「にほん→ニホン」を 2 回コミットした観察から選好を抽出して設定
+        let events = vec![
+            ObservationEvent::commit("にほん", "ニホン"),
+            ObservationEvent::commit("にほん", "ニホン"),
+        ];
+        engine.set_corrections(extract_corrections(&events, 2));
+
+        let biased = engine.convert("にほん", &ctx).unwrap();
+        assert_eq!(
+            biased.selected().unwrap().surface,
+            "ニホン",
+            "★ 選好が先頭に来る"
+        );
+
+        // 選好を外すと元の並びに戻る (非破壊・churn-free)
+        engine.set_corrections(CorrectionStore::default());
+        let restored = engine.convert("にほん", &ctx).unwrap();
+        assert_eq!(
+            restored.selected().unwrap().surface,
+            base_first,
+            "★ 選好を外せば元通り"
+        );
     }
 
     #[cfg(feature = "akaza")]

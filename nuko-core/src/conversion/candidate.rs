@@ -89,6 +89,11 @@ impl CandidateList {
         self.candidates.sort_by_key(|c| std::cmp::Reverse(c.score));
     }
 
+    /// 候補を可変で走査する(スコアの後加算など)。
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Candidate> {
+        self.candidates.iter_mut()
+    }
+
     /// 候補数を取得
     #[must_use]
     pub fn len(&self) -> usize {
