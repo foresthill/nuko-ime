@@ -261,7 +261,7 @@ mod tests {
                 assert_eq!(reading, "はんい");
                 assert_eq!(surface, "範囲");
             }
-            other => panic!("1件目が Commit でない: {other:?}"),
+            ev @ ObservationEvent::Correction { .. } => panic!("1件目が Commit でない: {ev:?}"),
         }
         match &events[1] {
             ObservationEvent::Correction {
@@ -270,7 +270,7 @@ mod tests {
                 assert_eq!(emitted, "今晩");
                 assert_eq!(corrected, "こんばん");
             }
-            other => panic!("2件目が Correction でない: {other:?}"),
+            ev @ ObservationEvent::Commit { .. } => panic!("2件目が Correction でない: {ev:?}"),
         }
         let _ = std::fs::remove_file(&path);
     }
