@@ -18,8 +18,13 @@
 
 ```bash
 # 1. ユニットテスト + lint (毎コミット前)
-cargo test -p nuko-core --lib --features akaza
-cargo clippy --features akaza -- -D warnings
+#    ★ clippy は必ず CI と同じ条件 (--workspace --all-targets) で回すこと。
+#      --all-targets はテストコードも lint 対象にする。省くとローカルで通って CI で落ちる
+#      (2026-09-19、observation テストの clippy でこれをやらかした)。
+cargo test --workspace --features akaza                                     # CI: Test と同等
+cargo clippy --workspace --all-targets -- -D warnings                       # CI: clippy-macos と同じ
+cargo clippy --workspace --exclude nuko-macos --all-targets -- -D warnings  # CI: clippy (ubuntu) と同じ
+cargo clippy --workspace --all-targets --features akaza -- -D warnings      # akaza gated も確認
 cargo fmt --check
 
 # 2. .app をビルドしてインストール (Rust コード変更時)
