@@ -1,5 +1,5 @@
 use nuko_core::conversion::{CandidateList, ConversionContext, SegmentedConversion};
-use nuko_core::learning::ObservationLog;
+use nuko_core::learning::{extract_corrections, ObservationLog};
 use nuko_core::prelude::*;
 use objc2::MainThreadMarker;
 use std::cell::RefCell;
@@ -137,6 +137,7 @@ fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
     );
     let mut engine = ConversionEngine::with_libakaza(model_dir)?;
     setup_learning_persistence(&mut engine);
+    setup_corrections(&mut engine);
     Ok(engine)
 }
 
@@ -144,7 +145,47 @@ fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
 fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
     let mut engine = ConversionEngine::new()?;
     setup_learning_persistence(&mut engine);
+    setup_corrections(&mut engine);
     Ok(engine)
+}
+
+/// Layer 2: 訂正選好 (corrections.toml) を engine に設定する。
+///
+/// `RELEARN` marker があれば observations.jsonl から corrections.toml を **決定論的に
+/// 再生成** (冪等) してから marker を消す。その後 corrections.toml を load。
+/// marker が無ければ既存の corrections.toml をそのまま使う (手編集を尊重)。
+///
+///   再学習: touch "$HOME/Library/Application Support/nuko-ime/RELEARN" → NukoIME 再起動
+fn setup_corrections(engine: &mut ConversionEngine) {
+    // この回数以上コミットされた (reading→surface) だけ選好化する (tunable)。
+    const MIN_SEEN: u32 = 2;
+    let Some(dir) = nuko_app_support_dir() else {
+        return;
+    };
+    let corrections_path = dir.join("corrections.toml");
+    let relearn_marker = dir.join("RELEARN");
+
+    if relearn_marker.exists() {
+        let log = ObservationLog::new(true, dir.join("observations.jsonl"));
+        match log.read_all() {
+            Ok(events) => {
+                let store = extract_corrections(&events, MIN_SEEN);
+                match store.save(&corrections_path) {
+                    Ok(()) => tracing::info!(
+                        count = store.len(),
+                        "RELEARN: 観察ログから訂正選好 (Layer 2) を再生成"
+                    ),
+                    Err(e) => tracing::warn!(error = %e, "corrections.toml 保存失敗"),
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "観察ログ読み込み失敗 (RELEARN)"),
+        }
+        let _ = std::fs::remove_file(&relearn_marker);
+    }
+
+    if let Err(e) = engine.load_corrections(&corrections_path) {
+        tracing::warn!(error = %e, "corrections.toml load 失敗 (選好なしで継続)");
+    }
 }
 
 /// 学習データの永続化パスを設定する
