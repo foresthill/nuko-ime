@@ -137,10 +137,17 @@ pub fn extract_corrections(events: &[ObservationEvent], min_seen: u32) -> Correc
         let mut ranked: Vec<(&String, &u32)> = surfaces.iter().collect();
         ranked.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
         if let Some((surface, &count)) = ranked.first() {
+            let surface = *surface;
+            // 恒等選好 (読み == 表層) は除外する。
+            // 「かなを打ってそのまま確定」は変換の選好ではなく素通し入力であり、
+            // その表層を boost しても並び替えの意味がない (句読点「。」等が典型的なノイズ)。
+            if surface.as_str() == reading.as_str() {
+                continue;
+            }
             if count >= min_seen {
                 preferences.push(Preference {
                     reading,
-                    prefer: (*surface).clone(),
+                    prefer: surface.clone(),
                     weight: count,
                     seen: count,
                 });
@@ -180,6 +187,39 @@ mod tests {
         let events = vec![commit("あ", "亜"), commit("あ", "亜")];
         // min_seen=3 に届かない
         assert!(extract_corrections(&events, 3).is_empty());
+    }
+
+    /// ★ 恒等選好 (読み == 表層) は選好化しない。
+    #[test]
+    fn identity_preference_is_filtered_out() {
+        // 「。→。」を何度確定してもノイズなので選好にしない
+        let events = vec![
+            commit("。", "。"),
+            commit("。", "。"),
+            commit("。", "。"),
+            // かな素通し (ねこ→ねこ) も同様に除外
+            commit("ねこ", "ねこ"),
+            commit("ねこ", "ねこ"),
+        ];
+        assert!(
+            extract_corrections(&events, 2).is_empty(),
+            "★ 恒等選好は 1 件も残らない"
+        );
+    }
+
+    /// ★ 恒等コミットが混ざっても、非恒等の本物の選好は残る。
+    #[test]
+    fn identity_filtered_but_real_preference_kept() {
+        let events = vec![
+            commit("。", "。"),
+            commit("。", "。"),
+            commit("ねこ", "猫"),
+            commit("ねこ", "猫"),
+        ];
+        let store = extract_corrections(&events, 2);
+        assert_eq!(store.len(), 1, "★ 恒等は除外、本物だけ残る");
+        assert_eq!(store.preferences[0].reading, "ねこ");
+        assert_eq!(store.preferences[0].prefer, "猫");
     }
 
     #[test]
