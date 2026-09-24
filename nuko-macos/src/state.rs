@@ -192,6 +192,38 @@ where
     OBSERVATION_LOG.with(f)
 }
 
+// ② 打ち直し検知用: 直前の確定 (読み, 表層, 時刻) を in-memory で保持する。
+// 完全に揮発性 (プロセス内のみ・永続化しない)。ここから訂正イベントを判定し、
+// 記録自体は観察ログのオプトインが有効なときだけ行われる (with_observation 経由)。
+thread_local! {
+    static LAST_COMMIT: RefCell<Option<(String, String, Instant)>> = const { RefCell::new(None) };
+}
+
+/// 直前の確定を記録しつつ、**今回が「打ち直し (訂正)」なら直前の表層を返す**。
+///
+/// 訂正の条件: **同じ読み** を **別の表層** で **`window` 以内** に確定し直した。
+/// 返り値 `Some(prev_surface)` のとき、呼び出し側は
+/// `Correction(reading, prev_surface, surface)` を観察ログに記録する。
+///
+/// バックスペース検知に依存せず、確定の連続だけで訂正を捉える (堅牢)。
+pub fn note_commit_detect_correction(
+    reading: &str,
+    surface: &str,
+    window: std::time::Duration,
+) -> Option<String> {
+    LAST_COMMIT.with(|cell| {
+        let prev = cell.borrow().clone();
+        let correction = match prev {
+            Some((ref r, ref s, t)) if r == reading && s != surface && t.elapsed() <= window => {
+                Some(s.clone())
+            }
+            _ => None,
+        };
+        *cell.borrow_mut() = Some((reading.to_string(), surface.to_string(), Instant::now()));
+        correction
+    })
+}
+
 #[cfg(feature = "akaza")]
 fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
     let model_dir = libakaza_model_dir();

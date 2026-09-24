@@ -106,6 +106,13 @@ impl CorrectionStore {
 /// 事故 (うっかり選択) は、以降の実使用で多数決が塗り替えるので self-correcting。
 const DELIBERATE_PICK_WEIGHT: u32 = 3;
 
+/// ② 打ち直し (Correction イベント) で訂正後の表層に加える重み。
+///
+/// 「一度確定したが違ったので、同じ読みを別の字で確定し直した」= 最も強い訂正
+/// シグナル。既定でない選択 ([`DELIBERATE_PICK_WEIGHT`]) よりさらに強くし、
+/// `min_seen = 2` なら **1 回の打ち直しで確実に** 訂正後が選好になるようにする。
+const CORRECTION_WEIGHT: u32 = 5;
+
 /// 観察ログから選好を **決定論的に** 抽出する(Layer 2 の心臓)。
 ///
 /// 各 Commit を重み付きで集計する:
@@ -126,27 +133,43 @@ pub fn extract_corrections(events: &[ObservationEvent], min_seen: u32) -> Correc
     // reading -> surface -> (生の回数, 重み合計)。BTreeMap で決定論的順序。
     let mut tally: BTreeMap<String, BTreeMap<String, (u32, u32)>> = BTreeMap::new();
     for ev in events {
-        if let ObservationEvent::Commit {
-            reading,
-            surface,
-            picked,
-            ..
-        } = ev
-        {
-            if reading.is_empty() || surface.is_empty() {
-                continue;
+        match ev {
+            ObservationEvent::Commit {
+                reading,
+                surface,
+                picked,
+                ..
+            } => {
+                if reading.is_empty() || surface.is_empty() {
+                    continue;
+                }
+                let weight = match picked {
+                    Some(p) if *p > 0 => DELIBERATE_PICK_WEIGHT,
+                    _ => 1,
+                };
+                let entry = tally
+                    .entry(reading.clone())
+                    .or_default()
+                    .entry(surface.clone())
+                    .or_default();
+                entry.0 += 1; // 生の回数
+                entry.1 += weight; // 重み合計
             }
-            let weight = match picked {
-                Some(p) if *p > 0 => DELIBERATE_PICK_WEIGHT,
-                _ => 1,
-            };
-            let entry = tally
-                .entry(reading.clone())
-                .or_default()
-                .entry(surface.clone())
-                .or_default();
-            entry.0 += 1; // 生の回数
-            entry.1 += weight; // 重み合計
+            // ② 打ち直し: 同じ読みを別の表層で確定し直した = 明示的な訂正。
+            // 訂正後の表層に **最強の重み** を加える (生の回数は Commit 側で数える)。
+            ObservationEvent::Correction {
+                reading, corrected, ..
+            } => {
+                if reading.is_empty() || corrected.is_empty() {
+                    continue;
+                }
+                let entry = tally
+                    .entry(reading.clone())
+                    .or_default()
+                    .entry(corrected.clone())
+                    .or_default();
+                entry.1 += CORRECTION_WEIGHT; // 重みだけ強く加算
+            }
         }
     }
 
@@ -206,6 +229,23 @@ mod tests {
         let events = vec![commit("あ", "亜"), commit("あ", "亜")];
         // min_seen=3 に届かない
         assert!(extract_corrections(&events, 3).is_empty());
+    }
+
+    /// ★ ② 打ち直し (Correction) は 1 回で訂正後を選好にし、誤変換に打ち勝つ。
+    #[test]
+    fn correction_event_wins_over_wrong_commit() {
+        // 「いしみね」を石峯で確定 → 違うので打ち直して石峰で確定 (訂正)。
+        let events = vec![
+            ObservationEvent::commit("いしみね", "石峯"),
+            ObservationEvent::commit("いしみね", "石峰"),
+            ObservationEvent::correction("いしみね", "石峯", "石峰"),
+        ];
+        let store = extract_corrections(&events, 2);
+        assert_eq!(store.len(), 1);
+        assert_eq!(
+            store.preferences[0].prefer, "石峰",
+            "★ 訂正後 (石峰) が誤変換 (石峯) に勝つ"
+        );
     }
 
     /// ★ ① 既定でない候補を選んだら、min_seen=2 でも 1 回で選好化される。

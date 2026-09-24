@@ -980,9 +980,26 @@ impl NukoInputController {
                         obs_picked,
                     )
                 };
+                // ② 打ち直し検知: 同じ読みを短時間に別の表層で確定し直したら訂正。
+                const CORRECTION_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+                let correction = crate::state::note_commit_detect_correction(
+                    reading.as_str(),
+                    decision.commit_text.as_str(),
+                    CORRECTION_WINDOW,
+                );
                 with_observation(|log| {
                     if let Err(e) = log.record(&event) {
                         debug_log(&format!("観察ログ記録エラー: {e}"));
+                    }
+                    if let Some(prev_surface) = &correction {
+                        let corr = ObservationEvent::correction(
+                            reading.as_str(),
+                            prev_surface.as_str(),
+                            decision.commit_text.as_str(),
+                        );
+                        if let Err(e) = log.record(&corr) {
+                            debug_log(&format!("訂正イベント記録エラー: {e}"));
+                        }
                     }
                 });
             }
