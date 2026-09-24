@@ -94,17 +94,19 @@ pub fn learning_status_text() -> String {
     };
     s.push_str(&format!("観察ログ: {obs_state}／観察 {count} 件\n"));
     if store.is_empty() {
-        s.push_str("学習した変換選好: まだありません");
+        s.push_str("学習した変換選好: まだありません\n");
     } else {
         s.push_str(&format!("学習した変換選好（{} 件）:\n", store.len()));
         for p in &store.preferences {
             s.push_str(&format!("　{} → {}（{}回）\n", p.reading, p.prefer, p.seen));
         }
-        // 末尾の改行を落として行数を正確に
-        if s.ends_with('\n') {
-            s.pop();
-        }
     }
+    // ── ここに乗るロジックのヘルプ (ユーザー要望) ──
+    s.push_str("──────────\n");
+    s.push_str(&format!(
+        "💡 同じ読みで同じ変換を{MIN_SEEN}回以上選ぶと学習され、\n"
+    ));
+    s.push_str("　次からその変換が上位に来ます（読み＝そのままの確定は対象外）。");
     s
 }
 
