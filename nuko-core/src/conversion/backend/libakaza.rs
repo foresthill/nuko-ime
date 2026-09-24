@@ -112,7 +112,14 @@ impl LibakazaBackend {
     /// エントリ (= 進行など 41 件) が **完全に失われる** 問題が 2026-06-09 実機
     /// 検証で判明したため、convert() 経路を復活させた。
     pub fn convert(&self, reading: &str) -> Result<Vec<Candidate>> {
-        const MAX_FIRST_SEGMENT_CANDIDATES: usize = 9;
+        // 単一文節時に dict から拾う候補の上限。
+        //
+        // 9 だと「き」→「氣」のような **異体字・低頻度漢字** が cost 順で 9 位より
+        // 下に沈み、候補リストに載らず **何ページめくっても出てこない** (2026-09
+        // 実機で発覚)。候補は cost 昇順なので、上限を上げても頻出語の並びは変わらず
+        // 先頭に残り、稀な字が「後ろのページで拾える」ようになるだけ (デメリット無し)。
+        // 一度選べば頻度/訂正学習で上位に上がる。
+        const MAX_FIRST_SEGMENT_CANDIDATES: usize = 50;
         const K_BEST_PATHS: usize = 9;
 
         if reading.is_empty() {
