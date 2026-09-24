@@ -260,20 +260,11 @@ impl NukoInputController {
         // action のみ設定し target は nil。IMK が選択時に本 controller の
         // セレクタを呼ぶ (IMKInputController.h の menu 方式)。
 
-        // 単語登録は **常に表示** する (発見性)。準備が整っていればラベルに
-        // 「読み→語」を出し、そうでなければ使い方を示す。整っている条件は
-        // 「いま未確定の読みがある」+「直前に確定した語がある」。
-        // 例: こまたに→駒谷 を確定 → こまや と打って開くと「単語登録:こまや→駒谷」。
-        let reg = {
-            let reading = self.ivars().state.borrow().composition.clone();
-            crate::state::last_commit_surface().and_then(|surface| {
-                if reading.is_empty() || surface.is_empty() {
-                    None
-                } else {
-                    Some((reading, surface))
-                }
-            })
-        };
+        // 単語登録は **常に表示** する (発見性)。直近 2 件の確定履歴から
+        // 「1つ前の読み → 直前の語」を提案する。未確定の composition に依存しない
+        // ので、メニューを開いた瞬間に確定が走っても壊れない。
+        // 例: こまや→駒屋(違う) → こまたに→駒谷(正解) の後に「単語登録:こまや→駒谷」。
+        let reg = crate::state::registration_candidate();
         let reg_title = match &reg {
             Some((reading, surface)) => format!("単語登録:「{reading}」→「{surface}」"),
             None => "単語登録…（使い方を表示）".to_string(),
@@ -329,23 +320,22 @@ impl NukoInputController {
         self._present_learning(&crate::state::learning_status_text());
     }
 
-    /// メニュー「単語登録:…」: 今の未確定読み → 直前に確定した語 を登録する。
+    /// メニュー「単語登録:…」: 「1つ前の読み → 直前に確定した語」を登録する。
     fn _register_word_impl(&self) {
-        let reading = self.ivars().state.borrow().composition.clone();
-        let surface = crate::state::last_commit_surface().unwrap_or_default();
         // 準備が整っていなければ使い方ガイドを出す (発見性のため空振りさせない)。
-        if reading.is_empty() || surface.is_empty() {
+        let Some((reading, surface)) = crate::state::registration_candidate() else {
             self._present_learning(concat!(
                 "📖 単語登録のやり方\n\n",
-                "① 出したい語を別の読みで一度 変換・確定する\n",
-                "　例: 「こまたに」→ 変換 → 駒谷 で確定\n",
-                "② 登録したい読みを打つ（確定しない）\n",
-                "　例: 「こまや」と打ったまま\n",
-                "③ この入力メニューを開き「単語登録:…」を選ぶ\n",
-                "→ 「こまや→駒谷」が登録され、次から最優先で出ます。",
+                "「出したい読み」で一度 変換・確定 → すぐ「正しい語」を別の読みで\n",
+                "変換・確定 すると、この2つから登録できます。\n\n",
+                "例:\n",
+                "① 「こまや」と打って変換・確定（→ 駒屋 など、違ってOK）\n",
+                "② 続けて「こまたに」と打って変換・確定 → 駒谷\n",
+                "③ この入力メニューを開き「単語登録:「こまや」→「駒谷」」を選ぶ\n",
+                "→ 次から こまや で駒谷が最優先。",
             ));
             return;
-        }
+        };
         let text = match crate::state::register_word(&reading, &surface) {
             Ok(()) => {
                 info!(reading = %reading, surface = %surface, "単語登録");
