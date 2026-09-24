@@ -11,8 +11,8 @@ use std::cell::RefCell;
 
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, Bool, NSObjectProtocol, Sel};
-use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker};
-use objc2_app_kit::{NSEvent, NSScreen};
+use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker};
+use objc2_app_kit::{NSEvent, NSMenu, NSScreen};
 use objc2_foundation::{NSArray, NSPoint, NSRange, NSString};
 use objc2_input_method_kit::{IMKInputController, IMKServer};
 use tracing::{debug, error, info, warn};
@@ -206,6 +206,22 @@ define_class!(
             }
         }
 
+        /// 入力ソースメニュー (メニューバー右上の入力メニュー) に出す独自メニュー。
+        ///
+        /// IMK はメニュー描画のたびにこれを呼ぶ (状態を反映して都度組み立て可能)。
+        /// 各項目の action セレクタは、選択時に IMK が現在の controller へ配送する
+        /// (Apple 一次ソース `IMKInputController.h`: メニュー項目に action を持たせる方式)。
+        #[unsafe(method_id(menu))]
+        fn menu(&self) -> Option<Retained<NSMenu>> {
+            self._build_menu()
+        }
+
+        /// メニュー項目「学習を今すぐ研ぎ直す」のアクション。
+        #[unsafe(method(nukoRelearn:))]
+        fn nuko_relearn(&self, _sender: Option<&AnyObject>) {
+            self._nuko_relearn_impl();
+        }
+
         // 注意: `handleEvent:client:` は **実装しない**。
         //
         // IMKServerInput の入力受信は 3 方式があり「1 つだけ」を選ぶ排他設計
@@ -222,6 +238,36 @@ define_class!(
 // --- メソッド実装 ---
 
 impl NukoInputController {
+    /// 入力ソースメニューを構築する (現状は「学習を今すぐ研ぎ直す」の 1 項目)。
+    ///
+    /// 今後ここに「単語登録…」「学習状況を見る」「観察ログ ON/OFF」等を足していく。
+    fn _build_menu(&self) -> Option<Retained<NSMenu>> {
+        let mtm = MainThreadMarker::new()?;
+        let menu = NSMenu::new(mtm);
+        let empty = NSString::from_str("");
+        let title = NSString::from_str("学習を今すぐ研ぎ直す");
+        // action のみ設定し target は nil。IMK が選択時に本 controller の
+        // `nukoRelearn:` を呼ぶ (IMKInputController.h の menu 方式)。
+        let _item = unsafe {
+            menu.addItemWithTitle_action_keyEquivalent(&title, Some(sel!(nukoRelearn:)), &empty)
+        };
+        Some(menu)
+    }
+
+    /// メニューからのライブ再学習を実行する (観察ログ→選好を即時反映)。
+    fn _nuko_relearn_impl(&self) {
+        match crate::state::relearn_now() {
+            Ok(n) => {
+                debug_log(&format!("menu: relearn 完了 ({n} 選好を適用)"));
+                info!(count = n, "メニューから学習を研ぎ直しました");
+            }
+            Err(e) => {
+                debug_log(&format!("menu: relearn 失敗: {e}"));
+                warn!(error = %e, "メニューからの relearn に失敗");
+            }
+        }
+    }
+
     /// inputText:client: の実装
     fn _input_text_impl(&self, string: Option<&NSString>, sender: Option<&AnyObject>) -> Bool {
         let Some(ns_str) = string else {

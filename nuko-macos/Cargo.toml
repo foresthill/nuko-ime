@@ -21,7 +21,7 @@ akaza = ["nuko-core/akaza"]
 nuko-core = { workspace = true }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSObject", "NSDictionary", "NSAttributedString", "NSRange", "NSGeometry", "NSValue"] }
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSEvent", "NSRunningApplication", "NSResponder", "NSWindow", "NSPanel", "NSView", "NSTextField", "NSText", "NSControl", "NSColor", "NSScreen", "NSGraphics", "NSGraphicsContext", "NSFont", "NSAttributedString", "NSCell"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSEvent", "NSRunningApplication", "NSResponder", "NSWindow", "NSPanel", "NSView", "NSTextField", "NSText", "NSControl", "NSColor", "NSScreen", "NSGraphics", "NSGraphicsContext", "NSFont", "NSAttributedString", "NSCell", "NSMenu", "NSMenuItem"] }
 objc2-input-method-kit = { version = "0.3" }
 objc2-core-foundation = { version = "0.3", features = ["CFCGTypes"] }
 tracing = { workspace = true }

@@ -156,9 +156,11 @@ fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
 /// marker が無ければ既存の corrections.toml をそのまま使う (手編集を尊重)。
 ///
 ///   再学習: touch "$HOME/Library/Application Support/nuko-ime/RELEARN" → NukoIME 再起動
+/// この回数以上コミットされた (reading→surface) だけ選好化する (tunable)。
+/// 起動時の [`setup_corrections`] とメニューからの [`relearn_now`] で共有する。
+const MIN_SEEN: u32 = 2;
+
 fn setup_corrections(engine: &mut ConversionEngine) {
-    // この回数以上コミットされた (reading→surface) だけ選好化する (tunable)。
-    const MIN_SEEN: u32 = 2;
     let Some(dir) = nuko_app_support_dir() else {
         return;
     };
@@ -186,6 +188,28 @@ fn setup_corrections(engine: &mut ConversionEngine) {
     if let Err(e) = engine.load_corrections(&corrections_path) {
         tracing::warn!(error = %e, "corrections.toml load 失敗 (選好なしで継続)");
     }
+}
+
+/// メニュー「学習を今すぐ研ぎ直す」から呼ぶライブ再学習。
+///
+/// 観察ログ (Layer 1) → 訂正選好 (Layer 2) を **決定論的に再生成**・保存し、
+/// 稼働中の [`ConversionEngine`] へ即時反映する (再起動不要のホットリロード)。
+/// 反映した選好件数を返す。観察ログが無い / 空なら 0 件。
+///
+/// CLI の `nuko learn relearn` と同じ抽出ロジック ([`extract_corrections`]) を
+/// 使うので、両者は同じ結果を返す (churn-free)。
+pub fn relearn_now() -> nuko_core::error::Result<usize> {
+    let Some(dir) = nuko_app_support_dir() else {
+        return Ok(0);
+    };
+    let corrections_path = dir.join("corrections.toml");
+    let log = ObservationLog::new(true, dir.join("observations.jsonl"));
+    let events = log.read_all()?;
+    let store = extract_corrections(&events, MIN_SEEN);
+    let count = store.len();
+    store.save(&corrections_path)?;
+    with_engine_mut(|engine| engine.load_corrections(&corrections_path))?;
+    Ok(count)
 }
 
 /// 学習データの永続化パスを設定する
