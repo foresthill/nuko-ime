@@ -944,6 +944,22 @@ impl NukoInputController {
         // Layer 1 観察ログ用に、確定前の読み (かな) を控える (reset で消えるため)。
         let reading = state.composition.clone();
 
+        // ① picked-index: flat 変換のときだけ、提示候補と選んだ index を控える。
+        // 「既定を飛ばして下位候補を選んだ」= 訂正シグナル (extract_corrections が
+        // 重み付けする)。segmented は focused 文節の候補で全文と対応が取れないため記録しない。
+        let (obs_candidates, obs_picked): (Vec<String>, Option<usize>) =
+            if state.segmented.is_none() {
+                match state.candidates.as_ref() {
+                    Some(cl) => (
+                        cl.iter().map(|c| c.surface.clone()).collect(),
+                        Some(cl.selected_index()),
+                    ),
+                    None => (Vec::new(), None),
+                }
+            } else {
+                (Vec::new(), None)
+            };
+
         state.reset();
         drop(state);
 
@@ -954,11 +970,18 @@ impl NukoInputController {
 
             // Layer 1: 観察ログに確定イベントを記録 (オプトイン無効なら no-op)。
             if !reading.is_empty() {
-                with_observation(|log| {
-                    if let Err(e) = log.record(&ObservationEvent::commit(
+                let event = if obs_candidates.is_empty() {
+                    ObservationEvent::commit(reading.as_str(), decision.commit_text.as_str())
+                } else {
+                    ObservationEvent::commit_with_candidates(
                         reading.as_str(),
                         decision.commit_text.as_str(),
-                    )) {
+                        obs_candidates,
+                        obs_picked,
+                    )
+                };
+                with_observation(|log| {
+                    if let Err(e) = log.record(&event) {
                         debug_log(&format!("観察ログ記録エラー: {e}"));
                     }
                 });

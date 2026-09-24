@@ -99,44 +99,63 @@ impl CorrectionStore {
     }
 }
 
+/// 既定でない候補 (`picked > 0`) を選んで確定したときの重み。
+///
+/// 「先頭候補は違うので下の候補を選んだ」= 明示的な訂正シグナル (① picked-index)。
+/// 単なる反復より強く効かせ、`min_seen = 2` なら **1 回の意図的な選択で** 選好化される。
+/// 事故 (うっかり選択) は、以降の実使用で多数決が塗り替えるので self-correcting。
+const DELIBERATE_PICK_WEIGHT: u32 = 3;
+
 /// 観察ログから選好を **決定論的に** 抽出する(Layer 2 の心臓)。
 ///
-/// - `min_seen` 回以上コミットされた `(reading → surface)` だけを選好化する
-///   (偶発的な 1 回の確定をルールにしない)。
-/// - 1 つの `reading` に対しては **最多コミットの surface** を採用。同数は
-///   surface 名の昇順で安定させる(= 同じ入力から常に同じ出力 = churn-free)。
+/// 各 Commit を重み付きで集計する:
+/// - `picked > 0` (既定を飛ばして下位候補を選んだ) → **重み 3** の強い訂正シグナル。
+/// - それ以外 (既定確定 / 候補情報なし) → 重み 1 の通常シグナル。
 ///
-/// 返る `preferences` は reading 昇順で安定。`corrections.toml` はバイト単位で
-/// 再現するので、dreaming(Layer 3)や再抽出で差分 churn を生まない。
+/// 判定:
+/// - 1 つの `reading` に対し **重み合計が最大の surface** を採用 (同点は surface 昇順)。
+/// - その **重み合計が `min_seen` 以上** のものだけを選好化する。よって既定でない
+///   選択は 1 回で (3 ≥ 2)、既定確定は `min_seen` 回で学習される。
+/// - 恒等 (読み == 表層) は除外。
 ///
-/// 注: 現状は Commit イベントの多数決のみ。将来 `picked`(既定候補を上書きしたか)
-/// や Correction イベント、文脈(前語)を強いシグナルとして加える。
+/// `seen` には **生のコミット回数** (透明性用) を、`weight` には重み合計 (bias の
+/// tiebreak 用) を入れる。返る `preferences` は reading 昇順で安定し、`corrections.toml`
+/// はバイト単位で再現する (churn-free)。
 #[must_use]
 pub fn extract_corrections(events: &[ObservationEvent], min_seen: u32) -> CorrectionStore {
-    // reading -> surface -> count (BTreeMap で決定論的順序)
-    let mut tally: BTreeMap<String, BTreeMap<String, u32>> = BTreeMap::new();
+    // reading -> surface -> (生の回数, 重み合計)。BTreeMap で決定論的順序。
+    let mut tally: BTreeMap<String, BTreeMap<String, (u32, u32)>> = BTreeMap::new();
     for ev in events {
         if let ObservationEvent::Commit {
-            reading, surface, ..
+            reading,
+            surface,
+            picked,
+            ..
         } = ev
         {
             if reading.is_empty() || surface.is_empty() {
                 continue;
             }
-            *tally
+            let weight = match picked {
+                Some(p) if *p > 0 => DELIBERATE_PICK_WEIGHT,
+                _ => 1,
+            };
+            let entry = tally
                 .entry(reading.clone())
                 .or_default()
                 .entry(surface.clone())
-                .or_default() += 1;
+                .or_default();
+            entry.0 += 1; // 生の回数
+            entry.1 += weight; // 重み合計
         }
     }
 
     let mut preferences = Vec::new();
     for (reading, surfaces) in tally {
-        // count 降順、同数は surface 昇順で安定
-        let mut ranked: Vec<(&String, &u32)> = surfaces.iter().collect();
-        ranked.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
-        if let Some((surface, &count)) = ranked.first() {
+        // 重み合計の降順、同点は surface 昇順で安定
+        let mut ranked: Vec<(&String, &(u32, u32))> = surfaces.iter().collect();
+        ranked.sort_by(|a, b| b.1 .1.cmp(&a.1 .1).then_with(|| a.0.cmp(b.0)));
+        if let Some((surface, &(raw, weighted))) = ranked.first() {
             let surface = *surface;
             // 恒等選好 (読み == 表層) は除外する。
             // 「かなを打ってそのまま確定」は変換の選好ではなく素通し入力であり、
@@ -144,12 +163,12 @@ pub fn extract_corrections(events: &[ObservationEvent], min_seen: u32) -> Correc
             if surface.as_str() == reading.as_str() {
                 continue;
             }
-            if count >= min_seen {
+            if weighted >= min_seen {
                 preferences.push(Preference {
                     reading,
                     prefer: surface.clone(),
-                    weight: count,
-                    seen: count,
+                    weight: weighted,
+                    seen: raw,
                 });
             }
         }
@@ -187,6 +206,38 @@ mod tests {
         let events = vec![commit("あ", "亜"), commit("あ", "亜")];
         // min_seen=3 に届かない
         assert!(extract_corrections(&events, 3).is_empty());
+    }
+
+    /// ★ ① 既定でない候補を選んだら、min_seen=2 でも 1 回で選好化される。
+    #[test]
+    fn deliberate_non_default_pick_learns_fast() {
+        // 「せんしゅう」の既定は 1000週。ユーザーは 2 番目「先週」を選んで確定 (picked=1)。
+        let events = vec![ObservationEvent::commit_with_candidates(
+            "せんしゅう",
+            "先週",
+            vec!["1000週".into(), "先週".into()],
+            Some(1),
+        )];
+        let store = extract_corrections(&events, 2);
+        assert_eq!(store.len(), 1, "★ 1 回の意図的選択で選好化");
+        assert_eq!(store.preferences[0].reading, "せんしゅう");
+        assert_eq!(store.preferences[0].prefer, "先週");
+        assert_eq!(store.preferences[0].seen, 1, "★ 生の観測回数は 1 (透明性)");
+    }
+
+    /// ★ 既定 (index 0) を 1 回確定しただけでは、まだ選好化しない。
+    #[test]
+    fn default_pick_still_needs_repetition() {
+        let events = vec![ObservationEvent::commit_with_candidates(
+            "きしゃ",
+            "記者",
+            vec!["記者".into()],
+            Some(0),
+        )];
+        assert!(
+            extract_corrections(&events, 2).is_empty(),
+            "★ 既定の 1 回では学習しない (反復が要る)"
+        );
     }
 
     /// ★ 恒等選好 (読み == 表層) は選好化しない。
