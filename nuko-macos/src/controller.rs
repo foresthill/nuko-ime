@@ -228,6 +228,12 @@ define_class!(
             self._show_learning_impl();
         }
 
+        /// メニュー項目「単語登録:…」のアクション。
+        #[unsafe(method(nukoRegisterWord:))]
+        fn nuko_register_word(&self, _sender: Option<&AnyObject>) {
+            self._register_word_impl();
+        }
+
         // 注意: `handleEvent:client:` は **実装しない**。
         //
         // IMKServerInput の入力受信は 3 方式があり「1 つだけ」を選ぶ排他設計
@@ -253,6 +259,30 @@ impl NukoInputController {
         let empty = NSString::from_str("");
         // action のみ設定し target は nil。IMK が選択時に本 controller の
         // セレクタを呼ぶ (IMKInputController.h の menu 方式)。
+
+        // 単語登録: いま未確定の読み + 直前に確定した語 が揃っていれば項目を出す。
+        // 例: こまたに→駒谷 を確定 → こまや と打って開くと「単語登録:こまや→駒谷」。
+        let reg = {
+            let reading = self.ivars().state.borrow().composition.clone();
+            crate::state::last_commit_surface().and_then(|surface| {
+                if reading.is_empty() || surface.is_empty() {
+                    None
+                } else {
+                    Some((reading, surface))
+                }
+            })
+        };
+        if let Some((reading, surface)) = &reg {
+            let title = NSString::from_str(&format!("単語登録:「{reading}」→「{surface}」"));
+            unsafe {
+                let _ = menu.addItemWithTitle_action_keyEquivalent(
+                    &title,
+                    Some(sel!(nukoRegisterWord:)),
+                    &empty,
+                );
+            }
+        }
+
         let show = NSString::from_str("学習状況を見る…");
         let relearn = NSString::from_str("学習を今すぐ研ぎ直す");
         unsafe {
@@ -293,6 +323,30 @@ impl NukoInputController {
     /// メニュー「学習状況を見る…」: 現在の学習状況をパネル表示する。
     fn _show_learning_impl(&self) {
         self._present_learning(&crate::state::learning_status_text());
+    }
+
+    /// メニュー「単語登録:…」: 今の未確定読み → 直前に確定した語 を登録する。
+    fn _register_word_impl(&self) {
+        let reading = self.ivars().state.borrow().composition.clone();
+        let Some(surface) = crate::state::last_commit_surface() else {
+            return;
+        };
+        if reading.is_empty() || surface.is_empty() {
+            return;
+        }
+        let text = match crate::state::register_word(&reading, &surface) {
+            Ok(()) => {
+                info!(reading = %reading, surface = %surface, "単語登録");
+                format!(
+                    "✅ 単語登録しました\n「{reading}」→「{surface}」\n\nこの読みで Space 変換すると最優先で出ます。"
+                )
+            }
+            Err(e) => {
+                warn!(error = %e, "単語登録に失敗");
+                format!("⚠️ 単語登録に失敗しました: {e}")
+            }
+        };
+        self._present_learning(&text);
     }
 
     /// 学習状況パネルを (必要なら生成して) 前面に表示する。

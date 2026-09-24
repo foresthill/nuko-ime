@@ -224,6 +224,25 @@ pub fn note_commit_detect_correction(
     })
 }
 
+/// 直前に確定した表層だけを覗く (単語登録メニューのラベル用。状態は変えない)。
+pub fn last_commit_surface() -> Option<String> {
+    LAST_COMMIT.with(|cell| cell.borrow().as_ref().map(|(_, s, _)| s.clone()))
+}
+
+/// 単語登録: 稼働エンジンのユーザー辞書に `(reading → surface)` を追加し保存する。
+///
+/// ユーザー辞書候補は変換で最優先 (USER_DICT_BOOST) になるので、登録後は
+/// その読みで登録語が 1 位に出る。保存先は `~/…/nuko-ime/user_dict.json`。
+pub fn register_word(reading: &str, surface: &str) -> nuko_core::error::Result<()> {
+    with_engine_mut(|engine| {
+        engine
+            .dictionary_mut()
+            .user_dictionary_mut()
+            .add(nuko_core::dictionary::UserEntry::new(surface, reading))?;
+        engine.dictionary_mut().save_user_dictionary()
+    })
+}
+
 #[cfg(feature = "akaza")]
 fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
     let model_dir = libakaza_model_dir();
@@ -234,6 +253,7 @@ fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
     let mut engine = ConversionEngine::with_libakaza(model_dir)?;
     setup_learning_persistence(&mut engine);
     setup_corrections(&mut engine);
+    setup_user_dictionary(&mut engine);
     Ok(engine)
 }
 
@@ -242,7 +262,21 @@ fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
     let mut engine = ConversionEngine::new()?;
     setup_learning_persistence(&mut engine);
     setup_corrections(&mut engine);
+    setup_user_dictionary(&mut engine);
     Ok(engine)
+}
+
+/// 単語登録の永続辞書 (`~/…/nuko-ime/user_dict.json`) を起動時にロードする。
+///
+/// ファイルが無くても path を設定するため、以後の [`register_word`] の保存が効く。
+fn setup_user_dictionary(engine: &mut ConversionEngine) {
+    let Some(dir) = nuko_app_support_dir() else {
+        return;
+    };
+    let path = dir.join("user_dict.json");
+    if let Err(e) = engine.dictionary_mut().load_user_dictionary(&path) {
+        tracing::warn!(error = %e, "ユーザー辞書 (単語登録) の load 失敗。空で継続");
+    }
 }
 
 /// この回数以上コミットされた (reading→surface) だけ選好化する (tunable)。
