@@ -335,15 +335,15 @@ impl NukoInputController {
         let surface = crate::state::last_commit_surface().unwrap_or_default();
         // 準備が整っていなければ使い方ガイドを出す (発見性のため空振りさせない)。
         if reading.is_empty() || surface.is_empty() {
-            self._present_learning(
-                "📖 単語登録のやり方\n\n\
-                 ① 出したい語を別の読みで一度 変換・確定する\n\
-                 　 例: 「こまたに」→ 変換 → 駒谷 で確定\n\
-                 ② 登録したい読みを打つ（確定しない）\n\
-                 　 例: 「こまや」と打ったまま\n\
-                 ③ この入力メニューを開き「単語登録:…」を選ぶ\n\
-                 → 「こまや→駒谷」が登録され、次から最優先で出ます。",
-            );
+            self._present_learning(concat!(
+                "📖 単語登録のやり方\n\n",
+                "① 出したい語を別の読みで一度 変換・確定する\n",
+                "　例: 「こまたに」→ 変換 → 駒谷 で確定\n",
+                "② 登録したい読みを打つ（確定しない）\n",
+                "　例: 「こまや」と打ったまま\n",
+                "③ この入力メニューを開き「単語登録:…」を選ぶ\n",
+                "→ 「こまや→駒谷」が登録され、次から最優先で出ます。",
+            ));
             return;
         }
         let text = match crate::state::register_word(&reading, &surface) {
