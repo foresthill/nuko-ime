@@ -3,6 +3,7 @@
 mod candidate_panel;
 mod commit;
 mod controller;
+mod learning_panel;
 mod state;
 
 use objc2::AnyThread;

@@ -1,11 +1,12 @@
 use nuko_core::conversion::{CandidateList, ConversionContext, SegmentedConversion};
-use nuko_core::learning::{extract_corrections, ObservationLog};
+use nuko_core::learning::{extract_corrections, CorrectionStore, ObservationLog};
 use nuko_core::prelude::*;
 use objc2::MainThreadMarker;
 use std::cell::RefCell;
 use std::time::Instant;
 
 use crate::candidate_panel::CustomCandidatePanel;
+use crate::learning_panel::LearningStatusPanel;
 
 // 自前候補ウィンドウ (NSPanel ベース) を **アプリ全体で 1 つ** だけ保持する。
 //
@@ -44,6 +45,67 @@ where
         let borrow = cell.borrow();
         f(borrow.as_ref())
     })
+}
+
+// 学習状況パネル (NSPanel ベース) も **アプリ全体で 1 つ** だけ保持する。
+// メニュー「学習状況を見る…」「学習を今すぐ研ぎ直す」から表示する。
+thread_local! {
+    static LEARNING_PANEL: RefCell<Option<LearningStatusPanel>> = const { RefCell::new(None) };
+}
+
+/// 学習状況パネルを **必要に応じて** 生成する (まだ未生成なら 1 度だけ)。
+pub fn ensure_learning_panel(mtm: MainThreadMarker) {
+    LEARNING_PANEL.with(|cell| {
+        if cell.borrow().is_some() {
+            return;
+        }
+        *cell.borrow_mut() = Some(LearningStatusPanel::new(mtm));
+        tracing::info!("LearningStatusPanel created (singleton)");
+    });
+}
+
+/// 学習状況パネルへのアクセサ (未生成時は `None`)。
+pub fn with_learning_panel<F, R>(f: F) -> R
+where
+    F: FnOnce(Option<&LearningStatusPanel>) -> R,
+{
+    LEARNING_PANEL.with(|cell| f(cell.borrow().as_ref()))
+}
+
+/// 学習状況を人間可読なテキストにまとめる (パネル表示用)。
+///
+/// CLI `nuko learn show` と同じ情報 (オプトイン状態・観察件数・訂正選好) を、
+/// GUI パネル向けにプレーンテキストで返す。
+pub fn learning_status_text() -> String {
+    let Some(dir) = nuko_app_support_dir() else {
+        return "🐈 学習データの場所を取得できませんでした".to_string();
+    };
+    let enabled = dir.join("OBSERVE_ENABLED").exists();
+    let count = ObservationLog::new(true, dir.join("observations.jsonl"))
+        .count()
+        .unwrap_or(0);
+    let store = CorrectionStore::load(dir.join("corrections.toml")).unwrap_or_default();
+
+    let mut s = String::from("🐈 ぬこIME 学習状況\n");
+    let obs_state = if enabled {
+        "ON"
+    } else {
+        "OFF（収集なし）"
+    };
+    s.push_str(&format!("観察ログ: {obs_state}／観察 {count} 件\n"));
+    if store.is_empty() {
+        s.push_str("学習した変換選好: まだありません");
+    } else {
+        s.push_str(&format!("学習した変換選好（{} 件）:\n", store.len()));
+        for p in &store.preferences {
+            s.push_str(&format!("　{} → {}（{}回）\n", p.reading, p.prefer, p.seen));
+        }
+        // 末尾の改行を落として行数を正確に
+        if s.ends_with('\n') {
+            s.pop();
+        }
+    }
+    s
 }
 
 // セッション共有の `ConversionEngine` を thread-local で保持する。
@@ -149,6 +211,10 @@ fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
     Ok(engine)
 }
 
+/// この回数以上コミットされた (reading→surface) だけ選好化する (tunable)。
+/// 起動時の [`setup_corrections`] とメニューからの [`relearn_now`] で共有する。
+const MIN_SEEN: u32 = 2;
+
 /// Layer 2: 訂正選好 (corrections.toml) を engine に設定する。
 ///
 /// `RELEARN` marker があれば observations.jsonl から corrections.toml を **決定論的に
@@ -156,10 +222,6 @@ fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
 /// marker が無ければ既存の corrections.toml をそのまま使う (手編集を尊重)。
 ///
 ///   再学習: touch "$HOME/Library/Application Support/nuko-ime/RELEARN" → NukoIME 再起動
-/// この回数以上コミットされた (reading→surface) だけ選好化する (tunable)。
-/// 起動時の [`setup_corrections`] とメニューからの [`relearn_now`] で共有する。
-const MIN_SEEN: u32 = 2;
-
 fn setup_corrections(engine: &mut ConversionEngine) {
     let Some(dir) = nuko_app_support_dir() else {
         return;
