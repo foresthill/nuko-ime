@@ -898,8 +898,7 @@ impl NukoInputController {
         // (nn_ambiguous 判定は libakaza 経路でしか使わないため akaza 枝の中に置く)
         #[cfg(feature = "akaza")]
         let segmented_result = {
-            let nn_ambiguous =
-                nuko_core::conversion::nn_alternate_readings(&composition).len() > 1;
+            let nn_ambiguous = nuko_core::conversion::nn_alternate_readings(&composition).len() > 1;
             if nn_ambiguous {
                 Ok(None)
             } else {
