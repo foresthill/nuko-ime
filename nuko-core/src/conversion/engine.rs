@@ -96,11 +96,22 @@ pub fn apply_segment_corrections(
     for seg in &mut segmented.segments {
         let seg_reading = seg.reading.clone();
         let mut changed = false;
+        // (1) 読み完全一致の候補を bias (例: 文節「まつや」→ 松谷)
         for c in &mut seg.candidates {
             let bias = corrections.bias(&seg_reading, &c.surface);
             if bias != 0 {
                 c.score = c.score.saturating_add(bias);
                 changed = true;
+            }
+        }
+        // (2) 敬称/助詞込みで切られた文節を bias
+        //     (例: 文節「まつやさん」→ 松谷さん。libakaza は文中で名前を「さん」込みに切る)
+        for (target, bias) in corrections.suffix_targets(&seg_reading) {
+            for c in &mut seg.candidates {
+                if c.surface == target {
+                    c.score = c.score.saturating_add(bias);
+                    changed = true;
+                }
             }
         }
         if changed {
@@ -550,6 +561,60 @@ mod tests {
         assert_eq!(segmented.segments[1].surface(), Some("さんと"));
     }
 
+    /// ★ 敬称込みで切られた文節でも学習が効く (回帰: #87 が実機で効かなかった件)。
+    /// libakaza は文中で「まつやさんと…」を文節読み「まつやさん」に敬称込みで切る。
+    /// 学習は「まつや→松谷」なので読み完全一致では当たらない。suffix_targets 経由で
+    /// 「松谷さん」(= 松谷 + さん) を押し上げる。
+    #[test]
+    fn segment_corrections_apply_to_honorific_suffixed_bunsetsu() {
+        use crate::conversion::{Segment, SegmentedConversion};
+        use crate::learning::{extract_corrections, ObservationEvent};
+
+        // まつや→松谷 を学習 (「まつや」単体の読みで)
+        let store = extract_corrections(
+            &[ObservationEvent::commit_with_candidates(
+                "まつや",
+                "松谷",
+                vec!["松也".into(), "松谷".into()],
+                Some(1),
+            )],
+            2,
+        );
+
+        let cand = |s: &str, r: &str, score: i32| {
+            Candidate::new(s, r)
+                .with_score(score)
+                .with_source(CandidateSource::System)
+        };
+        // 実機 libakaza の分割を模す: 文節読み「まつやさん」候補は敬称込み表層
+        let mut segmented = SegmentedConversion::new(vec![
+            Segment::new(
+                "まつやさん",
+                vec![
+                    cand("松也さん", "まつやさん", 0),
+                    cand("松屋さん", "まつやさん", -5),
+                    cand("松谷さん", "まつやさん", -10),
+                ],
+            ),
+            Segment::new("と", vec![cand("と", "と", 0)]),
+        ]);
+
+        assert_eq!(
+            segmented.segments[0].surface(),
+            Some("松也さん"),
+            "適用前は既定 松也さん"
+        );
+
+        apply_segment_corrections(&mut segmented, &store);
+
+        assert_eq!(
+            segmented.segments[0].surface(),
+            Some("松谷さん"),
+            "★ 敬称込み文節でも学習した松谷(さん)が1位"
+        );
+        assert_eq!(segmented.segments[1].surface(), Some("と"));
+    }
+
     /// ★ nn 曖昧さ: ん+な行 の位置に「ん+母音」の代替読みを生成する。
     #[test]
     fn nn_alternate_readings_generates_vowel_variants() {
@@ -669,6 +734,56 @@ mod tests {
         let engine = ConversionEngine::new().unwrap();
         let result = engine.convert_segmented("").unwrap();
         assert!(result.is_none(), "空入力は None");
+    }
+
+    /// 実機モデル + 実機 corrections.toml を読んで「まつやさんとなんとか」の
+    /// 文節分割と各文節候補を目視する診断テスト (通常は ignore)。
+    ///
+    /// 実行: `cargo test -p nuko-core --features akaza diag_segment_matsuya -- --ignored --nocapture`
+    #[cfg(feature = "akaza")]
+    #[test]
+    #[ignore = "実機モデルが要る診断用"]
+    fn diag_segment_matsuya() {
+        let home = std::env::var("HOME").expect("HOME");
+        let base = format!("{home}/Library/Application Support/nuko-ime");
+        let model_dir = format!("{base}/akaza-model");
+        let corrections = format!("{base}/corrections.toml");
+
+        let mut engine = ConversionEngine::with_libakaza(&model_dir).unwrap();
+        assert!(
+            engine.has_libakaza(),
+            "実機モデルが load できていない: {model_dir}"
+        );
+        if std::path::Path::new(&corrections).exists() {
+            engine.load_corrections(&corrections).unwrap();
+        }
+
+        for input in ["まつや", "まつやさんとなんとか", "まつやさんのなんとか"]
+        {
+            println!("\n=== 入力: {input} ===");
+            match engine.convert_segmented(input).unwrap() {
+                None => println!("  (segmented None — 単一文節 or 無効)"),
+                Some(seg) => {
+                    for (i, s) in seg.segments.iter().enumerate() {
+                        let cands: Vec<String> = s
+                            .candidates
+                            .iter()
+                            .take(6)
+                            .map(|c| c.surface.clone())
+                            .collect();
+                        println!(
+                            "  文節[{i}] 読み='{}' 選択='{}' 候補={:?}",
+                            s.reading,
+                            s.candidates
+                                .get(s.selected)
+                                .map(|c| c.surface.as_str())
+                                .unwrap_or("?"),
+                            cands
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[cfg(feature = "akaza")]
