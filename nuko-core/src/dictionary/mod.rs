@@ -2,6 +2,7 @@
 //!
 //! システム辞書とユーザー辞書の管理を提供します。
 
+mod emoji;
 mod manager;
 mod system;
 mod user;
