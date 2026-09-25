@@ -79,6 +79,37 @@ pub fn nn_alternate_readings(reading: &str) -> Vec<String> {
     out
 }
 
+/// 文節別変換結果に **文節ごとの** 個人選好 (訂正学習) の bias を適用し並べ替える。
+///
+/// `convert()` (flat) と同じ bias を segmented 経路にも効かせるための関数。これが無いと
+/// 「まつや→松谷」等の学習が複数文節の文の中で無視される。corrections が空なら無変化。
+// 呼び出し元 convert_segmented は akaza-gated なので、非 akaza の lib ビルドでは未使用
+// (テストからは使う)。
+#[cfg_attr(not(feature = "akaza"), allow(dead_code))]
+pub fn apply_segment_corrections(
+    segmented: &mut super::SegmentedConversion,
+    corrections: &crate::learning::CorrectionStore,
+) {
+    if corrections.is_empty() {
+        return;
+    }
+    for seg in &mut segmented.segments {
+        let seg_reading = seg.reading.clone();
+        let mut changed = false;
+        for c in &mut seg.candidates {
+            let bias = corrections.bias(&seg_reading, &c.surface);
+            if bias != 0 {
+                c.score = c.score.saturating_add(bias);
+                changed = true;
+            }
+        }
+        if changed {
+            seg.candidates.sort_by_key(|c| std::cmp::Reverse(c.score));
+            seg.select(0); // 並べ替え後の先頭 (最良) を選択に戻す
+        }
+    }
+}
+
 /// 変換エンジン
 pub struct ConversionEngine {
     /// 辞書マネージャー
@@ -325,12 +356,16 @@ impl ConversionEngine {
         let Some(backend) = &self.libakaza else {
             return Ok(None);
         };
-        let segmented = backend.convert_segmented(reading)?;
+        let mut segmented = backend.convert_segmented(reading)?;
         if segmented.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(segmented))
+            return Ok(None);
         }
+        // Layer 2: **文節ごとに** 個人選好 (訂正学習) の bias を適用して並べ替える。
+        // flat の convert() では適用済みだが convert_segmented では未適用だったため、
+        // 「まつや→松谷」等の学習が **複数文節の文の中では効かない** バグがあった
+        // (2026-09 ユーザー報告: 単体「まつや」は松谷、「まつやさんと…」は松也)。
+        apply_segment_corrections(&mut segmented, &self.corrections);
+        Ok(Some(segmented))
     }
 
     /// 文節境界を伸縮して再変換する (Shift+→ / Shift+← 用、libakaza 有効時のみ)。
@@ -466,6 +501,53 @@ mod tests {
         // かなそのまま、カタカナの候補は必ず含まれる
         assert!(candidates.iter().any(|c| c.surface == "にほん"));
         assert!(candidates.iter().any(|c| c.surface == "ニホン"));
+    }
+
+    /// ★ 学習 (corrections) が **文節ごと** に効き、複数文節の文の中でも順位が直る。
+    /// (まつや→松谷 を学習したら「まつやさんと…」の中の まつや 文節でも松谷が1位)
+    #[test]
+    fn segment_corrections_reorder_within_sentence() {
+        use crate::conversion::{Segment, SegmentedConversion};
+        use crate::learning::{extract_corrections, ObservationEvent};
+
+        // まつや→松谷 を学習 (既定でない候補を選んだ = 1回で選好化)
+        let store = extract_corrections(
+            &[ObservationEvent::commit_with_candidates(
+                "まつや",
+                "松谷",
+                vec!["松也".into(), "松谷".into()],
+                Some(1),
+            )],
+            2,
+        );
+
+        // 文「まつやさんと」= [まつや(既定 松也), さんと] を模した segmented
+        let cand = |s: &str, r: &str, score: i32| {
+            Candidate::new(s, r)
+                .with_score(score)
+                .with_source(CandidateSource::System)
+        };
+        let mut segmented = SegmentedConversion::new(vec![
+            Segment::new(
+                "まつや",
+                vec![cand("松也", "まつや", 0), cand("松谷", "まつや", -10)],
+            ),
+            Segment::new("さんと", vec![cand("さんと", "さんと", 0)]),
+        ]);
+
+        // 適用前: まつや文節の先頭は 松也
+        assert_eq!(segmented.segments[0].surface(), Some("松也"));
+
+        apply_segment_corrections(&mut segmented, &store);
+
+        // 適用後: 学習により 松谷 が先頭に
+        assert_eq!(
+            segmented.segments[0].surface(),
+            Some("松谷"),
+            "★ 文節の中でも学習した松谷が1位"
+        );
+        // 他文節は不変
+        assert_eq!(segmented.segments[1].surface(), Some("さんと"));
     }
 
     /// ★ nn 曖昧さ: ん+な行 の位置に「ん+母音」の代替読みを生成する。
