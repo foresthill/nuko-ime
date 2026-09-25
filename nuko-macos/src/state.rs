@@ -8,6 +8,32 @@ use std::time::Instant;
 use crate::candidate_panel::CustomCandidatePanel;
 use crate::learning_panel::LearningStatusPanel;
 
+// 「かな」キー押下時刻を **全 controller インスタンス共有** で保持する。
+//
+// 落とし穴 #4: IMKInputController はタブ/アプリ切替で複数インスタンス生成される。
+// setValue:forTag:(かな検知) を受ける controller と、直後の漏れ Space の inputText:
+// を受ける controller が **別インスタンス** になり得るため、controller ごとの ivar
+// (旧 kana_pressed_at) では「かなガード」が発火しなかった (2026-09 実機ログで確認)。
+// engine/パネルと同様に thread_local (= プロセス内共有) にして横断的に効かせる。
+thread_local! {
+    static LAST_KANA_PRESS: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// 「かな」モードへの切替を検知したら呼ぶ (setValue:forTag: 経由)。
+pub fn note_kana_press() {
+    LAST_KANA_PRESS.with(|c| c.set(Some(Instant::now())));
+}
+
+/// 直近の「かな」押下からの経過ミリ秒 (かなガード判定用)。未記録なら `None`。
+pub fn kana_press_elapsed_ms() -> Option<u128> {
+    LAST_KANA_PRESS.with(|c| c.get().map(|t| t.elapsed().as_millis()))
+}
+
+/// かなガード発火時に 1 shot で消費する。
+pub fn clear_kana_press() {
+    LAST_KANA_PRESS.with(|c| c.set(None));
+}
+
 // 自前候補ウィンドウ (NSPanel ベース) を **アプリ全体で 1 つ** だけ保持する。
 //
 // 経緯: PR #29 / #31 / #32 で IMKCandidates を試したが、Apple 公式 IMK は
@@ -478,12 +504,9 @@ pub struct InputState {
     /// 活性化から短時間以内の Space は「ショートカットの漏れ」と判定して
     /// 破棄する目的で記録する。
     pub activated_at: Option<Instant>,
-    /// 直近の「かな」キー押下時刻 (handleEvent: で keyCode 104 を検知して記録)
-    ///
-    /// macOS Japanese keyboard の「かな」キーを押した直後、なぜか Space イベント
-    /// が inputText: に漏れて入ることが確認された (2026-06-09 ユーザー報告)。
-    /// 「かな」キー押下から短時間以内の Space は「漏れ」と判定して破棄するため記録。
-    pub kana_pressed_at: Option<Instant>,
+    // 注: 「かな」キー押下時刻は controller 横断で効かせる必要があるため
+    // InputState (per-controller ivar) ではなく thread_local `LAST_KANA_PRESS`
+    // (このファイル上部) で保持する。落とし穴 #4 (controller 複数生成) 対策。
 }
 
 impl InputState {
@@ -497,7 +520,6 @@ impl InputState {
             is_composing: false,
             japanese_mode: true, // デフォルトは日本語入力モード
             activated_at: None,
-            kana_pressed_at: None,
         }
     }
 
