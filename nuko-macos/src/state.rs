@@ -259,6 +259,31 @@ pub fn registration_candidate() -> Option<(String, String)> {
     })
 }
 
+/// 確定のたびに観察ログから訂正選好を **再生成して稼働エンジンへ即反映** する。
+///
+/// これが無いと ①(picked-index)/②(打ち直し) の学習は観察ログに溜まるだけで、
+/// 手動 relearn するまで変換に効かなかった (ユーザー報告「5回選んでも治らない」)。
+/// 確定ごとに `extract_corrections` を回して corrections.toml を更新＋live 反映する。
+///
+/// **オプトイン無効 (観察ログ無効) のときは何もしない** — 観察が空なので relearn
+/// すると既存 corrections を消してしまうため。決定論なので churn は生まない。
+pub fn auto_relearn_after_commit() {
+    // 観察ログが有効なときだけ (無効なら既存 corrections を壊さない)。
+    if !with_observation(ObservationLog::is_enabled) {
+        return;
+    }
+    let Some(dir) = nuko_app_support_dir() else {
+        return;
+    };
+    let log = ObservationLog::new(true, dir.join("observations.jsonl"));
+    let Ok(events) = log.read_all() else {
+        return;
+    };
+    let store = extract_corrections(&events, MIN_SEEN);
+    let _ = store.save(dir.join("corrections.toml"));
+    with_engine_mut(|engine| engine.set_corrections(store));
+}
+
 /// 指定の読みに対する単語登録候補の表層を返す (候補ウィンドウの Tab ヒント/登録用)。
 ///
 /// [`registration_candidate`] の「1つ前の読み」が `reading` と一致するときだけ `Some`。
