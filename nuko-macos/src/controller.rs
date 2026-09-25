@@ -226,13 +226,13 @@ define_class!(
             if let Some(s) = value.and_then(|v| v.downcast_ref::<NSString>()) {
                 let mode = s.to_string();
                 debug_log(&format!("setValue:forTag: mode='{mode}' tag={tag}"));
-                let mut state = self.ivars().state.borrow_mut();
                 if mode.contains("Japanese") {
-                    // かな (Japanese) へ切替 → 直後の漏れ Space に備える
-                    state.kana_pressed_at = Some(std::time::Instant::now());
-                    state.japanese_mode = true;
+                    // かな (Japanese) へ切替 → 直後の漏れ Space に備える。
+                    // 落とし穴 #4 (controller 複数生成) 対策で thread_local に記録する。
+                    crate::state::note_kana_press();
+                    self.ivars().state.borrow_mut().japanese_mode = true;
                 } else if mode.contains("Roman") {
-                    state.japanese_mode = false;
+                    self.ivars().state.borrow_mut().japanese_mode = false;
                 }
             }
             // 既定動作 (モード値の保存) を保つため super を呼ぶ
@@ -447,7 +447,8 @@ impl NukoInputController {
             // に委譲 (テスト基盤 #5)。経過時間の計測だけここで行い、閾値比較を
             // 含む判定ロジックは純粋関数側に集約する。
             let activation_elapsed_ms = state.activated_at.map(|t| t.elapsed().as_millis());
-            let kana_elapsed_ms = state.kana_pressed_at.map(|t| t.elapsed().as_millis());
+            // かな押下時刻は controller 横断 (thread_local) で参照する (落とし穴 #4 対策)。
+            let kana_elapsed_ms = crate::state::kana_press_elapsed_ms();
             let action = crate::commit::decide_space_action(
                 state.candidates.is_some(),
                 state.is_composing,
@@ -464,7 +465,7 @@ impl NukoInputController {
                 }
                 SpaceAction::DiscardKanaGuard => {
                     // 「かな」キー押下直後の Space leak も破棄 (2026-06-10 報告)
-                    state.kana_pressed_at = None; // 1 shot で消費
+                    crate::state::clear_kana_press(); // 1 shot で消費 (thread_local)
                     debug_log("space: discard (kana key guard, likely kana key leak)");
                     return Bool::YES;
                 }
