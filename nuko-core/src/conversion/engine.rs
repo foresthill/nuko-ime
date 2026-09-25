@@ -30,6 +30,13 @@ use crate::learning::{CorrectionStore, LearningManager};
 #[cfg(feature = "akaza")]
 const LIBAKAZA_PRIORITY_BOOST: i32 = 100_000;
 
+/// 単語登録 (ユーザー辞書) 候補に乗せる優先度ブースト。
+///
+/// 辞書候補は素の score が -100 前後で、libakaza (BOOST 100_000) の下に沈む。
+/// 「ユーザーが明示的に登録した語」は **最優先で 1 位に出す** べきなので、
+/// libakaza より大きいブーストを乗せる。
+const USER_DICT_BOOST: i32 = 200_000;
+
 /// 変換エンジン
 pub struct ConversionEngine {
     /// 辞書マネージャー
@@ -224,6 +231,13 @@ impl ConversionEngine {
             );
         }
 
+        // 単語登録 (ユーザー辞書) の候補は最優先で 1 位に出す。
+        for c in candidates.iter_mut() {
+            if c.source == CandidateSource::User {
+                c.score = c.score.saturating_add(USER_DICT_BOOST);
+            }
+        }
+
         // Layer 2: 個人選好 (訂正学習) の bias をソート前に加算する。
         // 選好が無い候補は bias=0 = 無変化なので、corrections が空なら挙動は完全に不変。
         if !self.corrections.is_empty() {
@@ -404,6 +418,25 @@ mod tests {
         // かなそのまま、カタカナの候補は必ず含まれる
         assert!(candidates.iter().any(|c| c.surface == "にほん"));
         assert!(candidates.iter().any(|c| c.surface == "ニホン"));
+    }
+
+    /// ★ 単語登録した語は変換で 1 位に来る (USER_DICT_BOOST)。
+    #[test]
+    fn user_dict_candidate_ranks_first() {
+        use crate::dictionary::UserEntry;
+        let mut engine = ConversionEngine::new().unwrap();
+        engine
+            .dictionary_mut()
+            .user_dictionary_mut()
+            .add(UserEntry::new("駒谷", "こまや"))
+            .unwrap();
+        let ctx = ConversionContext::new();
+        let candidates = engine.convert("こまや", &ctx).unwrap();
+        assert_eq!(
+            candidates.iter().next().unwrap().surface,
+            "駒谷",
+            "★ 単語登録が最優先で 1 位"
+        );
     }
 
     /// Layer 2: 訂正選好の bias で候補順が変わり、選好を外せば元に戻る (非破壊)。

@@ -192,11 +192,12 @@ where
     OBSERVATION_LOG.with(f)
 }
 
-// ② 打ち直し検知用: 直前の確定 (読み, 表層, 時刻) を in-memory で保持する。
-// 完全に揮発性 (プロセス内のみ・永続化しない)。ここから訂正イベントを判定し、
-// 記録自体は観察ログのオプトインが有効なときだけ行われる (with_observation 経由)。
+// 直近の確定を **最大 2 件** in-memory で保持する (新しいものが末尾)。
+// 完全に揮発性 (プロセス内のみ・永続化しない)。
+// - ② 打ち直し検知: 直前 (末尾) と同じ読み・別表層なら訂正。
+// - 単語登録: 「1つ前の読み → 直前の語」を登録候補にする (下記参照)。
 thread_local! {
-    static LAST_COMMIT: RefCell<Option<(String, String, Instant)>> = const { RefCell::new(None) };
+    static RECENT_COMMITS: RefCell<Vec<(String, String, Instant)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// 直前の確定を記録しつつ、**今回が「打ち直し (訂正)」なら直前の表層を返す**。
@@ -211,16 +212,64 @@ pub fn note_commit_detect_correction(
     surface: &str,
     window: std::time::Duration,
 ) -> Option<String> {
-    LAST_COMMIT.with(|cell| {
-        let prev = cell.borrow().clone();
-        let correction = match prev {
-            Some((ref r, ref s, t)) if r == reading && s != surface && t.elapsed() <= window => {
+    RECENT_COMMITS.with(|cell| {
+        let mut v = cell.borrow_mut();
+        let correction = match v.last() {
+            Some((r, s, t)) if r == reading && s != surface && t.elapsed() <= window => {
                 Some(s.clone())
             }
             _ => None,
         };
-        *cell.borrow_mut() = Some((reading.to_string(), surface.to_string(), Instant::now()));
+        v.push((reading.to_string(), surface.to_string(), Instant::now()));
+        // 直近 2 件だけ保持
+        if v.len() > 2 {
+            let start = v.len() - 2;
+            v.drain(0..start);
+        }
         correction
+    })
+}
+
+/// 単語登録の候補 `(読み, 表層)` を返す。
+///
+/// 直近 2 件の確定 `[1つ前, 直前]` から **「1つ前の読み → 直前の表層」** を提案する。
+/// 自然な流れ「こまや→駒屋(違う) → こまたに→駒谷(正解)」の直後に
+/// 「こまや→駒谷」を登録できる。**未確定の composition に依存しない**ので、
+/// 入力メニューを開いた瞬間に composition が確定されても壊れない (旧方式の不具合の修正)。
+///
+/// 2 件揃っていて、読みが異なり、表層も異なるときだけ `Some`。
+pub fn registration_candidate() -> Option<(String, String)> {
+    RECENT_COMMITS.with(|cell| {
+        let v = cell.borrow();
+        if v.len() < 2 {
+            return None;
+        }
+        let prev = &v[v.len() - 2];
+        let last = &v[v.len() - 1];
+        let (prev_reading, _prev_surface, _) = prev;
+        let (_last_reading, last_surface, _) = last;
+        if prev_reading.is_empty()
+            || last_surface.is_empty()
+            || prev_reading == _last_reading
+            || _prev_surface == last_surface
+        {
+            return None;
+        }
+        Some((prev_reading.clone(), last_surface.clone()))
+    })
+}
+
+/// 単語登録: 稼働エンジンのユーザー辞書に `(reading → surface)` を追加し保存する。
+///
+/// ユーザー辞書候補は変換で最優先 (USER_DICT_BOOST) になるので、登録後は
+/// その読みで登録語が 1 位に出る。保存先は `~/…/nuko-ime/user_dict.json`。
+pub fn register_word(reading: &str, surface: &str) -> nuko_core::error::Result<()> {
+    with_engine_mut(|engine| {
+        engine
+            .dictionary_mut()
+            .user_dictionary_mut()
+            .add(nuko_core::dictionary::UserEntry::new(surface, reading))?;
+        engine.dictionary_mut().save_user_dictionary()
     })
 }
 
@@ -234,6 +283,7 @@ fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
     let mut engine = ConversionEngine::with_libakaza(model_dir)?;
     setup_learning_persistence(&mut engine);
     setup_corrections(&mut engine);
+    setup_user_dictionary(&mut engine);
     Ok(engine)
 }
 
@@ -242,7 +292,21 @@ fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
     let mut engine = ConversionEngine::new()?;
     setup_learning_persistence(&mut engine);
     setup_corrections(&mut engine);
+    setup_user_dictionary(&mut engine);
     Ok(engine)
+}
+
+/// 単語登録の永続辞書 (`~/…/nuko-ime/user_dict.json`) を起動時にロードする。
+///
+/// ファイルが無くても path を設定するため、以後の [`register_word`] の保存が効く。
+fn setup_user_dictionary(engine: &mut ConversionEngine) {
+    let Some(dir) = nuko_app_support_dir() else {
+        return;
+    };
+    let path = dir.join("user_dict.json");
+    if let Err(e) = engine.dictionary_mut().load_user_dictionary(&path) {
+        tracing::warn!(error = %e, "ユーザー辞書 (単語登録) の load 失敗。空で継続");
+    }
 }
 
 /// この回数以上コミットされた (reading→surface) だけ選好化する (tunable)。

@@ -228,6 +228,12 @@ define_class!(
             self._show_learning_impl();
         }
 
+        /// メニュー項目「単語登録:…」のアクション。
+        #[unsafe(method(nukoRegisterWord:))]
+        fn nuko_register_word(&self, _sender: Option<&AnyObject>) {
+            self._register_word_impl();
+        }
+
         // 注意: `handleEvent:client:` は **実装しない**。
         //
         // IMKServerInput の入力受信は 3 方式があり「1 つだけ」を選ぶ排他設計
@@ -253,6 +259,25 @@ impl NukoInputController {
         let empty = NSString::from_str("");
         // action のみ設定し target は nil。IMK が選択時に本 controller の
         // セレクタを呼ぶ (IMKInputController.h の menu 方式)。
+
+        // 単語登録は **常に表示** する (発見性)。直近 2 件の確定履歴から
+        // 「1つ前の読み → 直前の語」を提案する。未確定の composition に依存しない
+        // ので、メニューを開いた瞬間に確定が走っても壊れない。
+        // 例: こまや→駒屋(違う) → こまたに→駒谷(正解) の後に「単語登録:こまや→駒谷」。
+        let reg = crate::state::registration_candidate();
+        let reg_title = match &reg {
+            Some((reading, surface)) => format!("単語登録:「{reading}」→「{surface}」"),
+            None => "単語登録…（使い方を表示）".to_string(),
+        };
+        let reg_ns = NSString::from_str(&reg_title);
+        unsafe {
+            let _ = menu.addItemWithTitle_action_keyEquivalent(
+                &reg_ns,
+                Some(sel!(nukoRegisterWord:)),
+                &empty,
+            );
+        }
+
         let show = NSString::from_str("学習状況を見る…");
         let relearn = NSString::from_str("学習を今すぐ研ぎ直す");
         unsafe {
@@ -293,6 +318,37 @@ impl NukoInputController {
     /// メニュー「学習状況を見る…」: 現在の学習状況をパネル表示する。
     fn _show_learning_impl(&self) {
         self._present_learning(&crate::state::learning_status_text());
+    }
+
+    /// メニュー「単語登録:…」: 「1つ前の読み → 直前に確定した語」を登録する。
+    fn _register_word_impl(&self) {
+        // 準備が整っていなければ使い方ガイドを出す (発見性のため空振りさせない)。
+        let Some((reading, surface)) = crate::state::registration_candidate() else {
+            self._present_learning(concat!(
+                "📖 単語登録のやり方\n\n",
+                "「出したい読み」で一度 変換・確定 → すぐ「正しい語」を別の読みで\n",
+                "変換・確定 すると、この2つから登録できます。\n\n",
+                "例:\n",
+                "① 「こまや」と打って変換・確定（→ 駒屋 など、違ってOK）\n",
+                "② 続けて「こまたに」と打って変換・確定 → 駒谷\n",
+                "③ この入力メニューを開き「単語登録:「こまや」→「駒谷」」を選ぶ\n",
+                "→ 次から こまや で駒谷が最優先。",
+            ));
+            return;
+        };
+        let text = match crate::state::register_word(&reading, &surface) {
+            Ok(()) => {
+                info!(reading = %reading, surface = %surface, "単語登録");
+                format!(
+                    "✅ 単語登録しました\n「{reading}」→「{surface}」\n\nこの読みで Space 変換すると最優先で出ます。"
+                )
+            }
+            Err(e) => {
+                warn!(error = %e, "単語登録に失敗");
+                format!("⚠️ 単語登録に失敗しました: {e}")
+            }
+        };
+        self._present_learning(&text);
     }
 
     /// 学習状況パネルを (必要なら生成して) 前面に表示する。
