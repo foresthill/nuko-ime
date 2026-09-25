@@ -945,6 +945,51 @@ mod tests {
         assert!(candidates.is_empty());
     }
 
+    /// 記号・矢印・絵文字・顔文字が候補に出る (追加分のリグレッション基準＝宝)。
+    #[test]
+    fn symbols_and_emoji_present() {
+        let dict = SystemDictionary::new().unwrap();
+        let has = |reading: &str, surface: &str| {
+            dict.lookup(reading)
+                .unwrap()
+                .iter()
+                .any(|c| c.surface == surface)
+        };
+        // 記号・矢印 (#78)
+        assert!(has("やじるし", "→"), "やじるし→→");
+        assert!(has("まる", "○"), "まる→○");
+        assert!(has("ばつ", "×"), "ばつ→×");
+        assert!(has("ほし", "★"), "ほし→★");
+        assert!(has("ちぇっく", "✓"), "ちぇっく→✓");
+        // 絵文字 (#84)
+        assert!(has("ありがとう", "🙏"), "ありがとう→🙏");
+        assert!(has("きらきら", "✨"), "きらきら→✨");
+        assert!(has("おめでとう", "🎉"), "おめでとう→🎉");
+        assert!(has("だめ", "🙅"), "だめ→🙅");
+        assert!(has("かみなり", "⚡"), "かみなり→⚡");
+        // 顔文字
+        assert!(has("かおもじ", "(^_^)"), "かおもじ→(^_^)");
+    }
+
+    /// ★ マージ挿入: 記号/絵文字を足しても **既存の語候補を潰さない**。
+    /// (挿入ループを insert→entry().or_default().extend() にした効果の固定)
+    #[test]
+    fn merge_insert_preserves_existing_words() {
+        let dict = SystemDictionary::new().unwrap();
+        let has = |reading: &str, surface: &str| {
+            dict.lookup(reading)
+                .unwrap()
+                .iter()
+                .any(|c| c.surface == surface)
+        };
+        // ありがとう は 🙏 を足しても 有難う が残る
+        assert!(has("ありがとう", "有難う") && has("ありがとう", "🙏"));
+        // まる は ○ を足しても 丸 が残る
+        assert!(has("まる", "丸") && has("まる", "○"));
+        // ほし は ★ を足しても 星 が残る
+        assert!(has("ほし", "星") && has("ほし", "★"));
+    }
+
     #[test]
     fn test_prefix_search() {
         let dict = SystemDictionary::new().unwrap();
