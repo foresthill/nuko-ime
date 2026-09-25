@@ -11,5 +11,5 @@ mod segment;
 
 pub use candidate::{Candidate, CandidateList, CandidateSource};
 pub use context::ConversionContext;
-pub use engine::ConversionEngine;
+pub use engine::{nn_alternate_readings, ConversionEngine};
 pub use segment::{Segment, SegmentedConversion};

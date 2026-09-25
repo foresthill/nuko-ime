@@ -37,6 +37,48 @@ const LIBAKAZA_PRIORITY_BOOST: i32 = 100_000;
 /// libakaza より大きいブーストを乗せる。
 const USER_DICT_BOOST: i32 = 200_000;
 
+/// 「ん + な行(な/に/ぬ/ね/の)」を「ん + 母音(あ/い/う/え/お)」に置換した **代替読み** を生成する。
+///
+/// ローマ字の「nn+母音」は `ん+な行` に固定されるため (`jikannarutoki→じかんなるとき`)、
+/// `ん+母音` の語 (時間**あ**るとき / 千**円**=せん**え**ん / 繁**栄**=はん**え**い) が出せない。
+/// 一方、単純に nn+母音→ん+母音 にすると **残念(ざんねん)/案内(あんない)** を壊す
+/// (`sennen`(千円) と `zannen`(残念) は同じ nn+e で欲しい結果が逆で、位置ルールでは区別不能)。
+///
+/// そこで **両方の読みを libakaza に変換させ、言語モデルにスコアで選ばせる** (ことえりの
+/// 辞書判断を nuko の libakaza で再現)。本関数は `[原文, 代替1, ...]` を返す。原文は常に先頭。
+/// ん の直後が な行 の各位置につき 1 箇所だけ置換した代替を作る (組合せ爆発を避け上限あり)。
+#[must_use]
+pub fn nn_alternate_readings(reading: &str) -> Vec<String> {
+    const NA_ROW: [(char, char); 5] = [
+        ('な', 'あ'),
+        ('に', 'い'),
+        ('ぬ', 'う'),
+        ('ね', 'え'),
+        ('の', 'お'),
+    ];
+    const MAX_ALTERNATES: usize = 3; // 原文 + 最大 3 代替
+
+    let chars: Vec<char> = reading.chars().collect();
+    let mut out = vec![reading.to_string()];
+    for i in 1..chars.len() {
+        if out.len() > MAX_ALTERNATES {
+            break;
+        }
+        if chars[i - 1] != 'ん' {
+            continue;
+        }
+        if let Some(&(_, vowel)) = NA_ROW.iter().find(|(na, _)| *na == chars[i]) {
+            let mut alt = chars.clone();
+            alt[i] = vowel;
+            let s: String = alt.into_iter().collect();
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
 /// 変換エンジン
 pub struct ConversionEngine {
     /// 辞書マネージャー
@@ -171,24 +213,30 @@ impl ConversionEngine {
             }
         }
 
-        // 2. libakaza バックエンドが有効なら最優先で候補を追加
+        // 2. libakaza バックエンドが有効なら最優先で候補を追加。
+        //    「nn 曖昧さ」救済: 原文＋代替読み (ん+な行 → ん+母音) の両方を変換して
+        //    マージ。libakaza の言語モデルが正しい方を高スコアにする
+        //    (じかんあるとき > じかんなるとき、残念(ざんねん) > ざんえん)。
         #[cfg(feature = "akaza")]
         if let Some(backend) = &self.libakaza {
-            match backend.convert(reading) {
-                Ok(libakaza_candidates) => {
-                    for mut candidate in libakaza_candidates {
-                        candidate.score = candidate.score.saturating_add(LIBAKAZA_PRIORITY_BOOST);
-                        if !candidates.iter().any(|c| c.surface == candidate.surface) {
-                            candidates.push(candidate);
+            for alt in nn_alternate_readings(reading) {
+                match backend.convert(&alt) {
+                    Ok(libakaza_candidates) => {
+                        for mut candidate in libakaza_candidates {
+                            candidate.score =
+                                candidate.score.saturating_add(LIBAKAZA_PRIORITY_BOOST);
+                            if !candidates.iter().any(|c| c.surface == candidate.surface) {
+                                candidates.push(candidate);
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        reading = %reading,
-                        error = %e,
-                        "libakaza 変換失敗、静的辞書のみで継続"
-                    );
+                    Err(e) => {
+                        tracing::warn!(
+                            reading = %alt,
+                            error = %e,
+                            "libakaza 変換失敗、静的辞書のみで継続"
+                        );
+                    }
                 }
             }
         }
@@ -418,6 +466,35 @@ mod tests {
         // かなそのまま、カタカナの候補は必ず含まれる
         assert!(candidates.iter().any(|c| c.surface == "にほん"));
         assert!(candidates.iter().any(|c| c.surface == "ニホン"));
+    }
+
+    /// ★ nn 曖昧さ: ん+な行 の位置に「ん+母音」の代替読みを生成する。
+    #[test]
+    fn nn_alternate_readings_generates_vowel_variants() {
+        // じかんなるとき → じかんあるとき (んな→んあ) も候補に
+        let alts = nn_alternate_readings("じかんなるとき");
+        assert!(
+            alts.contains(&"じかんなるとき".to_string()),
+            "★ 原文は必ず含む"
+        );
+        assert!(
+            alts.contains(&"じかんあるとき".to_string()),
+            "★ ん+な→ん+あ の代替を生成"
+        );
+        // せんねん → せんえん (千円) の代替
+        let alts2 = nn_alternate_readings("せんねん");
+        assert!(alts2.contains(&"せんえん".to_string()), "★ ん+ね→ん+え");
+        // ん+な行 が無ければ原文のみ
+        assert_eq!(
+            nn_alternate_readings("こんにちは").len(),
+            2,
+            "★ んに→んい も1つ出る"
+        );
+        assert_eq!(
+            nn_alternate_readings("あいうえお"),
+            vec!["あいうえお".to_string()],
+            "★ ん が無ければ代替なし"
+        );
     }
 
     /// ★ 単語登録した語は変換で 1 位に来る (USER_DICT_BOOST)。
