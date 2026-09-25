@@ -926,19 +926,32 @@ impl NukoInputController {
         let composition = state.composition.clone();
         debug_log(&format!("do_convert: input='{composition}'"));
 
-        // 1. 文節別変換を試す (libakaza available + 単一文節超え、かつ nn 曖昧でない)。
+        // 1. 文節別変換を試す (libakaza available + 単一文節超え)。
         //
-        // nn 曖昧さ (ん+な行 の語) は flat 変換を使う。flat は原文＋代替読み
+        // nn 曖昧さ (ん+な行 の語) は原則 flat 変換を使う。flat は原文＋代替読み
         // (ん+母音) の両方を libakaza に変換してマージするので「じかんあるとき」等の
-        // ん+母音 候補が出る。segmented はこの代替マージに未対応なのでスキップする。
+        // ん+母音 候補が出る。segmented はこの代替マージに未対応。
+        //
+        // **ただし** segmented 側で学習 (Layer 2 訂正) が効いた場合 (corrections_applied)
+        // は flat より segmented を優先する。「まつやさんなんとか」は「んな」を含み nn
+        // 曖昧扱いだが、学習した「まつやさん→松谷さん」は flat の k-best に無く、segmented
+        // でしか出せないため (2026-09 ユーザー報告: 文中の名前が松也のまま直らない)。
         // (nn_ambiguous 判定は libakaza 経路でしか使わないため akaza 枝の中に置く)
         #[cfg(feature = "akaza")]
         let segmented_result = {
             let nn_ambiguous = nuko_core::conversion::nn_alternate_readings(&composition).len() > 1;
-            if nn_ambiguous {
-                Ok(None)
-            } else {
-                with_engine(|engine| engine.convert_segmented(&composition))
+            match with_engine(|engine| engine.convert_segmented(&composition)) {
+                Ok(Some(seg)) => {
+                    // nn 曖昧語は学習が効いたときだけ segmented を使う (それ以外は flat へ)。
+                    let use_segmented =
+                        seg.segments.len() >= 2 && (!nn_ambiguous || seg.corrections_applied);
+                    if use_segmented {
+                        Ok(Some(seg))
+                    } else {
+                        Ok(None)
+                    }
+                }
+                other => other,
             }
         };
         #[cfg(not(feature = "akaza"))]

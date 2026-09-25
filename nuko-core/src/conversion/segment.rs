@@ -100,6 +100,12 @@ pub struct SegmentedConversion {
     pub segments: Vec<Segment>,
     /// 現在フォーカス中の文節 index
     pub focused: usize,
+    /// 訂正学習 (Layer 2) の bias で **いずれかの文節の選択が変わった** か。
+    ///
+    /// nn 曖昧語 (ん+な行) は通常 flat 変換に回す (ん+母音 の代替候補を出すため) が、
+    /// segmented 側で学習が効いた (例: まつやさん→松谷さん) ときは flat より
+    /// segmented を優先したい。その判定に controller が使う。
+    pub corrections_applied: bool,
 }
 
 impl SegmentedConversion {
@@ -109,6 +115,7 @@ impl SegmentedConversion {
         Self {
             segments,
             focused: 0,
+            corrections_applied: false,
         }
     }
 

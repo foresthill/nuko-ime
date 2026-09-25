@@ -93,6 +93,7 @@ pub fn apply_segment_corrections(
     if corrections.is_empty() {
         return;
     }
+    let mut any_changed = false;
     for seg in &mut segmented.segments {
         let seg_reading = seg.reading.clone();
         let mut changed = false;
@@ -117,8 +118,10 @@ pub fn apply_segment_corrections(
         if changed {
             seg.candidates.sort_by_key(|c| std::cmp::Reverse(c.score));
             seg.select(0); // 並べ替え後の先頭 (最良) を選択に戻す
+            any_changed = true;
         }
     }
+    segmented.corrections_applied = any_changed;
 }
 
 /// 変換エンジン
@@ -613,6 +616,43 @@ mod tests {
             "★ 敬称込み文節でも学習した松谷(さん)が1位"
         );
         assert_eq!(segmented.segments[1].surface(), Some("と"));
+        assert!(
+            segmented.corrections_applied,
+            "★ 学習が効いたら corrections_applied が立つ (nn 曖昧語で flat より優先する判定に使う)"
+        );
+    }
+
+    /// ★ 学習にマッチしない文節では corrections_applied は立たない。
+    /// (nn 曖昧語で「訂正が無ければ flat (ん+母音 代替) を使う」判定の土台)
+    #[test]
+    fn segment_corrections_flag_false_when_no_match() {
+        use crate::conversion::{Segment, SegmentedConversion};
+        use crate::learning::{extract_corrections, ObservationEvent};
+
+        let store = extract_corrections(
+            &[ObservationEvent::commit_with_candidates(
+                "まつや",
+                "松谷",
+                vec!["松也".into(), "松谷".into()],
+                Some(1),
+            )],
+            2,
+        );
+        let cand = |s: &str, r: &str| {
+            Candidate::new(s, r)
+                .with_score(0)
+                .with_source(CandidateSource::System)
+        };
+        // 学習と無関係な文「じかん|なるとき」
+        let mut segmented = SegmentedConversion::new(vec![
+            Segment::new("じかん", vec![cand("時間", "じかん")]),
+            Segment::new("なるとき", vec![cand("成るとき", "なるとき")]),
+        ]);
+        apply_segment_corrections(&mut segmented, &store);
+        assert!(
+            !segmented.corrections_applied,
+            "★ マッチしなければ corrections_applied は false (→ nn は flat 経路へ)"
+        );
     }
 
     /// ★ nn 曖昧さ: ん+な行 の位置に「ん+母音」の代替読みを生成する。
@@ -758,12 +798,23 @@ mod tests {
             engine.load_corrections(&corrections).unwrap();
         }
 
-        for input in ["まつや", "まつやさんとなんとか", "まつやさんのなんとか"]
-        {
-            println!("\n=== 入力: {input} ===");
+        for input in [
+            "まつや",
+            "まつやさんとなんとか",
+            "まつやさんなんとか", // 「んな」を含み nn 曖昧扱い → corrections_applied で救済
+            "じかんなるとき",     // nn: 訂正なし → corrections_applied=false (flat へ)
+            "せんねん",           // nn: 千円
+        ] {
+            let nn = super::nn_alternate_readings(input).len() > 1;
+            println!("\n=== 入力: {input} (nn_ambiguous={nn}) ===");
             match engine.convert_segmented(input).unwrap() {
                 None => println!("  (segmented None — 単一文節 or 無効)"),
                 Some(seg) => {
+                    println!(
+                        "  corrections_applied={} 連結='{}'",
+                        seg.corrections_applied,
+                        seg.current_surface()
+                    );
                     for (i, s) in seg.segments.iter().enumerate() {
                         let cands: Vec<String> = s
                             .candidates
