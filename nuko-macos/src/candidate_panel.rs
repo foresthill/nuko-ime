@@ -39,6 +39,8 @@ const FONT_SIZE: f64 = 14.0;
 pub struct CustomCandidatePanel {
     panel: Retained<NSPanel>,
     label: Retained<NSTextField>,
+    /// 単語登録ヒント (末尾に淡色で 1 行出す。例:「⇥ Tab:「駒谷」を登録」)。
+    hint: std::cell::RefCell<Option<String>>,
 }
 
 impl CustomCandidatePanel {
@@ -98,7 +100,16 @@ impl CustomCandidatePanel {
         let view: &NSView = label.as_super().as_super();
         panel.setContentView(Some(view));
 
-        Self { panel, label }
+        Self {
+            panel,
+            label,
+            hint: std::cell::RefCell::new(None),
+        }
+    }
+
+    /// 単語登録ヒントをセットする (次の描画から末尾に出る)。`None` で消す。
+    pub fn set_registration_hint(&self, hint: Option<String>) {
+        *self.hint.borrow_mut() = hint;
     }
 
     /// 候補リストと選択 index を更新し、パネルサイズを内容に合わせる (flat モード)。
@@ -129,7 +140,8 @@ impl CustomCandidatePanel {
         }
         // 候補が多くても 1 ページ (CANDIDATE_PAGE_SIZE 件) ぶんだけ描く。
         // 実際に描画した行数を受け取って高さに使う。
-        let (attr, line_count) = build_attributed_string(header, items, selected);
+        let hint = self.hint.borrow();
+        let (attr, line_count) = build_attributed_string(header, items, selected, hint.as_deref());
         self.label.setAttributedStringValue(&attr);
 
         let height = (line_count as f64) * LINE_HEIGHT + PADDING * 2.0;
@@ -180,6 +192,7 @@ fn build_attributed_string(
     header: Option<(&[String], usize)>,
     items: &[String],
     selected: usize,
+    footer: Option<&str>,
 ) -> (Retained<NSMutableAttributedString>, usize) {
     let mut combined = String::new();
     // 文節ヘッダの focused 範囲 / 選択候補行の範囲 (utf16: start, len)。背景強調に使う。
@@ -239,6 +252,15 @@ fn build_attributed_string(
         newline_if_needed(&mut combined);
         combined.push_str(&format!("    {} / {}", page + 1, page_count));
         line_count += 1;
+    }
+
+    // 4. 単語登録ヒント (フッタ。末尾に 1 行)
+    if let Some(hint) = footer {
+        if !hint.is_empty() {
+            newline_if_needed(&mut combined);
+            combined.push_str(hint);
+            line_count += 1;
+        }
     }
 
     let ns_str = NSString::from_str(&combined);

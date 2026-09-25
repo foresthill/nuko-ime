@@ -728,6 +728,26 @@ impl NukoInputController {
                 // Shift+Right: focused 文節を伸ばす (segmented モードのみ)
                 self.handle_segment_resize(client, /*extend_right=*/ true)
             }
+            CommandAction::RegisterWord => {
+                // Tab: 今の読みに登録候補があれば「登録してその語を確定」。
+                // 無ければ Tab は素通し (Bool::NO)。
+                let reading = self.ivars().state.borrow().composition.clone();
+                match crate::state::pending_registration_for(&reading) {
+                    Some(surface) => {
+                        if let Err(e) = crate::state::register_word(&reading, &surface) {
+                            warn!(error = %e, "Tab 単語登録に失敗");
+                        } else {
+                            info!(reading = %reading, surface = %surface, "Tab で単語登録");
+                        }
+                        // 登録した語をそのまま確定して挿入 (即座に使える満足感)。
+                        self.ivars().state.borrow_mut().reset();
+                        Self::hide_candidate_panel();
+                        Self::insert_text_on_client(client, &surface);
+                        Bool::YES
+                    }
+                    None => Bool::NO,
+                }
+            }
             CommandAction::CommitAndPassThrough => {
                 debug_log(&format!("unhandled selector: {sel_name:?}"));
                 // 未知のセレクタ: 確定してパススルー
@@ -1135,16 +1155,22 @@ impl NukoInputController {
     /// `firstRectForCharacterRange:actualRange:` で marked text の screen 座標を
     /// 取得してパネルを直下に配置する。
     fn show_candidate_panel(&self, client: &AnyObject) {
-        let snapshot = {
+        let (snapshot, reading) = {
             let state = self.ivars().state.borrow();
-            state.candidates.as_ref().map(|c| {
+            let reading = state.composition.clone();
+            let snap = state.candidates.as_ref().map(|c| {
                 let items: Vec<String> = c.iter().map(|x| x.surface.clone()).collect();
                 (items, c.selected_index(), Self::panel_segments(&state))
-            })
+            });
+            (snap, reading)
         };
         let Some((items, selected, seg_info)) = snapshot else {
             return;
         };
+        // 単語登録ヒント: 今の読みが「直前に別読みで出した語」の登録対象なら、
+        // 候補ウィンドウ末尾に「⇥ Tab:「駒谷」を登録」を出す。
+        let hint = crate::state::pending_registration_for(&reading)
+            .map(|surface| format!("⇥ Tab:「{surface}」を登録"));
         let position = Self::caret_screen_point(client);
         debug_log(&format!(
             "show_candidate_panel: items={} selected={selected} pos=({:.1},{:.1})",
@@ -1154,6 +1180,7 @@ impl NukoInputController {
         ));
         with_custom_panel(|panel| {
             if let Some(panel) = panel {
+                panel.set_registration_hint(hint.clone());
                 if let Some((segs, focused)) = &seg_info {
                     panel.set_candidates_segmented(&items, selected, segs, *focused);
                 } else {
