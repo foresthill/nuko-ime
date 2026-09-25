@@ -208,6 +208,39 @@ define_class!(
             }
         }
 
+        /// 入力モード変更 (英数 ↔ かな) を受け取る。
+        ///
+        /// 「かな」キーで Japanese(かな) モードへ切替わる直後、Space が inputText: に
+        /// 漏れて **半角スペースが入る** 問題があった。元は handleEvent: で keyCode 104
+        /// を検知して `kana_pressed_at` に記録していたが、handleEvent: は PR #60 で
+        /// 撤去 (方式3禁止) され、以降 `kana_pressed_at` は死んでいた (かなガード不発)。
+        /// ここでモード変更を捉え直して記録し、直後の漏れ Space を握り潰す。
+        /// `setValue:forTag:` は IMKInputController に実装があるので super 呼び出しは安全。
+        #[unsafe(method(setValue:forTag:client:))]
+        fn set_value_for_tag(
+            &self,
+            value: Option<&AnyObject>,
+            tag: std::os::raw::c_long,
+            sender: Option<&AnyObject>,
+        ) {
+            if let Some(s) = value.and_then(|v| v.downcast_ref::<NSString>()) {
+                let mode = s.to_string();
+                debug_log(&format!("setValue:forTag: mode='{mode}' tag={tag}"));
+                let mut state = self.ivars().state.borrow_mut();
+                if mode.contains("Japanese") {
+                    // かな (Japanese) へ切替 → 直後の漏れ Space に備える
+                    state.kana_pressed_at = Some(std::time::Instant::now());
+                    state.japanese_mode = true;
+                } else if mode.contains("Roman") {
+                    state.japanese_mode = false;
+                }
+            }
+            // 既定動作 (モード値の保存) を保つため super を呼ぶ
+            unsafe {
+                let _: () = msg_send![super(self), setValue: value, forTag: tag, client: sender];
+            }
+        }
+
         /// 入力ソースメニュー (メニューバー右上の入力メニュー) に出す独自メニュー。
         ///
         /// IMK はメニュー描画のたびにこれを呼ぶ (状態を反映して都度組み立て可能)。
