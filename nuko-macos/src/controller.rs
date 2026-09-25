@@ -54,6 +54,8 @@ fn ascii_to_fullwidth_punctuation(c: char) -> Option<&'static str> {
         '?' => Some("？"),
         '!' => Some("！"),
         '~' => Some("〜"),
+        // 「/」は日本語入力では中黒「・」にする (JIS の ・/め キー相当。他 IME 同様)。
+        '/' => Some("・"),
         '(' => Some("（"),
         ')' => Some("）"),
         '[' => Some("「"),
