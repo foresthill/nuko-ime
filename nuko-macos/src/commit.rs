@@ -195,6 +195,8 @@ pub enum CommandAction {
     ResizeSegmentLeft,
     /// Shift+Right (`moveRightAndModifySelection:`) → focused 文節を伸ばす (segmented のみ)
     ResizeSegmentRight,
+    /// Tab (`insertTab:`) → 単語登録候補があれば登録 (無ければ Tab は素通し)
+    RegisterWord,
     /// 未知のセレクタ → 確定してからパススルー (`Bool::NO`)
     CommitAndPassThrough,
 }
@@ -228,6 +230,7 @@ pub fn decide_command(selector_name: &std::ffi::CStr, is_composing: bool) -> Com
         // Shift+←→ (文節伸縮)。macOS は selection 拡張のセレクタとして配送する。
         b"moveLeftAndModifySelection:" => CommandAction::ResizeSegmentLeft,
         b"moveRightAndModifySelection:" => CommandAction::ResizeSegmentRight,
+        b"insertTab:" => CommandAction::RegisterWord,
         _ => CommandAction::CommitAndPassThrough,
     }
 }

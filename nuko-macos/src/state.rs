@@ -259,6 +259,14 @@ pub fn registration_candidate() -> Option<(String, String)> {
     })
 }
 
+/// 指定の読みに対する単語登録候補の表層を返す (候補ウィンドウの Tab ヒント/登録用)。
+///
+/// [`registration_candidate`] の「1つ前の読み」が `reading` と一致するときだけ `Some`。
+/// = 「今打っている読みが、直前に別読みで出した語の登録対象」のときにヒントを出せる。
+pub fn pending_registration_for(reading: &str) -> Option<String> {
+    registration_candidate().and_then(|(r, s)| if r == reading { Some(s) } else { None })
+}
+
 /// 単語登録: 稼働エンジンのユーザー辞書に `(reading → surface)` を追加し保存する。
 ///
 /// ユーザー辞書候補は変換で最優先 (USER_DICT_BOOST) になるので、登録後は
