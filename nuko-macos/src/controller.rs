@@ -1078,6 +1078,10 @@ impl NukoInputController {
                         }
                     }
                 });
+                // ①② を **即反映**: 確定のたびに観察ログから訂正選好を再生成して
+                // 稼働エンジンへ適用する。これで「選んだら次から上位」が手動 relearn
+                // 無しで効く (ユーザー報告「5回選んでも治らない」の修正)。
+                crate::state::auto_relearn_after_commit();
             }
         }
     }
