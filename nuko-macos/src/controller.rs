@@ -890,17 +890,20 @@ impl NukoInputController {
         let composition = state.composition.clone();
         debug_log(&format!("do_convert: input='{composition}'"));
 
+        // 1. 文節別変換を試す (libakaza available + 単一文節超え、かつ nn 曖昧でない)。
+        //
         // nn 曖昧さ (ん+な行 の語) は flat 変換を使う。flat は原文＋代替読み
         // (ん+母音) の両方を libakaza に変換してマージするので「じかんあるとき」等の
         // ん+母音 候補が出る。segmented はこの代替マージに未対応なのでスキップする。
-        let nn_ambiguous = nuko_core::conversion::nn_alternate_readings(&composition).len() > 1;
-
-        // 1. 文節別変換を試す (libakaza available + 単一文節超え、かつ nn 曖昧でない)
+        // (nn_ambiguous 判定は libakaza 経路でしか使わないため akaza 枝の中に置く)
         #[cfg(feature = "akaza")]
-        let segmented_result = if nn_ambiguous {
-            Ok(None)
-        } else {
-            with_engine(|engine| engine.convert_segmented(&composition))
+        let segmented_result = {
+            let nn_ambiguous = nuko_core::conversion::nn_alternate_readings(&composition).len() > 1;
+            if nn_ambiguous {
+                Ok(None)
+            } else {
+                with_engine(|engine| engine.convert_segmented(&composition))
+            }
         };
         #[cfg(not(feature = "akaza"))]
         let segmented_result: nuko_core::error::Result<
