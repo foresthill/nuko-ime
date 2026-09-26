@@ -709,19 +709,33 @@ impl NukoInputController {
             Self::hide_candidate_panel();
             Self::insert_text_on_client(client, &decision.commit_text);
 
-            // 新しい文字の入力を開始
+            // 新しい文字の入力を開始。
+            //
+            // ★ 数字と全角化する記号は romaji.input に渡さず **直接挿入** する。
+            //   渡すと romaji buffer に滞留して「2」→ buffer="2" のまま次入力と結合し
+            //   変換が壊れる (2026-09 ユーザー報告「候補中に 2 を打つと変換が強制終了」)。
+            //   = 候補表示中は 627 行の digit/記号パススルーが効かないため、ここで補う。
             let mut state = self.ivars().state.borrow_mut();
+            let mut passthrough = String::new();
             for c in text.chars() {
-                if c.is_ascii_graphic() {
+                if c.is_ascii_digit() {
+                    passthrough.push(c);
+                } else if let Some(fw) = ascii_to_fullwidth_punctuation(c) {
+                    passthrough.push_str(fw);
+                } else if c.is_ascii_graphic() {
                     let kana = state.romaji.input(c);
                     if !kana.is_empty() {
                         state.composition.push_str(&kana);
                     }
                 }
             }
-            state.is_composing = true;
+            let composing = !state.composition.is_empty() || !state.romaji.buffer().is_empty();
+            state.is_composing = composing;
             let display = state.display_text();
             drop(state);
+            if !passthrough.is_empty() {
+                Self::insert_text_on_client(client, &passthrough);
+            }
             Self::set_marked_text_on_client(client, &display);
             return Bool::YES;
         }
