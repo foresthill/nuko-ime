@@ -17,7 +17,7 @@ use objc2_foundation::{NSArray, NSPoint, NSRange, NSString};
 use objc2_input_method_kit::{IMKInputController, IMKServer};
 use tracing::{debug, error, info, warn};
 
-use nuko_core::conversion::CandidateList;
+use nuko_core::conversion::{Candidate, CandidateList, CandidateSource};
 use nuko_core::learning::ObservationEvent;
 
 use crate::commit::{BackspaceAction, CommandAction, SpaceAction};
@@ -72,6 +72,20 @@ fn ascii_to_fullwidth_punctuation(c: char) -> Option<&'static str> {
         '*' => Some("＊"),
         '+' => Some("＋"),
         '=' => Some("＝"),
+        _ => None,
+    }
+}
+
+/// 変換候補を持つ句読点キー (`?` `!`)。第 1 要素が既定 (全角)。
+///
+/// これらは即挿入せず、composition + 候補リストとして seed する。Space で
+/// ？/? 等を切替えられ、次入力/Enter で選択中を確定する (既存の候補確定機構に乗る)。
+/// 2026-09 ユーザー要望「? がすぐ確定されて変換候補にならない」。
+/// 「,」「.」等 (変種が要らない句読点) は従来どおり [`ascii_to_fullwidth_punctuation`] で即挿入。
+fn punctuation_variants(c: char) -> Option<&'static [&'static str]> {
+    match c {
+        '?' => Some(&["？", "?", "⁇", "❓"]),
+        '!' => Some(&["！", "!", "‼", "❗"]),
         _ => None,
     }
 }
@@ -545,6 +559,68 @@ impl NukoInputController {
             }
         }
 
+        // 候補を持つ句読点 (? !) は即挿入せず composition + 候補として seed する。
+        // Space で ？/? 等を切替え、次入力/Enter で選択中を確定 (既存機構に乗る)。
+        // 2026-09 ユーザー要望「? がすぐ確定されて変換候補にならない」。
+        // 候補表示中でも動くよう `candidates.is_none()` ゲートの外に置く (連続 "??" 対応)。
+        if text.chars().count() == 1 {
+            if let Some(ch) = text.chars().next() {
+                if let Some(variants) = punctuation_variants(ch) {
+                    // 既存の未確定を先に確定する。**decide_commit を使う** ことで
+                    // segmented (全文節連結 + 全文節学習) / flat 候補 / 未変換かな の
+                    // 全ケースを正しく確定する。旧実装は candidates.selected() だけを
+                    // 見ていたため、segmented 中に ? を打つと focused 文節以外が消えた
+                    // (2026-09 ユーザー報告「認識相違…の未変換部分が消える」)。
+                    let mut commit_text = String::new();
+                    if state.candidates.is_some()
+                        || state.is_composing
+                        || !state.romaji.buffer().is_empty()
+                    {
+                        let remaining = state.romaji.flush();
+                        if !remaining.is_empty() {
+                            state.composition.push_str(&remaining);
+                        }
+                        let decision = crate::commit::decide_commit(&state);
+                        let ctx_snapshot = state.context.clone();
+                        for c in &decision.learn_targets {
+                            with_engine_mut(|engine| {
+                                let _ = engine.commit(c, &ctx_snapshot);
+                            });
+                        }
+                        if !decision.commit_text.is_empty() {
+                            state.context.push_prev_word(&decision.commit_text);
+                        }
+                        commit_text = decision.commit_text;
+                        state.reset();
+                    }
+                    // 新しい記号を composition + 候補として seed (reading は空 = 学習しない)。
+                    let mut list = CandidateList::new();
+                    for (i, v) in variants.iter().enumerate() {
+                        list.push(
+                            Candidate::new(*v, "")
+                                .with_score(-(i as i32))
+                                .with_source(CandidateSource::System),
+                        );
+                    }
+                    list.select(0);
+                    state.composition = variants[0].to_string();
+                    state.candidates = Some(list);
+                    state.segmented = None;
+                    state.is_composing = true;
+                    drop(state);
+                    if !commit_text.is_empty() {
+                        Self::insert_text_on_client(client, &commit_text);
+                    }
+                    Self::set_marked_text_on_client(client, variants[0]);
+                    self.show_candidate_panel(client);
+                    debug_log(&format!(
+                        "punct-candidates: '{ch}' seed {variants:?} 先行確定='{commit_text}'"
+                    ));
+                    return Bool::YES;
+                }
+            }
+        }
+
         // 数字 0-9 は IME 変換対象外。
         //
         // 旧挙動 (バグ): 数字を romaji.input に渡していたため、buffer に "1"
@@ -641,19 +717,33 @@ impl NukoInputController {
             Self::hide_candidate_panel();
             Self::insert_text_on_client(client, &decision.commit_text);
 
-            // 新しい文字の入力を開始
+            // 新しい文字の入力を開始。
+            //
+            // ★ 数字と全角化する記号は romaji.input に渡さず **直接挿入** する。
+            //   渡すと romaji buffer に滞留して「2」→ buffer="2" のまま次入力と結合し
+            //   変換が壊れる (2026-09 ユーザー報告「候補中に 2 を打つと変換が強制終了」)。
+            //   = 候補表示中は 627 行の digit/記号パススルーが効かないため、ここで補う。
             let mut state = self.ivars().state.borrow_mut();
+            let mut passthrough = String::new();
             for c in text.chars() {
-                if c.is_ascii_graphic() {
+                if c.is_ascii_digit() {
+                    passthrough.push(c);
+                } else if let Some(fw) = ascii_to_fullwidth_punctuation(c) {
+                    passthrough.push_str(fw);
+                } else if c.is_ascii_graphic() {
                     let kana = state.romaji.input(c);
                     if !kana.is_empty() {
                         state.composition.push_str(&kana);
                     }
                 }
             }
-            state.is_composing = true;
+            let composing = !state.composition.is_empty() || !state.romaji.buffer().is_empty();
+            state.is_composing = composing;
             let display = state.display_text();
             drop(state);
+            if !passthrough.is_empty() {
+                Self::insert_text_on_client(client, &passthrough);
+            }
             Self::set_marked_text_on_client(client, &display);
             return Bool::YES;
         }
@@ -1573,5 +1663,37 @@ impl NukoInputController {
 
         debug_log(&format!("caret_screen_point: final pos=({x:.1},{y:.1})"));
         NSPoint::new(x, y)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ascii_to_fullwidth_punctuation, punctuation_variants};
+
+    /// ★ 候補を持つ句読点 (? !) は変種リストを返し、第1要素が全角既定。
+    #[test]
+    fn punctuation_variants_for_question_and_bang() {
+        let q = punctuation_variants('?').expect("? は候補あり");
+        assert_eq!(q[0], "？", "★ 既定は全角？");
+        assert!(q.contains(&"?"), "★ 半角? も選べる");
+
+        let b = punctuation_variants('!').expect("! は候補あり");
+        assert_eq!(b[0], "！", "★ 既定は全角！");
+        assert!(b.contains(&"!"), "★ 半角! も選べる");
+
+        // 変種の要らない句読点は None (= 従来どおり即挿入)
+        assert!(punctuation_variants(',').is_none(), ", は変種なし");
+        assert!(punctuation_variants('.').is_none(), ". は変種なし");
+        assert!(punctuation_variants('a').is_none(), "英字は対象外");
+    }
+
+    /// ? ! は即挿入テーブルにも残るが、実際は punctuation_variants が先に横取りする。
+    /// (回帰: 変種テーブルと即挿入テーブルの既定全角が一致していること)
+    #[test]
+    fn fullwidth_default_matches_variants_first() {
+        assert_eq!(ascii_to_fullwidth_punctuation('?'), Some("？"));
+        assert_eq!(punctuation_variants('?').unwrap()[0], "？");
+        assert_eq!(ascii_to_fullwidth_punctuation('!'), Some("！"));
+        assert_eq!(punctuation_variants('!').unwrap()[0], "！");
     }
 }
