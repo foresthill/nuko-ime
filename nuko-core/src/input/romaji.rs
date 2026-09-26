@@ -41,8 +41,15 @@ impl RomajiConverter {
         // この状態は kanna 互換のため buffer に "n" を残しているが、
         // 次に来る文字によって解釈を変える必要がある:
         //
-        //   - 母音 / y → buffer="n" 維持。"na"/"nya" で「な」「にゃ」を作る (kanna 互換)
-        //   - n        → 新音節の n と解釈し buffer="n" 維持 (konnnichi 対応)
+        //   - 母音   → buffer="n" 維持。"na" 等で「な」行を作る (kanna→かんな 互換)
+        //   - n      → 新音節の n と解釈し buffer="n" 維持 (konnnichi 対応)
+        //   - y      → **余剰 n を捨てる**。"nnyou"→んよう / "honnyaku"→ほんやく に
+        //              する (2026-09 修正)。標準規約では「ん+や/ゆ/よ」は "nn" で
+        //              入力する (引用=innyou, 金曜=kinnyou, 翻訳=honnyaku, 信用=shinnyou)。
+        //              旧実装は y も n を維持していたため "nnyou"→んにょう になり、
+        //              これら超頻出語が打てなかった (ユーザー報告)。にゃ/にょ (yōon) は
+        //              単一 n ("nyou"→にょう) で従来どおり出せる。こんにゃく等の
+        //              「ん+にゃ行」は "konnnyaku" (n 3 個) で入力する。
         //   - 上記以外 (子音) → 余剰 n を捨てて新音節として処理
         //
         // 子音ケースの例: "konnbannha" (こん+ばん+は) で nn→ん の後に b/h が来る。
@@ -53,7 +60,7 @@ impl RomajiConverter {
             if c_lower == 'n' {
                 return String::new();
             }
-            if !is_vowel(c_lower) && c_lower != 'y' {
+            if !is_vowel(c_lower) {
                 self.buffer.clear();
             }
         }
@@ -262,7 +269,18 @@ mod tests {
     #[case("han'ei", "はんえい")] // 「繁栄」: アポストロフィ方式
     #[case("hannei", "はんねい")] // アポストロフィ無しは んね (nn→ん の後 ne)
     #[case("kojin'you", "こじんよう")] // 「個人用」: アポストロフィ方式
-    #[case("kojinyou", "こじにょう")] // アポストロフィ無しは にょう (ny が最長一致)
+    #[case("kojinyou", "こじにょう")]
+    // アポストロフィ無しは にょう (ny が最長一致)
+    // ★ 「ん + や/ゆ/よ」= nn で入力する標準規約 (2026-09 修正、宝)。
+    //    旧実装は nn+y を にゃ行にしていて超頻出語が打てなかった (ユーザー報告: 引用)。
+    #[case("innyou", "いんよう")] // 引用
+    #[case("innyoubun", "いんようぶん")] // 引用文 (元の報告ケース)
+    #[case("kinnyoubi", "きんようび")] // 金曜日
+    #[case("honnyaku", "ほんやく")] // 翻訳
+    #[case("shinnyou", "しんよう")] // 信用
+    #[case("shinnya", "しんや")] // 真夜 (アポストロフィ無しでも打てる)
+    #[case("zennyu", "ぜんゆ")] // ん + ゆ
+    #[case("konnnyaku", "こんにゃく")] // ん+にゃ は n 3 個 (nn→ん + nya→にゃ)
     #[case("hon'ya", "ほんや")]
     #[case("hen", "へん")]
     #[case("henn", "へん")]
