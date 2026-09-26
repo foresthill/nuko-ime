@@ -1366,6 +1366,50 @@ impl NukoInputController {
         Bool::YES
     }
 
+    /// flat モード (segmented=None) で Shift+←→ が押されたとき、現在の読みから
+    /// 文節分割を組んで **文節編集モードに入る**。
+    ///
+    /// nn 曖昧語 (ん+な行) 等で flat に落ちた入力は文節が無く、Shift+←→ による
+    /// 境界調整も文節ごとの候補選択もできなかった。この押下で `convert_segmented` を
+    /// (nn 判定を無視して) 直接呼び、2 文節以上あれば segmented モードに切替える。
+    /// この初回押下では伸縮まではせず「文節を提示する」だけに留める (以降の
+    /// ←→ 移動 / Shift+←→ 伸縮 / 候補選択が使えるようになる)。
+    ///
+    /// 読みが空 / 2 文節未満 / libakaza 無効なら何もせず `Bool::YES` で消費する。
+    #[cfg(feature = "akaza")]
+    fn enter_segmented_from_flat(&self, client: &AnyObject) -> Bool {
+        let reading = {
+            let state = self.ivars().state.borrow();
+            state.composition.clone()
+        };
+        if reading.is_empty() {
+            return Bool::YES;
+        }
+        let built = with_engine(|engine| engine.convert_segmented(&reading));
+        let Ok(Some(seg)) = built else {
+            return Bool::YES;
+        };
+        if seg.segments.len() < 2 {
+            // 単一文節では文節編集の意味が無い (= no-op 消費)
+            return Bool::YES;
+        }
+        debug_log(&format!(
+            "enter_segmented_from_flat: '{reading}' → {} segments",
+            seg.segments.len()
+        ));
+        let surface = seg.current_surface();
+        let (focus_start, focus_len) = seg.focused_surface_range_utf16();
+        let focused_candidates = Self::candidate_list_from_segment(&seg, seg.focused);
+        {
+            let mut state = self.ivars().state.borrow_mut();
+            state.segmented = Some(seg);
+            state.candidates = Some(focused_candidates);
+        }
+        Self::set_marked_text_focused(client, &surface, focus_start, focus_len);
+        self.show_candidate_panel(client);
+        Bool::YES
+    }
+
     /// focused 文節を伸縮する (Shift+→ で伸長 / Shift+← で縮小、segmented モードのみ)。
     ///
     /// libakaza に `force_ranges` で再変換させ、新しい `SegmentedConversion` に
@@ -1380,8 +1424,18 @@ impl NukoInputController {
             state.segmented.clone()
         };
         let Some(segmented) = segmented else {
-            // segmented でない (単一文節 / flat) → no-op 消費
-            return Bool::YES;
+            // segmented でない (flat / 単一文節) → その場で文節分割を組んで
+            // **文節編集モードに入る**。nn 曖昧語 (ん+な行) 等で flat に落ちた入力でも、
+            // 手動で文節を出して境界調整・文節ごとの候補選択ができるようにする
+            // (2026-09 ユーザー要望「文節が無いとき文節を追加できない」)。
+            #[cfg(feature = "akaza")]
+            {
+                return self.enter_segmented_from_flat(client);
+            }
+            #[cfg(not(feature = "akaza"))]
+            {
+                return Bool::YES;
+            }
         };
 
         // 2. エンジンで伸縮再変換 (akaza 有効時のみ実効)
