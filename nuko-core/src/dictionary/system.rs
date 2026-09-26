@@ -790,6 +790,18 @@ static READING_TO_SURFACE: Lazy<HashMap<String, Vec<(String, String)>>> = Lazy::
             .extend(surface_list);
     }
 
+    // 絵文字「一式」を同じマージ挿入で流し込む (別モジュール emoji.rs)。
+    // 読みが被る語 (いぬ→犬/イヌ 等) には絵文字が **追加** され、既存候補は潰さない。
+    for (reading, surfaces) in super::emoji::emoji_entries() {
+        let surface_list: Vec<(String, String)> = surfaces
+            .into_iter()
+            .map(|(s, pos)| (s.to_string(), pos.to_string()))
+            .collect();
+        map.entry(reading.to_string())
+            .or_default()
+            .extend(surface_list);
+    }
+
     map
 });
 
@@ -1023,6 +1035,43 @@ mod tests {
         assert!(has("かっこ", "「"), "かっこ→「");
         // 顔文字
         assert!(has("かおもじ", "(^_^)"), "かおもじ→(^_^)");
+    }
+
+    /// ★ 絵文字「一式」(emoji.rs) が読みから引ける (2026-09 ユーザー要望: ☺️ 系表情 + 日常一式)。
+    #[test]
+    fn emoji_set_present() {
+        let dict = SystemDictionary::new().unwrap();
+        let has = |reading: &str, surface: &str| {
+            dict.lookup(reading)
+                .unwrap()
+                .iter()
+                .any(|c| c.surface == surface)
+        };
+        // 表情 (ユーザーが例示した ☺️ を含む)
+        assert!(has("にこ", "☺️"), "にこ→☺️");
+        assert!(has("えがお", "☺️"), "えがお→☺️");
+        assert!(has("にっこり", "😊"), "にっこり→😊");
+        assert!(has("うれしい", "😊"), "うれしい→😊");
+        assert!(has("かなしい", "😢"), "かなしい→😢");
+        assert!(has("わらう", "😂"), "わらう→😂");
+        assert!(has("ぴえん", "🥺"), "ぴえん→🥺");
+        // ジェスチャー・ハート
+        assert!(has("がんばれ", "💪"), "がんばれ→💪");
+        assert!(has("はーと", "❤️"), "はーと→❤️");
+        // 動物・食・天気・物
+        assert!(has("ぱんだ", "🐼"), "ぱんだ→🐼");
+        assert!(has("すし", "🍣"), "すし→🍣");
+        assert!(has("はれ", "☀️"), "はれ→☀️");
+        assert!(has("すまほ", "📱"), "すまほ→📱");
+        // 既存の実在語に絵文字が **追加** される (犬/猫 は残る)
+        assert!(
+            has("いぬ", "犬") && has("いぬ", "🐕"),
+            "いぬ→犬 と 🐕 が両立"
+        );
+        assert!(
+            has("ねこ", "猫") && has("ねこ", "🐈"),
+            "ねこ→猫 と 🐈 が両立"
+        );
     }
 
     /// ★ マージ挿入: 記号/絵文字を足しても **既存の語候補を潰さない**。
