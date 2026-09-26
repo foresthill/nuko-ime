@@ -517,9 +517,15 @@ impl NukoInputController {
         // 数字キー 1-9: 候補表示中なら該当 line の候補を確定する
         // (一般的な日本語 IME の慣例。IMKCandidates のデフォルト selectionKeys と一致)
         //
+        // ★ ただし **文節 (segmented) モードでは無効**。文を打って記号を足すと
+        //   (PR #91 で確定されず) 文節変換が続くため、「数字はまだ駄目だ。」の後に
+        //   「1」を打つと文全体が候補選択で確定され数字が打てなかった
+        //   (2026-09 ユーザー報告)。segmented では数字は数字として打たせ、
+        //   単語1つの flat 候補 / ? 変種メニューのときだけ番号選択を効かせる。
+        //
         // 決定ロジックは純粋関数 `crate::commit::decide_digit_select_and_commit` に
-        // 委譲。`unit test` でカバー済み (segmented mode のデータ消失防止含む)。
-        if state.candidates.is_some() && text.chars().count() == 1 {
+        // 委譲。`unit test` でカバー済み。
+        if state.segmented.is_none() && state.candidates.is_some() && text.chars().count() == 1 {
             if let Some(digit_char) = text.chars().next() {
                 if let Some(decision) =
                     crate::commit::decide_digit_select_and_commit(&state, digit_char)
