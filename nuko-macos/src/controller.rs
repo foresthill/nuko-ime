@@ -514,101 +514,68 @@ impl NukoInputController {
             }
         }
 
-        // 数字キー 1-9: 候補表示中なら該当 line の候補を確定する
-        // (一般的な日本語 IME の慣例。IMKCandidates のデフォルト selectionKeys と一致)
-        //
-        // ★ ただし **文節 (segmented) モードでは無効**。文を打って記号を足すと
-        //   (PR #91 で確定されず) 文節変換が続くため、「数字はまだ駄目だ。」の後に
-        //   「1」を打つと文全体が候補選択で確定され数字が打てなかった
-        //   (2026-09 ユーザー報告)。segmented では数字は数字として打たせ、
-        //   単語1つの flat 候補 / ? 変種メニューのときだけ番号選択を効かせる。
-        //
-        // 決定ロジックは純粋関数 `crate::commit::decide_digit_select_and_commit` に
-        // 委譲。`unit test` でカバー済み。
-        if state.segmented.is_none() && state.candidates.is_some() && text.chars().count() == 1 {
-            if let Some(digit_char) = text.chars().next() {
-                if let Some(decision) =
-                    crate::commit::decide_digit_select_and_commit(&state, digit_char)
-                {
-                    let line_idx = (digit_char as usize) - ('1' as usize);
+        // (旧「数字キー 1-9 で候補選択」機能は廃止。数字入力を食う不具合が
+        //  続いたため — 「数字はまだ駄目だ。」の後の 1 が候補選択になる等。2026-09。
+        //  数字は下記の統一処理で常に「入力」する。)
 
-                    // 副作用: 状態を decide の決定に合わせて更新
-                    if let Some(candidates) = state.candidates.as_mut() {
-                        candidates.select(line_idx);
-                    }
-                    if let Some(segmented) = state.segmented.as_mut() {
-                        let focused = segmented.focused;
-                        if let Some(seg) = segmented.segments.get_mut(focused) {
-                            seg.select(line_idx);
-                        }
-                    }
-
-                    // 副作用: 学習
-                    let ctx_snapshot = state.context.clone();
-                    for c in &decision.learn_targets {
-                        with_engine_mut(|engine| {
-                            let _ = engine.commit(c, &ctx_snapshot);
-                        });
-                    }
-                    state.context.push_prev_word(&decision.commit_text);
-                    state.reset();
-                    drop(state);
-                    Self::hide_candidate_panel();
-                    Self::insert_text_on_client(client, &decision.commit_text);
-                    debug_log(&format!(
-                        "digit-{digit_char}: committed line {line_idx} = '{}'",
-                        decision.commit_text
-                    ));
-                    return Bool::YES;
-                }
-                // 数字 1-9 だが候補数を超える等 → fallthrough
-            }
-        }
-
-        // 句読点・記号の統一処理。**記号では確定しない** (2026-09 ユーザー:
-        // 「記号で勝手に確定されるのはおかしい」)。libakaza は「にほんご？」→
-        // [日本語][？] のように記号を独立文節として扱えるので、記号を読みに足して
-        // 未確定のまま編集を続けられる。Enter で全体を確定する。
+        // 記号・数字の統一処理。**記号・数字では確定しない** (2026-09 ユーザー:
+        // 「記号で勝手に確定されるのはおかしい」「数字を打つとかなが確定される」)。
+        // libakaza は「にほんご？」→[日本語][？]、「こんにちは1」→[こんにちは][1] の
+        // ように記号・数字を独立文節として扱えるので、読みに足して未確定のまま編集を
+        // 続けられる。Enter で全体を確定する。
         //
-        // - 変換済み (候補/文節を表示中): 記号を読みに足して **再変換** し、
-        //   「認識相違ありますか？」を1つの未確定のかたまりとして保つ。
-        // - 生かな入力中: 記号を読みに足して生のまま表示 (Space 変換前)。
-        // - 先頭 (読みが空): ? ! は候補メニュー (？/?/⁇/❓) を seed、
-        //   それ以外 (、。・「」等) は全角で直接挿入。
+        // - 入力中 (読みがある): 記号/数字を読みに足す。変換済みなら再変換、
+        //   生かな入力中なら生のまま表示 (Space 変換前)。
+        // - 先頭 (読みが空):
+        //     数字 → 即挿入 (速さ優先、従来どおり)。
+        //     ? ! → 候補メニュー (？/?/⁇/❓) を seed。
+        //     その他記号 (、。・「」等) → 全角で直接挿入。
         if text.chars().count() == 1 {
             if let Some(ch) = text.chars().next() {
-                let fullwidth: Option<&'static str> = punctuation_variants(ch)
+                let is_digit = ch.is_ascii_digit();
+                let punct_fw: Option<&'static str> = punctuation_variants(ch)
                     .map(|v| v[0])
                     .or_else(|| ascii_to_fullwidth_punctuation(ch));
-                if let Some(fw) = fullwidth {
+                if is_digit || punct_fw.is_some() {
                     let has_reading =
                         !state.composition.is_empty() || !state.romaji.buffer().is_empty();
                     let converted = state.candidates.is_some() || state.segmented.is_some();
 
                     if has_reading {
-                        // 記号を読みに足す (確定しない)。
+                        // 記号/数字を読みに足す (確定しない)。数字は半角のまま足す
+                        // (libakaza が [読み][1] と割る。全角/漢数字は変換で選べる)。
                         let remaining = state.romaji.flush();
                         if !remaining.is_empty() {
                             state.composition.push_str(&remaining);
                         }
-                        state.composition.push_str(fw);
+                        match punct_fw {
+                            Some(fw) => state.composition.push_str(fw),
+                            None => state.composition.push(ch),
+                        }
                         state.is_composing = true;
                         if converted {
-                            // 変換済みなら再変換して [変換結果][記号] を表示。
+                            // 変換済みなら再変換して [変換結果][記号/数字] を表示。
                             drop(state);
-                            debug_log(&format!("punct-append: '{ch}' → 再変換"));
+                            debug_log(&format!("append-reconvert: '{ch}'"));
                             self.do_convert(client);
                         } else {
                             // 生かな入力中は生のまま表示 (Space 変換前)。
                             let display = state.display_text();
                             drop(state);
-                            debug_log(&format!("punct-append: '{ch}' → 生表示 '{display}'"));
+                            debug_log(&format!("append-raw: '{ch}' → '{display}'"));
                             Self::set_marked_text_on_client(client, &display);
                         }
                         return Bool::YES;
                     }
 
-                    // 先頭の記号 (読みが空)。
+                    // 先頭 (読みが空)。
+                    if is_digit {
+                        // 数字は即挿入 (速さ優先)。
+                        drop(state);
+                        Self::insert_text_on_client(client, &ch.to_string());
+                        debug_log(&format!("digit-passthrough(先頭): '{ch}'"));
+                        return Bool::YES;
+                    }
                     if let Some(variants) = punctuation_variants(ch) {
                         // ? ! → 候補メニューを seed (Space で ？/?/⁇/❓ を選べる)。
                         let mut list = CandidateList::new();
@@ -631,78 +598,10 @@ impl NukoInputController {
                         return Bool::YES;
                     }
                     // その他 (、。・「」等) は全角で直接挿入。
+                    let fw = punct_fw.unwrap();
                     drop(state);
                     Self::insert_text_on_client(client, fw);
                     debug_log(&format!("punct-insert: '{ch}' → '{fw}'"));
-                    return Bool::YES;
-                }
-            }
-        }
-
-        // 数字 0-9 は IME 変換対象外。
-        //
-        // 旧挙動 (バグ): 数字を romaji.input に渡していたため、buffer に "1"
-        // が滞留して "1tu" → buffer="1tu" → flush で composition に "1tu" 注入
-        // → engine.convert("1tu") で意味不明な変換が出ていた
-        // (ユーザー報告 2026-06-07: 「1tu」と打ちたいのに「統治体のに」になる)。
-        //
-        // 修正: 候補表示なし & 単一の半角数字なら、
-        //   - 現在の composition があれば flush + 確定して insert
-        //   - そのあと数字を直接 insertText でホストに渡す
-        // 一般的な日本語 IME (Google 日本語入力 / ATOK / ことえり) と同じ挙動。
-        if state.candidates.is_none() && text.chars().count() == 1 {
-            if let Some(ch) = text.chars().next() {
-                if ch.is_ascii_digit() {
-                    let mut commit_text = String::new();
-                    if state.is_composing || !state.romaji.buffer().is_empty() {
-                        let remaining = state.romaji.flush();
-                        if !remaining.is_empty() {
-                            state.composition.push_str(&remaining);
-                        }
-                        commit_text = state.composition.clone();
-                        if !commit_text.is_empty() {
-                            state.context.push_prev_word(&commit_text);
-                        }
-                        state.reset();
-                    }
-                    drop(state);
-                    if !commit_text.is_empty() {
-                        Self::insert_text_on_client(client, &commit_text);
-                    }
-                    Self::insert_text_on_client(client, &text);
-                    debug_log(&format!(
-                        "digit-passthrough: prev_commit='{commit_text}' digit='{text}'"
-                    ));
-                    return Bool::YES;
-                }
-
-                // 全角記号変換: ASCII 句読点・記号を 全角 に置き換えて挿入。
-                // ユーザー報告 (2026-06-10): 「全角記号が打てない」。
-                //
-                // 一般的な日本語 IME (Google 日本語入力 / ATOK / ことえり) 同様、
-                // composition が無い時に「.」を打つと「。」、「?」 → 「？」 等。
-                // composition がある場合は flush + commit してから記号挿入。
-                if let Some(fullwidth) = ascii_to_fullwidth_punctuation(ch) {
-                    let mut commit_text = String::new();
-                    if state.is_composing || !state.romaji.buffer().is_empty() {
-                        let remaining = state.romaji.flush();
-                        if !remaining.is_empty() {
-                            state.composition.push_str(&remaining);
-                        }
-                        commit_text = state.composition.clone();
-                        if !commit_text.is_empty() {
-                            state.context.push_prev_word(&commit_text);
-                        }
-                        state.reset();
-                    }
-                    drop(state);
-                    if !commit_text.is_empty() {
-                        Self::insert_text_on_client(client, &commit_text);
-                    }
-                    Self::insert_text_on_client(client, fullwidth);
-                    debug_log(&format!(
-                        "fullwidth-punct: '{ch}' → '{fullwidth}' (prev_commit='{commit_text}')"
-                    ));
                     return Bool::YES;
                 }
             }
