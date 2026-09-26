@@ -559,63 +559,75 @@ impl NukoInputController {
             }
         }
 
-        // 候補を持つ句読点 (? !) は即挿入せず composition + 候補として seed する。
-        // Space で ？/? 等を切替え、次入力/Enter で選択中を確定 (既存機構に乗る)。
-        // 2026-09 ユーザー要望「? がすぐ確定されて変換候補にならない」。
-        // 候補表示中でも動くよう `candidates.is_none()` ゲートの外に置く (連続 "??" 対応)。
+        // 句読点・記号の統一処理。**記号では確定しない** (2026-09 ユーザー:
+        // 「記号で勝手に確定されるのはおかしい」)。libakaza は「にほんご？」→
+        // [日本語][？] のように記号を独立文節として扱えるので、記号を読みに足して
+        // 未確定のまま編集を続けられる。Enter で全体を確定する。
+        //
+        // - 変換済み (候補/文節を表示中): 記号を読みに足して **再変換** し、
+        //   「認識相違ありますか？」を1つの未確定のかたまりとして保つ。
+        // - 生かな入力中: 記号を読みに足して生のまま表示 (Space 変換前)。
+        // - 先頭 (読みが空): ? ! は候補メニュー (？/?/⁇/❓) を seed、
+        //   それ以外 (、。・「」等) は全角で直接挿入。
         if text.chars().count() == 1 {
             if let Some(ch) = text.chars().next() {
-                if let Some(variants) = punctuation_variants(ch) {
-                    // 既存の未確定を先に確定する。**decide_commit を使う** ことで
-                    // segmented (全文節連結 + 全文節学習) / flat 候補 / 未変換かな の
-                    // 全ケースを正しく確定する。旧実装は candidates.selected() だけを
-                    // 見ていたため、segmented 中に ? を打つと focused 文節以外が消えた
-                    // (2026-09 ユーザー報告「認識相違…の未変換部分が消える」)。
-                    let mut commit_text = String::new();
-                    if state.candidates.is_some()
-                        || state.is_composing
-                        || !state.romaji.buffer().is_empty()
-                    {
+                let fullwidth: Option<&'static str> = punctuation_variants(ch)
+                    .map(|v| v[0])
+                    .or_else(|| ascii_to_fullwidth_punctuation(ch));
+                if let Some(fw) = fullwidth {
+                    let has_reading =
+                        !state.composition.is_empty() || !state.romaji.buffer().is_empty();
+                    let converted = state.candidates.is_some() || state.segmented.is_some();
+
+                    if has_reading {
+                        // 記号を読みに足す (確定しない)。
                         let remaining = state.romaji.flush();
                         if !remaining.is_empty() {
                             state.composition.push_str(&remaining);
                         }
-                        let decision = crate::commit::decide_commit(&state);
-                        let ctx_snapshot = state.context.clone();
-                        for c in &decision.learn_targets {
-                            with_engine_mut(|engine| {
-                                let _ = engine.commit(c, &ctx_snapshot);
-                            });
+                        state.composition.push_str(fw);
+                        state.is_composing = true;
+                        if converted {
+                            // 変換済みなら再変換して [変換結果][記号] を表示。
+                            drop(state);
+                            debug_log(&format!("punct-append: '{ch}' → 再変換"));
+                            self.do_convert(client);
+                        } else {
+                            // 生かな入力中は生のまま表示 (Space 変換前)。
+                            let display = state.display_text();
+                            drop(state);
+                            debug_log(&format!("punct-append: '{ch}' → 生表示 '{display}'"));
+                            Self::set_marked_text_on_client(client, &display);
                         }
-                        if !decision.commit_text.is_empty() {
-                            state.context.push_prev_word(&decision.commit_text);
+                        return Bool::YES;
+                    }
+
+                    // 先頭の記号 (読みが空)。
+                    if let Some(variants) = punctuation_variants(ch) {
+                        // ? ! → 候補メニューを seed (Space で ？/?/⁇/❓ を選べる)。
+                        let mut list = CandidateList::new();
+                        for (i, v) in variants.iter().enumerate() {
+                            list.push(
+                                Candidate::new(*v, "")
+                                    .with_score(-(i as i32))
+                                    .with_source(CandidateSource::System),
+                            );
                         }
-                        commit_text = decision.commit_text;
-                        state.reset();
+                        list.select(0);
+                        state.composition = variants[0].to_string();
+                        state.candidates = Some(list);
+                        state.segmented = None;
+                        state.is_composing = true;
+                        drop(state);
+                        Self::set_marked_text_on_client(client, variants[0]);
+                        self.show_candidate_panel(client);
+                        debug_log(&format!("punct-seed: '{ch}' → {variants:?}"));
+                        return Bool::YES;
                     }
-                    // 新しい記号を composition + 候補として seed (reading は空 = 学習しない)。
-                    let mut list = CandidateList::new();
-                    for (i, v) in variants.iter().enumerate() {
-                        list.push(
-                            Candidate::new(*v, "")
-                                .with_score(-(i as i32))
-                                .with_source(CandidateSource::System),
-                        );
-                    }
-                    list.select(0);
-                    state.composition = variants[0].to_string();
-                    state.candidates = Some(list);
-                    state.segmented = None;
-                    state.is_composing = true;
+                    // その他 (、。・「」等) は全角で直接挿入。
                     drop(state);
-                    if !commit_text.is_empty() {
-                        Self::insert_text_on_client(client, &commit_text);
-                    }
-                    Self::set_marked_text_on_client(client, variants[0]);
-                    self.show_candidate_panel(client);
-                    debug_log(&format!(
-                        "punct-candidates: '{ch}' seed {variants:?} 先行確定='{commit_text}'"
-                    ));
+                    Self::insert_text_on_client(client, fw);
+                    debug_log(&format!("punct-insert: '{ch}' → '{fw}'"));
                     return Bool::YES;
                 }
             }
