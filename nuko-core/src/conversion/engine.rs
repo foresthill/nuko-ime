@@ -804,6 +804,8 @@ mod tests {
             "まつやさんなんとか", // 「んな」を含み nn 曖昧扱い → corrections_applied で救済
             "じかんなるとき",     // nn: 訂正なし → corrections_applied=false (flat へ)
             "せんねん",           // nn: 千円
+            "みのさんに",         // ユーザー報告: flat で Shift しても文節にならない
+            "みのさん",
         ] {
             let nn = super::nn_alternate_readings(input).len() > 1;
             println!("\n=== 入力: {input} (nn_ambiguous={nn}) ===");

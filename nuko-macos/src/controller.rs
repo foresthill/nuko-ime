@@ -1423,6 +1423,10 @@ impl NukoInputController {
             let state = self.ivars().state.borrow();
             state.segmented.clone()
         };
+        debug_log(&format!(
+            "handle_segment_resize: extend_right={extend_right} segmented={} (None=flat→文節生成を試みる)",
+            segmented.is_some()
+        ));
         let Some(segmented) = segmented else {
             // segmented でない (flat / 単一文節) → その場で文節分割を組んで
             // **文節編集モードに入る**。nn 曖昧語 (ん+な行) 等で flat に落ちた入力でも、
