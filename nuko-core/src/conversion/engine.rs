@@ -804,6 +804,8 @@ mod tests {
             "まつやさんなんとか", // 「んな」を含み nn 曖昧扱い → corrections_applied で救済
             "じかんなるとき",     // nn: 訂正なし → corrections_applied=false (flat へ)
             "せんねん",           // nn: 千円
+            "みのさんに",         // ユーザー報告: flat で Shift しても文節にならない
+            "みのさん",
         ] {
             let nn = super::nn_alternate_readings(input).len() > 1;
             println!("\n=== 入力: {input} (nn_ambiguous={nn}) ===");
@@ -832,6 +834,22 @@ mod tests {
                             cands
                         );
                     }
+                }
+            }
+        }
+
+        // 単一文節「みのさん」を Shift+← (extend_left) で割れるか確認。
+        println!("\n=== resize 単一文節: みのさん を Shift+← ===");
+        if let Some(seg) = engine.convert_segmented("みのさん").unwrap() {
+            match engine
+                .resize_segment(&seg, /*extend_right=*/ false)
+                .unwrap()
+            {
+                None => println!("  resize None (割れない)"),
+                Some(rs) => {
+                    let readings: Vec<&str> =
+                        rs.segments.iter().map(|s| s.reading.as_str()).collect();
+                    println!("  → {} 文節 読み={:?}", rs.segments.len(), readings);
                 }
             }
         }
