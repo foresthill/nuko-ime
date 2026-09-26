@@ -837,6 +837,22 @@ mod tests {
                 }
             }
         }
+
+        // 単一文節「みのさん」を Shift+← (extend_left) で割れるか確認。
+        println!("\n=== resize 単一文節: みのさん を Shift+← ===");
+        if let Some(seg) = engine.convert_segmented("みのさん").unwrap() {
+            match engine
+                .resize_segment(&seg, /*extend_right=*/ false)
+                .unwrap()
+            {
+                None => println!("  resize None (割れない)"),
+                Some(rs) => {
+                    let readings: Vec<&str> =
+                        rs.segments.iter().map(|s| s.reading.as_str()).collect();
+                    println!("  → {} 文節 読み={:?}", rs.segments.len(), readings);
+                }
+            }
+        }
     }
 
     #[cfg(feature = "akaza")]
