@@ -806,6 +806,7 @@ mod tests {
             "せんねん",           // nn: 千円
             "みのさんに",         // ユーザー報告: flat で Shift しても文節にならない
             "みのさん",
+            "にほんご？", // 記号混じり読みも libakaza が [日本語][？] と割る
         ] {
             let nn = super::nn_alternate_readings(input).len() > 1;
             println!("\n=== 入力: {input} (nn_ambiguous={nn}) ===");
