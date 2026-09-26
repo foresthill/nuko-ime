@@ -613,7 +613,9 @@ impl NukoInputController {
                     }
                     Self::set_marked_text_on_client(client, variants[0]);
                     self.show_candidate_panel(client);
-                    debug_log(&format!("punct-candidates: '{ch}' → seed {variants:?}"));
+                    debug_log(&format!(
+                        "punct-candidates: '{ch}' seed {variants:?} 先行確定='{commit_text}'"
+                    ));
                     return Bool::YES;
                 }
             }
