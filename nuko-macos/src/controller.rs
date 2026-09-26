@@ -527,7 +527,8 @@ impl NukoInputController {
         // - 入力中 (読みがある): 記号/数字を読みに足す。変換済みなら再変換、
         //   生かな入力中なら生のまま表示 (Space 変換前)。
         // - 先頭 (読みが空):
-        //     数字 → 即挿入 (速さ優先、従来どおり)。
+        //     数字 → composition に入れて未確定にする (Space で 全角０/漢数字 に
+        //            変換できる。続けて打てば半角、Enter で確定)。
         //     ? ! → 候補メニュー (？/?/⁇/❓) を seed。
         //     その他記号 (、。・「」等) → 全角で直接挿入。
         if text.chars().count() == 1 {
@@ -570,10 +571,15 @@ impl NukoInputController {
 
                     // 先頭 (読みが空)。
                     if is_digit {
-                        // 数字は即挿入 (速さ優先)。
+                        // 数字を composition に入れて未確定にする → Space で 全角０/漢数字
+                        // に変換できる (B: ユーザー要望 2026-09「全角数字に変えたいことも
+                        // ある」)。続けて打てば半角のまま、Enter で確定。
+                        state.composition.push(ch);
+                        state.is_composing = true;
+                        let display = state.display_text();
                         drop(state);
-                        Self::insert_text_on_client(client, &ch.to_string());
-                        debug_log(&format!("digit-passthrough(先頭): '{ch}'"));
+                        debug_log(&format!("digit-compose(先頭): '{ch}' → '{display}'"));
+                        Self::set_marked_text_on_client(client, &display);
                         return Bool::YES;
                     }
                     if let Some(variants) = punctuation_variants(ch) {
