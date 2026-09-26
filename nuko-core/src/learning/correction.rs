@@ -86,6 +86,35 @@ impl CorrectionStore {
         0
     }
 
+    /// 文節読みが「訂正読み + 非空の接尾かな」の形のとき、押し上げるべき
+    /// **目標表層** と bias の一覧を返す(完全一致は [`Self::bias`] が担うので除外)。
+    ///
+    /// libakaza は文中で名前を敬称込み 1 文節に切ることがある
+    /// (実測: 「まつやさんと…」→ 文節読み「まつやさん」候補「松也さん/松谷さん/…」)。
+    /// このとき「まつや→松谷」の学習は読みが一致せず効かない。そこで
+    /// 読み「まつやさん」= 訂正読み「まつや」+ 接尾「さん」を検出し、
+    /// 目標表層「松谷さん」= 訂正表層「松谷」+ 接尾「さん」を bias する。
+    ///
+    /// 接尾かな (さん・くん・と・の 等の敬称/助詞) はそのまま表層に出るため、
+    /// **目標表層が実在候補と完全一致したときだけ** 発火する安全な近似。
+    /// tail が漢字化される語では目標が候補に無く、no-op になる。
+    #[must_use]
+    pub fn suffix_targets(&self, seg_reading: &str) -> Vec<(String, i32)> {
+        let mut out = Vec::new();
+        for p in &self.preferences {
+            if seg_reading.len() > p.reading.len()
+                && !p.reading.is_empty()
+                && seg_reading.starts_with(&p.reading)
+            {
+                let tail = &seg_reading[p.reading.len()..];
+                let target = format!("{}{}", p.prefer, tail);
+                let bias = CORRECTION_BOOST + (p.weight as i32).saturating_mul(10).min(50_000);
+                out.push((target, bias));
+            }
+        }
+        out
+    }
+
     /// 選好が無いか。
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -338,6 +367,32 @@ mod tests {
             store.bias("でんしゃ", "電車"),
             0,
             "★ 別 reading には bias なし"
+        );
+    }
+
+    /// ★ 敬称/助詞込みで長く切られた文節読みに対し、目標表層を返す。
+    /// (回帰: まつや→松谷 の学習が「まつやさん」文節で無視された #87 実機不発)
+    #[test]
+    fn suffix_targets_matches_honorific_reading() {
+        let events = vec![commit("まつや", "松谷"), commit("まつや", "松谷")];
+        let store = extract_corrections(&events, 2);
+
+        // 「まつやさん」= まつや + さん → 目標「松谷さん」
+        let targets = store.suffix_targets("まつやさん");
+        assert!(
+            targets.iter().any(|(s, b)| s == "松谷さん" && *b > 0),
+            "★ 敬称込み読みには 松谷さん を目標に返す: {targets:?}"
+        );
+
+        // 完全一致 (接尾なし) はここでは返さない (bias() の担当)
+        assert!(
+            store.suffix_targets("まつや").is_empty(),
+            "★ 接尾なしの完全一致は suffix_targets の対象外"
+        );
+        // 前方一致しない読みは空
+        assert!(
+            store.suffix_targets("べつのなまえ").is_empty(),
+            "★ 前方一致しない読みは対象外"
         );
     }
 

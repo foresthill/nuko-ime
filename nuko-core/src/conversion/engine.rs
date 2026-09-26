@@ -79,6 +79,51 @@ pub fn nn_alternate_readings(reading: &str) -> Vec<String> {
     out
 }
 
+/// 文節別変換結果に **文節ごとの** 個人選好 (訂正学習) の bias を適用し並べ替える。
+///
+/// `convert()` (flat) と同じ bias を segmented 経路にも効かせるための関数。これが無いと
+/// 「まつや→松谷」等の学習が複数文節の文の中で無視される。corrections が空なら無変化。
+// 呼び出し元 convert_segmented は akaza-gated なので、非 akaza の lib ビルドでは未使用
+// (テストからは使う)。
+#[cfg_attr(not(feature = "akaza"), allow(dead_code))]
+pub fn apply_segment_corrections(
+    segmented: &mut super::SegmentedConversion,
+    corrections: &crate::learning::CorrectionStore,
+) {
+    if corrections.is_empty() {
+        return;
+    }
+    let mut any_changed = false;
+    for seg in &mut segmented.segments {
+        let seg_reading = seg.reading.clone();
+        let mut changed = false;
+        // (1) 読み完全一致の候補を bias (例: 文節「まつや」→ 松谷)
+        for c in &mut seg.candidates {
+            let bias = corrections.bias(&seg_reading, &c.surface);
+            if bias != 0 {
+                c.score = c.score.saturating_add(bias);
+                changed = true;
+            }
+        }
+        // (2) 敬称/助詞込みで切られた文節を bias
+        //     (例: 文節「まつやさん」→ 松谷さん。libakaza は文中で名前を「さん」込みに切る)
+        for (target, bias) in corrections.suffix_targets(&seg_reading) {
+            for c in &mut seg.candidates {
+                if c.surface == target {
+                    c.score = c.score.saturating_add(bias);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            seg.candidates.sort_by_key(|c| std::cmp::Reverse(c.score));
+            seg.select(0); // 並べ替え後の先頭 (最良) を選択に戻す
+            any_changed = true;
+        }
+    }
+    segmented.corrections_applied = any_changed;
+}
+
 /// 変換エンジン
 pub struct ConversionEngine {
     /// 辞書マネージャー
@@ -325,12 +370,16 @@ impl ConversionEngine {
         let Some(backend) = &self.libakaza else {
             return Ok(None);
         };
-        let segmented = backend.convert_segmented(reading)?;
+        let mut segmented = backend.convert_segmented(reading)?;
         if segmented.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(segmented))
+            return Ok(None);
         }
+        // Layer 2: **文節ごとに** 個人選好 (訂正学習) の bias を適用して並べ替える。
+        // flat の convert() では適用済みだが convert_segmented では未適用だったため、
+        // 「まつや→松谷」等の学習が **複数文節の文の中では効かない** バグがあった
+        // (2026-09 ユーザー報告: 単体「まつや」は松谷、「まつやさんと…」は松也)。
+        apply_segment_corrections(&mut segmented, &self.corrections);
+        Ok(Some(segmented))
     }
 
     /// 文節境界を伸縮して再変換する (Shift+→ / Shift+← 用、libakaza 有効時のみ)。
@@ -468,6 +517,144 @@ mod tests {
         assert!(candidates.iter().any(|c| c.surface == "ニホン"));
     }
 
+    /// ★ 学習 (corrections) が **文節ごと** に効き、複数文節の文の中でも順位が直る。
+    /// (まつや→松谷 を学習したら「まつやさんと…」の中の まつや 文節でも松谷が1位)
+    #[test]
+    fn segment_corrections_reorder_within_sentence() {
+        use crate::conversion::{Segment, SegmentedConversion};
+        use crate::learning::{extract_corrections, ObservationEvent};
+
+        // まつや→松谷 を学習 (既定でない候補を選んだ = 1回で選好化)
+        let store = extract_corrections(
+            &[ObservationEvent::commit_with_candidates(
+                "まつや",
+                "松谷",
+                vec!["松也".into(), "松谷".into()],
+                Some(1),
+            )],
+            2,
+        );
+
+        // 文「まつやさんと」= [まつや(既定 松也), さんと] を模した segmented
+        let cand = |s: &str, r: &str, score: i32| {
+            Candidate::new(s, r)
+                .with_score(score)
+                .with_source(CandidateSource::System)
+        };
+        let mut segmented = SegmentedConversion::new(vec![
+            Segment::new(
+                "まつや",
+                vec![cand("松也", "まつや", 0), cand("松谷", "まつや", -10)],
+            ),
+            Segment::new("さんと", vec![cand("さんと", "さんと", 0)]),
+        ]);
+
+        // 適用前: まつや文節の先頭は 松也
+        assert_eq!(segmented.segments[0].surface(), Some("松也"));
+
+        apply_segment_corrections(&mut segmented, &store);
+
+        // 適用後: 学習により 松谷 が先頭に
+        assert_eq!(
+            segmented.segments[0].surface(),
+            Some("松谷"),
+            "★ 文節の中でも学習した松谷が1位"
+        );
+        // 他文節は不変
+        assert_eq!(segmented.segments[1].surface(), Some("さんと"));
+    }
+
+    /// ★ 敬称込みで切られた文節でも学習が効く (回帰: #87 が実機で効かなかった件)。
+    /// libakaza は文中で「まつやさんと…」を文節読み「まつやさん」に敬称込みで切る。
+    /// 学習は「まつや→松谷」なので読み完全一致では当たらない。suffix_targets 経由で
+    /// 「松谷さん」(= 松谷 + さん) を押し上げる。
+    #[test]
+    fn segment_corrections_apply_to_honorific_suffixed_bunsetsu() {
+        use crate::conversion::{Segment, SegmentedConversion};
+        use crate::learning::{extract_corrections, ObservationEvent};
+
+        // まつや→松谷 を学習 (「まつや」単体の読みで)
+        let store = extract_corrections(
+            &[ObservationEvent::commit_with_candidates(
+                "まつや",
+                "松谷",
+                vec!["松也".into(), "松谷".into()],
+                Some(1),
+            )],
+            2,
+        );
+
+        let cand = |s: &str, r: &str, score: i32| {
+            Candidate::new(s, r)
+                .with_score(score)
+                .with_source(CandidateSource::System)
+        };
+        // 実機 libakaza の分割を模す: 文節読み「まつやさん」候補は敬称込み表層
+        let mut segmented = SegmentedConversion::new(vec![
+            Segment::new(
+                "まつやさん",
+                vec![
+                    cand("松也さん", "まつやさん", 0),
+                    cand("松屋さん", "まつやさん", -5),
+                    cand("松谷さん", "まつやさん", -10),
+                ],
+            ),
+            Segment::new("と", vec![cand("と", "と", 0)]),
+        ]);
+
+        assert_eq!(
+            segmented.segments[0].surface(),
+            Some("松也さん"),
+            "適用前は既定 松也さん"
+        );
+
+        apply_segment_corrections(&mut segmented, &store);
+
+        assert_eq!(
+            segmented.segments[0].surface(),
+            Some("松谷さん"),
+            "★ 敬称込み文節でも学習した松谷(さん)が1位"
+        );
+        assert_eq!(segmented.segments[1].surface(), Some("と"));
+        assert!(
+            segmented.corrections_applied,
+            "★ 学習が効いたら corrections_applied が立つ (nn 曖昧語で flat より優先する判定に使う)"
+        );
+    }
+
+    /// ★ 学習にマッチしない文節では corrections_applied は立たない。
+    /// (nn 曖昧語で「訂正が無ければ flat (ん+母音 代替) を使う」判定の土台)
+    #[test]
+    fn segment_corrections_flag_false_when_no_match() {
+        use crate::conversion::{Segment, SegmentedConversion};
+        use crate::learning::{extract_corrections, ObservationEvent};
+
+        let store = extract_corrections(
+            &[ObservationEvent::commit_with_candidates(
+                "まつや",
+                "松谷",
+                vec!["松也".into(), "松谷".into()],
+                Some(1),
+            )],
+            2,
+        );
+        let cand = |s: &str, r: &str| {
+            Candidate::new(s, r)
+                .with_score(0)
+                .with_source(CandidateSource::System)
+        };
+        // 学習と無関係な文「じかん|なるとき」
+        let mut segmented = SegmentedConversion::new(vec![
+            Segment::new("じかん", vec![cand("時間", "じかん")]),
+            Segment::new("なるとき", vec![cand("成るとき", "なるとき")]),
+        ]);
+        apply_segment_corrections(&mut segmented, &store);
+        assert!(
+            !segmented.corrections_applied,
+            "★ マッチしなければ corrections_applied は false (→ nn は flat 経路へ)"
+        );
+    }
+
     /// ★ nn 曖昧さ: ん+な行 の位置に「ん+母音」の代替読みを生成する。
     #[test]
     fn nn_alternate_readings_generates_vowel_variants() {
@@ -587,6 +774,67 @@ mod tests {
         let engine = ConversionEngine::new().unwrap();
         let result = engine.convert_segmented("").unwrap();
         assert!(result.is_none(), "空入力は None");
+    }
+
+    /// 実機モデル + 実機 corrections.toml を読んで「まつやさんとなんとか」の
+    /// 文節分割と各文節候補を目視する診断テスト (通常は ignore)。
+    ///
+    /// 実行: `cargo test -p nuko-core --features akaza diag_segment_matsuya -- --ignored --nocapture`
+    #[cfg(feature = "akaza")]
+    #[test]
+    #[ignore = "実機モデルが要る診断用"]
+    fn diag_segment_matsuya() {
+        let home = std::env::var("HOME").expect("HOME");
+        let base = format!("{home}/Library/Application Support/nuko-ime");
+        let model_dir = format!("{base}/akaza-model");
+        let corrections = format!("{base}/corrections.toml");
+
+        let mut engine = ConversionEngine::with_libakaza(&model_dir).unwrap();
+        assert!(
+            engine.has_libakaza(),
+            "実機モデルが load できていない: {model_dir}"
+        );
+        if std::path::Path::new(&corrections).exists() {
+            engine.load_corrections(&corrections).unwrap();
+        }
+
+        for input in [
+            "まつや",
+            "まつやさんとなんとか",
+            "まつやさんなんとか", // 「んな」を含み nn 曖昧扱い → corrections_applied で救済
+            "じかんなるとき",     // nn: 訂正なし → corrections_applied=false (flat へ)
+            "せんねん",           // nn: 千円
+        ] {
+            let nn = super::nn_alternate_readings(input).len() > 1;
+            println!("\n=== 入力: {input} (nn_ambiguous={nn}) ===");
+            match engine.convert_segmented(input).unwrap() {
+                None => println!("  (segmented None — 単一文節 or 無効)"),
+                Some(seg) => {
+                    println!(
+                        "  corrections_applied={} 連結='{}'",
+                        seg.corrections_applied,
+                        seg.current_surface()
+                    );
+                    for (i, s) in seg.segments.iter().enumerate() {
+                        let cands: Vec<String> = s
+                            .candidates
+                            .iter()
+                            .take(6)
+                            .map(|c| c.surface.clone())
+                            .collect();
+                        println!(
+                            "  文節[{i}] 読み='{}' 選択='{}' 候補={:?}",
+                            s.reading,
+                            s.candidates
+                                .get(s.selected)
+                                .map(|c| c.surface.as_str())
+                                .unwrap_or("?"),
+                            cands
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[cfg(feature = "akaza")]
