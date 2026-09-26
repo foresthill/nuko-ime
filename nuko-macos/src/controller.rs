@@ -566,7 +566,11 @@ impl NukoInputController {
         if text.chars().count() == 1 {
             if let Some(ch) = text.chars().next() {
                 if let Some(variants) = punctuation_variants(ch) {
-                    // 既存の未確定を先に確定 (候補あればその選択、無ければ composition)。
+                    // 既存の未確定を先に確定する。**decide_commit を使う** ことで
+                    // segmented (全文節連結 + 全文節学習) / flat 候補 / 未変換かな の
+                    // 全ケースを正しく確定する。旧実装は candidates.selected() だけを
+                    // 見ていたため、segmented 中に ? を打つと focused 文節以外が消えた
+                    // (2026-09 ユーザー報告「認識相違…の未変換部分が消える」)。
                     let mut commit_text = String::new();
                     if state.candidates.is_some()
                         || state.is_composing
@@ -576,15 +580,17 @@ impl NukoInputController {
                         if !remaining.is_empty() {
                             state.composition.push_str(&remaining);
                         }
-                        commit_text = state
-                            .candidates
-                            .as_ref()
-                            .and_then(CandidateList::selected)
-                            .map(|c| c.surface.clone())
-                            .unwrap_or_else(|| state.composition.clone());
-                        if !commit_text.is_empty() {
-                            state.context.push_prev_word(&commit_text);
+                        let decision = crate::commit::decide_commit(&state);
+                        let ctx_snapshot = state.context.clone();
+                        for c in &decision.learn_targets {
+                            with_engine_mut(|engine| {
+                                let _ = engine.commit(c, &ctx_snapshot);
+                            });
                         }
+                        if !decision.commit_text.is_empty() {
+                            state.context.push_prev_word(&decision.commit_text);
+                        }
+                        commit_text = decision.commit_text;
                         state.reset();
                     }
                     // 新しい記号を composition + 候補として seed (reading は空 = 学習しない)。
