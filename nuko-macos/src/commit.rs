@@ -125,7 +125,12 @@ pub const CANDIDATE_PAGE_SIZE: usize = 9;
 /// - `Some(decision)` — 数字選択可能、commit してよい
 /// - `None` — 数字でない / 範囲外 / 候補無し
 ///   呼び出し側は別経路 (= 「他文字打鍵で auto-commit」) にフォールバックする
+///
+/// **注 (2026-09)**: 「数字キーで候補選択」は controller から**未接続**にした
+/// (数字入力を食う不具合が続いたため。数字は常に入力する方針)。ロジックとテストは
+/// 将来の限定的な再利用のため残す。
 #[must_use]
+#[allow(dead_code)]
 pub fn decide_digit_select_and_commit(state: &InputState, digit: char) -> Option<CommitDecision> {
     if !('1'..='9').contains(&digit) {
         return None;
