@@ -86,6 +86,14 @@ fn punctuation_variants(c: char) -> Option<&'static [&'static str]> {
     match c {
         '?' => Some(&["？", "?", "⁇", "❓"]),
         '!' => Some(&["！", "!", "‼", "❗"]),
+        // 括弧は種類が多いので候補化する (（ ( 「 『 【 …)。2026-09 ユーザー要望
+        // 「（）の即確定を直したい」。開き括弧と閉じ括弧で候補を分ける。
+        '(' => Some(&["（", "(", "「", "『", "【", "〔"]),
+        ')' => Some(&["）", ")", "」", "』", "】", "〕"]),
+        '[' => Some(&["「", "[", "【", "『", "〔"]),
+        ']' => Some(&["」", "]", "】", "』", "〕"]),
+        '{' => Some(&["『", "{", "【", "「"]),
+        '}' => Some(&["』", "}", "】", "」"]),
         _ => None,
     }
 }
@@ -603,11 +611,23 @@ impl NukoInputController {
                         debug_log(&format!("punct-seed: '{ch}' → {variants:?}"));
                         return Bool::YES;
                     }
-                    // その他 (、。・「」等) は全角で直接挿入。
+                    // その他 (、。・~ 等、候補1つ) は composition に seed する。
+                    // **即挿入 (insertText) は marked text を経由しないため Claude Code 等
+                    // (Chromium/Electron) では何も入らない** (2026-09 ユーザー報告、落とし穴 #10)。
+                    // composition に入れて marked text 経由にすると、続けて打った/Enter した
+                    // ときの確定 (marked を insertText で置換) が効く。パネルは出さない
+                    // (候補1つなので)。実質「打てばすぐ入る」ままで、全アプリで動く。
                     let fw = punct_fw.unwrap();
+                    let mut list = CandidateList::new();
+                    list.push(Candidate::new(fw, "").with_source(CandidateSource::System));
+                    list.select(0);
+                    state.composition = fw.to_string();
+                    state.candidates = Some(list);
+                    state.segmented = None;
+                    state.is_composing = true;
                     drop(state);
-                    Self::insert_text_on_client(client, fw);
-                    debug_log(&format!("punct-insert: '{ch}' → '{fw}'"));
+                    Self::set_marked_text_on_client(client, fw);
+                    debug_log(&format!("punct-seed1: '{ch}' → '{fw}'"));
                     return Bool::YES;
                 }
             }
@@ -1715,9 +1735,24 @@ mod tests {
         assert_eq!(b[0], "！", "★ 既定は全角！");
         assert!(b.contains(&"!"), "★ 半角! も選べる");
 
-        // 変種の要らない句読点は None (= 従来どおり即挿入)
-        assert!(punctuation_variants(',').is_none(), ", は変種なし");
-        assert!(punctuation_variants('.').is_none(), ". は変種なし");
+        // 括弧も候補化 (（ ( 「 …)。第1要素が全角既定。
+        let open = punctuation_variants('(').expect("( は候補あり");
+        assert_eq!(open[0], "（", "★ ( の既定は （");
+        assert!(open.contains(&"("), "★ 半角( も選べる");
+        assert!(open.contains(&"「"), "★ 「 も選べる");
+        let close = punctuation_variants(')').expect(") は候補あり");
+        assert_eq!(close[0], "）", "★ ) の既定は ）");
+        assert!(close.contains(&"」"), "★ 」 も選べる");
+
+        // 変種の無い句読点は None → 単一候補で seed される (即挿入はしない)
+        assert!(
+            punctuation_variants(',').is_none(),
+            ", は変種なし (単一 seed)"
+        );
+        assert!(
+            punctuation_variants('.').is_none(),
+            ". は変種なし (単一 seed)"
+        );
         assert!(punctuation_variants('a').is_none(), "英字は対象外");
     }
 
