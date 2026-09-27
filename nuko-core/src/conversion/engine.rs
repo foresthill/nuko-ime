@@ -856,6 +856,19 @@ mod tests {
                 }
             }
         }
+
+        // 数字を flat 変換したとき全角/漢数字候補が出るか (B: 数字変換)。
+        let ctx = ConversionContext::new();
+        for d in ["1", "12", "123"] {
+            let cands: Vec<String> = engine
+                .convert(d, &ctx)
+                .unwrap()
+                .iter()
+                .take(6)
+                .map(|c| c.surface.clone())
+                .collect();
+            println!("  flat convert('{d}') = {cands:?}");
+        }
     }
 
     #[cfg(feature = "akaza")]
