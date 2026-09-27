@@ -710,6 +710,13 @@ impl NukoInputController {
         let sel_name = selector.name();
         let action = crate::commit::decide_command(sel_name, is_composing);
 
+        // Backspace の切り分け診断 (Claude Code 等 Electron で削除できない件、2026-09)。
+        if sel_name.to_bytes() == b"deleteBackward:" {
+            debug_log(&format!(
+                "deleteBackward: is_composing={is_composing} action={action:?}"
+            ));
+        }
+
         match action {
             CommandAction::PassThrough => Bool::NO,
             CommandAction::Commit => {
@@ -978,12 +985,18 @@ impl NukoInputController {
             Option<nuko_core::conversion::SegmentedConversion>,
         > = Ok(None);
 
-        if let Ok(Some(segmented)) = segmented_result {
+        if let Ok(Some(mut segmented)) = segmented_result {
             if segmented.segments.len() >= 2 {
                 debug_log(&format!(
                     "do_convert: segmented mode, {} segments",
                     segmented.segments.len()
                 ));
+                // 再変換 (記号/数字を足した等) のとき、前の文節選択を読み一致で復元する。
+                // これが無いと「文節ごとに選んだ候補が追加入力でデフォルトに戻る」
+                // (2026-09 ユーザー報告)。旧 segmented が残っているのは append 経路のみ。
+                if let Some(old) = state.segmented.as_ref() {
+                    Self::restore_segment_selections(&mut segmented, old);
+                }
                 let surface = segmented.current_surface();
                 let (focus_start, focus_len) = segmented.focused_surface_range_utf16();
                 let focused_candidates =
@@ -1033,6 +1046,33 @@ impl NukoInputController {
                 let display = state.display_text();
                 drop(state);
                 Self::set_marked_text_on_client(client, &display);
+            }
+        }
+    }
+
+    /// 再変換後の `new` に、旧 `old` の文節選択を **読み一致** で復元する。
+    ///
+    /// 記号/数字を足して再変換したとき、前に文節ごとに選んだ候補がデフォルトに
+    /// 戻らないようにする (2026-09 ユーザー要望)。同じ読みの旧文節で選ばれていた
+    /// surface が新文節の候補にもあれば、その選択を引き継ぐ。読みが重複する場合は
+    /// 先頭一致 (稀なので許容)。
+    fn restore_segment_selections(
+        new: &mut nuko_core::conversion::SegmentedConversion,
+        old: &nuko_core::conversion::SegmentedConversion,
+    ) {
+        for seg in &mut new.segments {
+            let Some(old_seg) = old.segments.iter().find(|o| o.reading == seg.reading) else {
+                continue;
+            };
+            let Some(old_surface) = old_seg
+                .candidates
+                .get(old_seg.selected)
+                .map(|c| c.surface.clone())
+            else {
+                continue;
+            };
+            if let Some(idx) = seg.candidates.iter().position(|c| c.surface == old_surface) {
+                seg.select(idx);
             }
         }
     }
@@ -1188,6 +1228,11 @@ impl NukoInputController {
             state.romaji.buffer().is_empty(),
             state.composition.chars().count(),
         );
+        debug_log(&format!(
+            "do_backspace: action={action:?} composition='{}' romaji='{}'",
+            state.composition,
+            state.romaji.buffer()
+        ));
 
         match action {
             BackspaceAction::ClearConversion => {
