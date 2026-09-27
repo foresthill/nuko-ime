@@ -280,7 +280,18 @@ mod tests {
     #[case("shinnyou", "しんよう")] // 信用
     #[case("shinnya", "しんや")] // 真夜 (アポストロフィ無しでも打てる)
     #[case("zennyu", "ぜんゆ")] // ん + ゆ
-    #[case("konnnyaku", "こんにゃく")] // ん+にゃ は n 3 個 (nn→ん + nya→にゃ)
+    #[case("konnnyaku", "こんにゃく")]
+    // ん+にゃ は n 3 個 (nn→ん + nya→にゃ)
+    // ★ 「ん系」統一ルールの対比 (宝、2026-09 ユーザー要望で全部固定):
+    //    単一 n + y → にゃ行 (yōon) / n2個 + y → ん+や行 / n3個 + y → ん+にゃ行。
+    //    母音は非対称で n2個 + 母音 → ん+な行 (kanna 互換)。
+    #[case("nya", "にゃ")] // 1n+y = にゃ (yōon)
+    #[case("shinya", "しにゃ")] // 1n+y = にゃ (真夜は shinnya)
+    #[case("konnyaku", "こんやく")] // 2n+y = んや (こんにゃくは konnnyaku)
+    #[case("zenya", "ぜにゃ")] // 1n+y = にゃ
+    #[case("zennya", "ぜんや")] // 2n+y = んや (前夜)
+    #[case("kannyou", "かんよう")] // 2n+y = んよう (慣用)
+    #[case("onna", "おんな")] // 2n+母音 = んな (母音は再利用、非対称)
     #[case("hon'ya", "ほんや")]
     #[case("hen", "へん")]
     #[case("henn", "へん")]
