@@ -166,6 +166,19 @@ PR #40 で `convert_k_best(reading, None, k=9)` に切替。各 `KBestPath` が�
 
 **デバッグのコツ**: リリースは `panic=abort` + `strip` で crash 箇所が見えない。`msg_send!` の型/セレクタ不整合は **デバッグビルド (`cargo build`、`panic=unwind` + シンボル付き) の objc2 `panic_verify`** が炙り出す。リリースで謎 crash したら、debug バイナリを `.app` に差し込んで `RUST_BACKTRACE=full ./NukoIME 2>log` で再現するのが最短 (詳細は下記「実機 smoke test」)。
 
+### 10. `setMarkedText:` の `replacementRange` は Chromium/Electron で効く効かないが分かれる
+
+未確定 (marked text) の更新は `setMarkedText:selectionRange:replacementRange:` で行うが、`replacementRange` の渡し方で **ネイティブ vs Chromium/Electron (Claude Code / VS Code / Slack 等)** の挙動が割れる (2026-09、実機ログで確認)。
+
+- **`replacementRange = {NSNotFound, 0}`** (「現在のマーク範囲を置換」): ネイティブ (メモ/テキストエディット等) は正しく更新する。だが **Chromium 系は縮小更新 (Backspace で marked が短くなる) を画面に反映しない**ことがあり、「Backspace で消えない」症状になる。
+  - 対策: **クライアントの `markedRange` を取得して明示的な `replacementRange` として渡す** (取得不能なら `NSNotFound` に fallback)。ネイティブでは両者同義なので回帰しない。`set_marked_text_with_selection` 参照。
+- **未確定が空になる瞬間** (最後の 1 文字を Backspace で消す等) に `insertText("")` で終了すると、一部クライアントがマーク末尾を消さず **「最後の 1 文字だけ消えない (2 回押しが要る)」** になる。
+  - 対策: 空になるケースは `insertText("")` でなく **`setMarkedText("")`** (実マーク範囲を空に置換) で確実にクリアする。`do_backspace` の `*EndComposing` 系参照。
+
+**切り分け方**: `deleteBackward:` は Claude Code でも IME に届く (ログで確認済み)。nuko の `do_backspace` は composition を正しく削っている。問題は marked text の**反映側**。「Electron のせい」と断じる前に、ネイティブと Chromium 系の**両方で実機確認**し、`setMarkedText` の引数を詰めること。
+
+> 注: 落とし穴 #7「数字 0-9 は変換対象外」は **PR #92/#94 で方針変更済み**。現在は数字も記号と同じ統一処理で、入力中は composition に足し (Space で全角/漢数字に変換)、先頭は composition に入れて未確定にする (即挿入をやめた)。「数字キーで候補選択 (digit-select)」は廃止。
+
 ## 文節伸縮の仕様 (Shift+←→) — **右端だけを動かす**
 
 **確定した重要仕様 (ユーザー要望 2026-06-25)。変更するときは必ずこの方針を守ること。**
