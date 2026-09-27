@@ -710,13 +710,6 @@ impl NukoInputController {
         let sel_name = selector.name();
         let action = crate::commit::decide_command(sel_name, is_composing);
 
-        // Backspace の切り分け診断 (Claude Code 等 Electron で削除できない件、2026-09)。
-        if sel_name.to_bytes() == b"deleteBackward:" {
-            debug_log(&format!(
-                "deleteBackward: is_composing={is_composing} action={action:?}"
-            ));
-        }
-
         match action {
             CommandAction::PassThrough => Bool::NO,
             CommandAction::Commit => {
@@ -1240,11 +1233,6 @@ impl NukoInputController {
             state.romaji.buffer().is_empty(),
             state.composition.chars().count(),
         );
-        debug_log(&format!(
-            "do_backspace: action={action:?} composition='{}' romaji='{}'",
-            state.composition,
-            state.romaji.buffer()
-        ));
 
         match action {
             BackspaceAction::ClearConversion => {
