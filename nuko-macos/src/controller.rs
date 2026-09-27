@@ -882,12 +882,24 @@ impl NukoInputController {
     }
 
     /// `setMarkedText:selectionRange:replacementRange:` の共通ラッパ。
+    ///
+    /// `replacementRange` は原則 `NSNotFound`(=現在のマーク範囲を置換)。ただし
+    /// **Chromium/Electron 系 (Claude Code / VS Code 等) は NSNotFound だと縮小更新
+    /// (Backspace) を画面に反映しないことがある**ため、クライアントの現在の
+    /// `markedRange` を取得できたら**それを明示的に**渡す (2026-09 実験)。
+    /// ネイティブアプリでは両者同義なので回帰しない想定。
     fn set_marked_text_with_selection(client: &AnyObject, text: &str, sel_range: NSRange) {
         let ns_string = NSString::from_str(text);
-        let rep_range = NSRange::new(NS_NOT_FOUND, 0);
+        // 現在のマーク範囲を明示的な replacementRange にする (取得不能なら NSNotFound)。
+        let marked: NSRange = unsafe { msg_send![client, markedRange] };
+        let rep_range = if marked.location == NS_NOT_FOUND {
+            NSRange::new(NS_NOT_FOUND, 0)
+        } else {
+            marked
+        };
         debug_log(&format!(
-            "setMarkedText: '{text}' sel=({},{})",
-            sel_range.location, sel_range.length
+            "setMarkedText: '{text}' sel=({},{}) rep=({},{})",
+            sel_range.location, sel_range.length, rep_range.location, rep_range.length
         ));
         unsafe {
             let _: () = msg_send![
@@ -953,11 +965,17 @@ impl NukoInputController {
         #[cfg(feature = "akaza")]
         let segmented_result = {
             let nn_ambiguous = nuko_core::conversion::nn_alternate_readings(&composition).len() > 1;
+            // 読み全体に学習 (whole-reading の訂正) があるなら flat 優先。segmented だと
+            // 誤分割で訂正が効かないことがある (例: さわれる→[さ][割れる] で さわれる→触れる
+            // が不発)。flat なら convert() が訂正表層を注入+bias して 1 位に出す
+            // (2026-09 ユーザー報告)。
+            let has_whole_correction = with_engine(|e| e.has_whole_correction(&composition));
             match with_engine(|engine| engine.convert_segmented(&composition)) {
                 Ok(Some(seg)) => {
                     // nn 曖昧語は学習が効いたときだけ segmented を使う (それ以外は flat へ)。
-                    let use_segmented =
-                        seg.segments.len() >= 2 && (!nn_ambiguous || seg.corrections_applied);
+                    let use_segmented = seg.segments.len() >= 2
+                        && !has_whole_correction
+                        && (!nn_ambiguous || seg.corrections_applied);
                     if use_segmented {
                         Ok(Some(seg))
                     } else {
@@ -972,12 +990,18 @@ impl NukoInputController {
             Option<nuko_core::conversion::SegmentedConversion>,
         > = Ok(None);
 
-        if let Ok(Some(segmented)) = segmented_result {
+        if let Ok(Some(mut segmented)) = segmented_result {
             if segmented.segments.len() >= 2 {
                 debug_log(&format!(
                     "do_convert: segmented mode, {} segments",
                     segmented.segments.len()
                 ));
+                // 再変換 (記号/数字を足した等) のとき、前の文節選択を読み一致で復元する。
+                // これが無いと「文節ごとに選んだ候補が追加入力でデフォルトに戻る」
+                // (2026-09 ユーザー報告)。旧 segmented が残っているのは append 経路のみ。
+                if let Some(old) = state.segmented.as_ref() {
+                    Self::restore_segment_selections(&mut segmented, old);
+                }
                 let surface = segmented.current_surface();
                 let (focus_start, focus_len) = segmented.focused_surface_range_utf16();
                 let focused_candidates =
@@ -1027,6 +1051,33 @@ impl NukoInputController {
                 let display = state.display_text();
                 drop(state);
                 Self::set_marked_text_on_client(client, &display);
+            }
+        }
+    }
+
+    /// 再変換後の `new` に、旧 `old` の文節選択を **読み一致** で復元する。
+    ///
+    /// 記号/数字を足して再変換したとき、前に文節ごとに選んだ候補がデフォルトに
+    /// 戻らないようにする (2026-09 ユーザー要望)。同じ読みの旧文節で選ばれていた
+    /// surface が新文節の候補にもあれば、その選択を引き継ぐ。読みが重複する場合は
+    /// 先頭一致 (稀なので許容)。
+    fn restore_segment_selections(
+        new: &mut nuko_core::conversion::SegmentedConversion,
+        old: &nuko_core::conversion::SegmentedConversion,
+    ) {
+        for seg in &mut new.segments {
+            let Some(old_seg) = old.segments.iter().find(|o| o.reading == seg.reading) else {
+                continue;
+            };
+            let Some(old_surface) = old_seg
+                .candidates
+                .get(old_seg.selected)
+                .map(|c| c.surface.clone())
+            else {
+                continue;
+            };
+            if let Some(idx) = seg.candidates.iter().position(|c| c.surface == old_surface) {
+                seg.select(idx);
             }
         }
     }
@@ -1197,7 +1248,11 @@ impl NukoInputController {
                 state.romaji.clear();
                 state.is_composing = false;
                 drop(state);
-                Self::insert_text_on_client(client, "");
+                // ★ 最後の1文字/バッファを消して未確定が空になる場合、insertText("") では
+                //   一部クライアント (Claude Code 等) がマーク末尾を消さず「最後の1文字だけ
+                //   消えない (2回押しが要る)」症状になる。setMarkedText("") で実マーク範囲を
+                //   空に置換して確実にクリアする (2026-09 ユーザー報告)。
+                Self::set_marked_text_on_client(client, "");
             }
             BackspaceAction::ClearRomajiRedisplay => {
                 state.romaji.clear();
@@ -1209,7 +1264,8 @@ impl NukoInputController {
                 state.composition.pop();
                 state.is_composing = false;
                 drop(state);
-                Self::insert_text_on_client(client, "");
+                // 最後の1文字を消して空になる → setMarkedText("") で確実にクリア (上記)。
+                Self::set_marked_text_on_client(client, "");
             }
             BackspaceAction::PopCompositionRedisplay => {
                 state.composition.pop();
@@ -1220,7 +1276,7 @@ impl NukoInputController {
             BackspaceAction::EndComposing => {
                 state.is_composing = false;
                 drop(state);
-                Self::insert_text_on_client(client, "");
+                Self::set_marked_text_on_client(client, "");
             }
         }
     }
@@ -1591,7 +1647,62 @@ impl NukoInputController {
 
 #[cfg(test)]
 mod tests {
-    use super::{ascii_to_fullwidth_punctuation, punctuation_variants};
+    use super::{ascii_to_fullwidth_punctuation, punctuation_variants, NukoInputController};
+    use nuko_core::conversion::{Candidate, CandidateSource, Segment, SegmentedConversion};
+
+    fn seg(reading: &str, cands: &[&str]) -> Segment {
+        let list: Vec<Candidate> = cands
+            .iter()
+            .map(|s| Candidate::new(*s, reading).with_source(CandidateSource::System))
+            .collect();
+        Segment::new(reading, list)
+    }
+
+    /// ★ 再変換で文節選択が「読み一致」で復元される (2026-09: 追加入力で選択が
+    /// デフォルトに戻る問題の回帰)。
+    #[test]
+    fn restore_segment_selections_by_reading() {
+        // old: [わたし→私(既定でない選択)][の]
+        let mut old =
+            SegmentedConversion::new(vec![seg("わたし", &["わたし", "私"]), seg("の", &["の"])]);
+        old.segments[0].select(1); // 私 を選択
+
+        // new (「。」を足して再変換): 選択はデフォルト(0=わたし)
+        let mut new = SegmentedConversion::new(vec![
+            seg("わたし", &["わたし", "私"]),
+            seg("の", &["の"]),
+            seg("。", &["。"]),
+        ]);
+        assert_eq!(new.segments[0].surface(), Some("わたし"), "復元前は既定");
+
+        NukoInputController::restore_segment_selections(&mut new, &old);
+
+        assert_eq!(
+            new.segments[0].surface(),
+            Some("私"),
+            "★ 読み一致で 私 の選択を復元"
+        );
+        assert_eq!(
+            new.segments[2].surface(),
+            Some("。"),
+            "新規文節は既定のまま"
+        );
+    }
+
+    /// ★ 読みが変わった文節には復元しない (誤復元しない)。
+    #[test]
+    fn restore_segment_selections_skips_reading_mismatch() {
+        let mut old = SegmentedConversion::new(vec![seg("き", &["き", "気"])]);
+        old.segments[0].select(1); // 気
+
+        let mut new = SegmentedConversion::new(vec![seg("かん", &["かん", "感"])]);
+        NukoInputController::restore_segment_selections(&mut new, &old);
+        assert_eq!(
+            new.segments[0].surface(),
+            Some("かん"),
+            "★ 読みが違えば既定のまま (誤復元しない)"
+        );
+    }
 
     /// ★ 候補を持つ句読点 (? !) は変種リストを返し、第1要素が全角既定。
     #[test]
