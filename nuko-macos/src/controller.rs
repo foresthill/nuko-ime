@@ -1260,7 +1260,11 @@ impl NukoInputController {
                 state.romaji.clear();
                 state.is_composing = false;
                 drop(state);
-                Self::insert_text_on_client(client, "");
+                // ★ 最後の1文字/バッファを消して未確定が空になる場合、insertText("") では
+                //   一部クライアント (Claude Code 等) がマーク末尾を消さず「最後の1文字だけ
+                //   消えない (2回押しが要る)」症状になる。setMarkedText("") で実マーク範囲を
+                //   空に置換して確実にクリアする (2026-09 ユーザー報告)。
+                Self::set_marked_text_on_client(client, "");
             }
             BackspaceAction::ClearRomajiRedisplay => {
                 state.romaji.clear();
@@ -1272,7 +1276,8 @@ impl NukoInputController {
                 state.composition.pop();
                 state.is_composing = false;
                 drop(state);
-                Self::insert_text_on_client(client, "");
+                // 最後の1文字を消して空になる → setMarkedText("") で確実にクリア (上記)。
+                Self::set_marked_text_on_client(client, "");
             }
             BackspaceAction::PopCompositionRedisplay => {
                 state.composition.pop();
@@ -1283,7 +1288,7 @@ impl NukoInputController {
             BackspaceAction::EndComposing => {
                 state.is_composing = false;
                 drop(state);
-                Self::insert_text_on_client(client, "");
+                Self::set_marked_text_on_client(client, "");
             }
         }
     }
