@@ -86,6 +86,24 @@ impl CorrectionStore {
         0
     }
 
+    /// `reading` ちょうどに対する選好の (表層, bias) を返す(無ければ None)。
+    ///
+    /// [`Self::bias`] は「その表層が候補にあれば押し上げる」だが、こちらは
+    /// **候補に無い表層を注入する**用途。libakaza/辞書に無い語 (例: さわれる→触れる、
+    /// 可能形で辞書に無い) をユーザー学習で出せるようにする (2026-09 ユーザー報告)。
+    #[must_use]
+    pub fn preferred(&self, reading: &str) -> Option<(&str, i32)> {
+        self.preferences
+            .iter()
+            .find(|p| p.reading == reading)
+            .map(|p| {
+                (
+                    p.prefer.as_str(),
+                    CORRECTION_BOOST + (p.weight as i32).saturating_mul(10).min(50_000),
+                )
+            })
+    }
+
     /// 文節読みが「訂正読み + 非空の接尾かな」の形のとき、押し上げるべき
     /// **目標表層** と bias の一覧を返す(完全一致は [`Self::bias`] が担うので除外)。
     ///

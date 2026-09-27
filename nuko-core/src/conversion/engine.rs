@@ -184,6 +184,16 @@ impl ConversionEngine {
         })
     }
 
+    /// この読みちょうどに whole-reading の訂正選好があるか。
+    ///
+    /// `true` のとき、その読みは segmented だと誤分割で訂正が効かないことがあるため
+    /// (例: さわれる→[さ][割れる])、呼び出し側は flat 変換を優先すべき。flat なら
+    /// [`Self::convert`] が訂正表層を注入+bias して 1 位に出す。
+    #[must_use]
+    pub fn has_whole_correction(&self, reading: &str) -> bool {
+        self.corrections.preferred(reading).is_some()
+    }
+
     /// Layer 2 訂正選好を設定する(変換時に該当候補へ bias)。
     pub fn set_corrections(&mut self, corrections: CorrectionStore) {
         tracing::info!(count = corrections.len(), "訂正選好 (Layer 2) を設定");
@@ -338,6 +348,18 @@ impl ConversionEngine {
                 let bias = self.corrections.bias(reading, &c.surface);
                 if bias != 0 {
                     c.score = c.score.saturating_add(bias);
+                }
+            }
+            // 学習した表層が候補に無ければ **注入** する。libakaza/辞書に無い語
+            // (例: さわれる→触れる、可能形で辞書に無い) でも学習した選好を出せる
+            // (2026-09 ユーザー報告: 分割される語の学習が効かない)。
+            if let Some((surface, bias)) = self.corrections.preferred(reading) {
+                if !candidates.iter().any(|c| c.surface == surface) {
+                    candidates.push(
+                        Candidate::new(surface, reading)
+                            .with_score(bias)
+                            .with_source(CandidateSource::User),
+                    );
                 }
             }
         }
@@ -741,6 +763,44 @@ mod tests {
         );
     }
 
+    /// ★ Layer 2: 学習した表層が候補に無くても **注入** される (さわれる→触れる 型)。
+    /// 辞書/libakaza に無い語 (可能形など) でも、ユーザー学習で 1 位に出せる。
+    /// (2026-09 ユーザー報告: 分割される語の学習が効かない)
+    #[test]
+    fn correction_injects_surface_missing_from_candidates() {
+        use crate::learning::{extract_corrections, ObservationEvent};
+
+        let mut engine = ConversionEngine::new().unwrap();
+        let ctx = ConversionContext::new();
+
+        // 素の にほん 候補に架空語は無い
+        let base = engine.convert("にほん", &ctx).unwrap();
+        assert!(
+            !base.iter().any(|c| c.surface == "架空ZZ"),
+            "前提: 架空ZZ は候補に無い"
+        );
+        assert!(!engine.has_whole_correction("にほん"), "前提: 学習なし");
+
+        // にほん→架空ZZ を学習 (辞書に無い表層でも)
+        let events = vec![
+            ObservationEvent::commit("にほん", "架空ZZ"),
+            ObservationEvent::commit("にほん", "架空ZZ"),
+        ];
+        engine.set_corrections(extract_corrections(&events, 2));
+
+        let after = engine.convert("にほん", &ctx).unwrap();
+        assert_eq!(
+            after.selected().unwrap().surface,
+            "架空ZZ",
+            "★ 候補に無い学習表層を注入して 1 位に"
+        );
+        assert!(engine.has_whole_correction("にほん"), "★ 学習ありは true");
+        assert!(
+            !engine.has_whole_correction("べつのよみ"),
+            "★ 学習の無い読みは false"
+        );
+    }
+
     #[cfg(feature = "akaza")]
     #[test]
     fn with_libakaza_falls_back_when_model_dir_missing() {
@@ -806,6 +866,8 @@ mod tests {
             "せんねん",           // nn: 千円
             "みのさんに",         // ユーザー報告: flat で Shift しても文節にならない
             "みのさん",
+            "さわれる",    // 学習 さわれる→触れる が分割で効かない (ユーザー報告)
+            "1もじ",       // 学習 1もじ→1文字 が分割で効かない
             "にほんご？",  // 記号混じり読みも libakaza が [日本語][？] と割る
             "こんにちは1", // 数字混じり読みの耐性確認
             "こんにちは12",
@@ -859,6 +921,16 @@ mod tests {
 
         // 数字を flat 変換したとき全角/漢数字候補が出るか (B: 数字変換)。
         let ctx = ConversionContext::new();
+        for r in ["さわれる", "1もじ"] {
+            let cands: Vec<String> = engine
+                .convert(r, &ctx)
+                .unwrap()
+                .iter()
+                .take(6)
+                .map(|c| c.surface.clone())
+                .collect();
+            println!("  flat convert('{r}') = {cands:?}");
+        }
         for d in ["1", "12", "123"] {
             let cands: Vec<String> = engine
                 .convert(d, &ctx)
