@@ -889,12 +889,24 @@ impl NukoInputController {
     }
 
     /// `setMarkedText:selectionRange:replacementRange:` の共通ラッパ。
+    ///
+    /// `replacementRange` は原則 `NSNotFound`(=現在のマーク範囲を置換)。ただし
+    /// **Chromium/Electron 系 (Claude Code / VS Code 等) は NSNotFound だと縮小更新
+    /// (Backspace) を画面に反映しないことがある**ため、クライアントの現在の
+    /// `markedRange` を取得できたら**それを明示的に**渡す (2026-09 実験)。
+    /// ネイティブアプリでは両者同義なので回帰しない想定。
     fn set_marked_text_with_selection(client: &AnyObject, text: &str, sel_range: NSRange) {
         let ns_string = NSString::from_str(text);
-        let rep_range = NSRange::new(NS_NOT_FOUND, 0);
+        // 現在のマーク範囲を明示的な replacementRange にする (取得不能なら NSNotFound)。
+        let marked: NSRange = unsafe { msg_send![client, markedRange] };
+        let rep_range = if marked.location == NS_NOT_FOUND {
+            NSRange::new(NS_NOT_FOUND, 0)
+        } else {
+            marked
+        };
         debug_log(&format!(
-            "setMarkedText: '{text}' sel=({},{})",
-            sel_range.location, sel_range.length
+            "setMarkedText: '{text}' sel=({},{}) rep=({},{})",
+            sel_range.location, sel_range.length, rep_range.location, rep_range.length
         ));
         unsafe {
             let _: () = msg_send![
@@ -1642,7 +1654,62 @@ impl NukoInputController {
 
 #[cfg(test)]
 mod tests {
-    use super::{ascii_to_fullwidth_punctuation, punctuation_variants};
+    use super::{ascii_to_fullwidth_punctuation, punctuation_variants, NukoInputController};
+    use nuko_core::conversion::{Candidate, CandidateSource, Segment, SegmentedConversion};
+
+    fn seg(reading: &str, cands: &[&str]) -> Segment {
+        let list: Vec<Candidate> = cands
+            .iter()
+            .map(|s| Candidate::new(*s, reading).with_source(CandidateSource::System))
+            .collect();
+        Segment::new(reading, list)
+    }
+
+    /// ★ 再変換で文節選択が「読み一致」で復元される (2026-09: 追加入力で選択が
+    /// デフォルトに戻る問題の回帰)。
+    #[test]
+    fn restore_segment_selections_by_reading() {
+        // old: [わたし→私(既定でない選択)][の]
+        let mut old =
+            SegmentedConversion::new(vec![seg("わたし", &["わたし", "私"]), seg("の", &["の"])]);
+        old.segments[0].select(1); // 私 を選択
+
+        // new (「。」を足して再変換): 選択はデフォルト(0=わたし)
+        let mut new = SegmentedConversion::new(vec![
+            seg("わたし", &["わたし", "私"]),
+            seg("の", &["の"]),
+            seg("。", &["。"]),
+        ]);
+        assert_eq!(new.segments[0].surface(), Some("わたし"), "復元前は既定");
+
+        NukoInputController::restore_segment_selections(&mut new, &old);
+
+        assert_eq!(
+            new.segments[0].surface(),
+            Some("私"),
+            "★ 読み一致で 私 の選択を復元"
+        );
+        assert_eq!(
+            new.segments[2].surface(),
+            Some("。"),
+            "新規文節は既定のまま"
+        );
+    }
+
+    /// ★ 読みが変わった文節には復元しない (誤復元しない)。
+    #[test]
+    fn restore_segment_selections_skips_reading_mismatch() {
+        let mut old = SegmentedConversion::new(vec![seg("き", &["き", "気"])]);
+        old.segments[0].select(1); // 気
+
+        let mut new = SegmentedConversion::new(vec![seg("かん", &["かん", "感"])]);
+        NukoInputController::restore_segment_selections(&mut new, &old);
+        assert_eq!(
+            new.segments[0].surface(),
+            Some("かん"),
+            "★ 読みが違えば既定のまま (誤復元しない)"
+        );
+    }
 
     /// ★ 候補を持つ句読点 (? !) は変種リストを返し、第1要素が全角既定。
     #[test]
