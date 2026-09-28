@@ -985,16 +985,19 @@ impl NukoInputController {
         #[cfg(feature = "akaza")]
         let segmented_result = {
             let nn_ambiguous = nuko_core::conversion::nn_alternate_readings(&composition).len() > 1;
-            // 読み全体に学習 (whole-reading の訂正) があるなら flat 優先。segmented だと
-            // 誤分割で訂正が効かないことがある (例: さわれる→[さ][割れる] で さわれる→触れる
-            // が不発)。flat なら convert() が訂正表層を注入+bias して 1 位に出す
+            // 読み全体に学習 (whole-reading の訂正) か 静的辞書の語 があるなら flat 優先。
+            // segmented だと複合語が誤分割されて出ないことがある
+            // (例: さわれる→[さ][割れる] で 触れる 不発、よしゅく→[よ][しゅく] で 予祝 不発)。
+            // flat なら convert() が静的辞書/訂正表層を候補に含めて 1 語で出す
             // (2026-09 ユーザー報告)。
-            let has_whole_correction = with_engine(|e| e.has_whole_correction(&composition));
+            let prefer_flat = with_engine(|e| {
+                e.has_whole_correction(&composition) || e.has_dict_word(&composition)
+            });
             match with_engine(|engine| engine.convert_segmented(&composition)) {
                 Ok(Some(seg)) => {
                     // nn 曖昧語は学習が効いたときだけ segmented を使う (それ以外は flat へ)。
                     let use_segmented = seg.segments.len() >= 2
-                        && !has_whole_correction
+                        && !prefer_flat
                         && (!nn_ambiguous || seg.corrections_applied);
                     if use_segmented {
                         Ok(Some(seg))

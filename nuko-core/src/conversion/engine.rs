@@ -12,6 +12,15 @@ use crate::error::{NukoError, Result};
 use crate::input::{to_halfwidth_katakana, to_katakana};
 use crate::learning::{CorrectionStore, LearningManager};
 
+/// ひらがな / カタカナ / 半角カタカナ / 長音符か (辞書の「語」判定用)。
+fn is_kana_char(c: char) -> bool {
+    matches!(c,
+        '\u{3040}'..='\u{309F}'    // ひらがな
+        | '\u{30A0}'..='\u{30FF}'  // カタカナ (長音符 ー = U+30FC を含む)
+        | '\u{FF61}'..='\u{FF9F}'  // 半角カタカナ・記号
+    )
+}
+
 /// libakaza 由来候補に上乗せする優先度ブースト。
 ///
 /// 静的辞書のスコアは概ね -100〜100 のレンジ、libakaza の cost_to_score は
@@ -192,6 +201,25 @@ impl ConversionEngine {
     #[must_use]
     pub fn has_whole_correction(&self, reading: &str) -> bool {
         self.corrections.preferred(reading).is_some()
+    }
+
+    /// この読みちょうどに静的辞書の **語** (かな以外＝漢字等を含む表層) があるか。
+    ///
+    /// libakaza は複合語を分割することがある (例: よしゅく→[よ][しゅく] で 予祝 が
+    /// 出ない、ざびさん→[ざ][びさん])。静的辞書に読み全体の語 (よしゅく→予祝) が
+    /// あるなら、呼び出し側は flat 変換を優先して **1 語として** 出すべき。
+    /// flat の [`Self::convert`] は静的辞書を候補に含める。
+    #[must_use]
+    pub fn has_dict_word(&self, reading: &str) -> bool {
+        self.dictionary
+            .lookup(reading)
+            .map(|cands| {
+                cands.iter().any(|c| {
+                    // 読みそのもの・全カナは「語」とみなさない (漢字等を含むものだけ)
+                    c.surface != reading && c.surface.chars().any(|ch| !is_kana_char(ch))
+                })
+            })
+            .unwrap_or(false)
     }
 
     /// Layer 2 訂正選好を設定する(変換時に該当候補へ bias)。
@@ -798,6 +826,32 @@ mod tests {
         assert!(
             !engine.has_whole_correction("べつのよみ"),
             "★ 学習の無い読みは false"
+        );
+    }
+
+    /// ★ 静的辞書の複合語 (よしゅく→予祝) を has_dict_word で検出し、flat convert が
+    /// 候補に含める (2026-09 ユーザー報告: 予祝 が出ない)。segmented だと [よ][しゅく]
+    /// に割れて出ないので、has_dict_word=true → flat 優先 で 1 語として出す。
+    #[test]
+    fn has_dict_word_and_convert_yoshuku() {
+        let engine = ConversionEngine::new().unwrap();
+        assert!(
+            engine.has_dict_word("よしゅく"),
+            "★ よしゅく は辞書の語 (予祝)"
+        );
+        assert!(engine.has_dict_word("にほん"), "★ にほん は辞書の語 (日本)");
+        assert!(
+            !engine.has_dict_word("ぷぷぷぷ"),
+            "★ 辞書に無い読みは false"
+        );
+
+        let cands = engine
+            .convert("よしゅく", &ConversionContext::new())
+            .unwrap();
+        assert!(
+            cands.iter().any(|c| c.surface == "予祝"),
+            "★ flat convert に 予祝 が含まれる: {:?}",
+            cands.iter().map(|c| c.surface.as_str()).collect::<Vec<_>>()
         );
     }
 
