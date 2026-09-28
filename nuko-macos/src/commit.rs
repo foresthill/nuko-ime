@@ -1290,6 +1290,34 @@ mod tests {
         assert_eq!(f, 0, "★ 末尾から先頭へ wrap");
     }
 
+    /// ★ 移動しても選んだ候補が保持される (2026-09 ユーザー報告: 文節移動で選択が戻る)。
+    /// 移動前に「現 focused 文節へ現在の候補選択を sync back」するのが要。
+    #[test]
+    fn focus_shift_preserves_selection() {
+        let mut sc = three_segments();
+        sc.focus(0);
+        // seg0(わたし) で候補1(=わたし、既定でない) を選んだ状態で前へ移動
+        let (f, surface) = apply_segment_focus_shift(&mut sc, Some(1), true);
+        assert_eq!(f, 1, "focus は 1 へ");
+        assert_eq!(
+            sc.segments[0].surface(),
+            Some("わたし"),
+            "★ 移動しても seg0 の選択(わたし)が保持される"
+        );
+        assert!(
+            surface.starts_with("わたし"),
+            "★ 連結先頭が わたし: {surface}"
+        );
+        // 一周して seg0 に戻っても保持されている
+        let _ = apply_segment_focus_shift(&mut sc, None, true); // →2
+        let _ = apply_segment_focus_shift(&mut sc, None, true); // →0
+        assert_eq!(
+            sc.segments[0].surface(),
+            Some("わたし"),
+            "★ 一周して戻っても保持"
+        );
+    }
+
     /// 不変条件: backward は wrap して 0→2→1→0 と巡回
     #[test]
     fn focus_shift_backward_wraps() {
