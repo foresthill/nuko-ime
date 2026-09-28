@@ -856,7 +856,7 @@ impl NukoInputController {
     /// segmented モード用: フォーカス文節を `selectionRange` で示して描画する。
     ///
     /// `focus_start` / `focus_len` は marked text 内の UTF-16 範囲
-    /// ([`SegmentedConversion::focused_surface_range_utf16`])。多くのアプリは
+    /// (`SegmentedConversion` の focused_surface_range_utf16)。多くのアプリは
     /// この範囲を太線/ハイライトで描き、「今どの文節を編集中か」が分かる。
     fn set_marked_text_focused(
         client: &AnyObject,
@@ -1515,7 +1515,7 @@ impl NukoInputController {
     /// - **1 文節** (例:「みのさん」): 提示だけでは flat と見分けが付かず「効かない」と
     ///   見えるので、要求された伸縮を即適用して **可視的に分割** する
     ///   (Shift+← で「みのさ|ん」→ さらに「みの|さん」)。extend_left は 1 文節を
-    ///   末尾 1 文字で割る ([`crate::conversion::extend_clause`])。
+    ///   末尾 1 文字で割る (`nuko_core::conversion::extend_clause`)。
     ///
     /// 読みが空 / 0 文節 / libakaza 無効なら何もせず `Bool::YES` で消費する。
     #[cfg(feature = "akaza")]
