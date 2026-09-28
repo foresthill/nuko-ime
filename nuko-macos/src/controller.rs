@@ -1165,9 +1165,9 @@ impl NukoInputController {
         // Layer 1 観察ログ用に、確定前の読み (かな) を控える (reset で消えるため)。
         let reading = state.composition.clone();
 
-        // ① picked-index: flat 変換のときだけ、提示候補と選んだ index を控える。
+        // ① picked-index: flat 変換のときは、提示候補と選んだ index を控える。
         // 「既定を飛ばして下位候補を選んだ」= 訂正シグナル (extract_corrections が
-        // 重み付けする)。segmented は focused 文節の候補で全文と対応が取れないため記録しない。
+        // 重み付けする)。
         let (obs_candidates, obs_picked): (Vec<String>, Option<usize>) =
             if state.segmented.is_none() {
                 match state.candidates.as_ref() {
@@ -1180,6 +1180,31 @@ impl NukoInputController {
             } else {
                 (Vec::new(), None)
             };
+
+        // ★ segmented のときは **文節ごとに** 観察を記録する (2026-09 ユーザー報告:
+        // 文節ごとに選んだ候補が学習されない)。各文節の (読み, 選択表層, 候補列, picked)
+        // を控える。picked>0 (既定でない選択) は強い訂正シグナルになり、
+        // 「あべ→阿部」等が per-segment 訂正として学習される → apply_segment_corrections
+        // で効き、nn 曖昧語でも corrections_applied=true で segmented が優先される。
+        let seg_observations: Vec<(String, String, Vec<String>, usize)> = state
+            .segmented
+            .as_ref()
+            .map(|seg| {
+                seg.segments
+                    .iter()
+                    .map(|s| {
+                        let cands: Vec<String> =
+                            s.candidates.iter().map(|c| c.surface.clone()).collect();
+                        let surface = s
+                            .candidates
+                            .get(s.selected)
+                            .map(|c| c.surface.clone())
+                            .unwrap_or_default();
+                        (s.reading.clone(), surface, cands, s.selected)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         state.reset();
         drop(state);
@@ -1209,8 +1234,27 @@ impl NukoInputController {
                     CORRECTION_WINDOW,
                 );
                 with_observation(|log| {
-                    if let Err(e) = log.record(&event) {
-                        debug_log(&format!("観察ログ記録エラー: {e}"));
+                    // segmented なら文節ごとに記録 (per-segment 訂正学習の素)。
+                    // flat なら従来どおり文全体を 1 件記録。
+                    if seg_observations.is_empty() {
+                        if let Err(e) = log.record(&event) {
+                            debug_log(&format!("観察ログ記録エラー: {e}"));
+                        }
+                    } else {
+                        for (r, surf, cands, picked) in &seg_observations {
+                            if r.is_empty() || surf.is_empty() {
+                                continue;
+                            }
+                            let ev = ObservationEvent::commit_with_candidates(
+                                r.as_str(),
+                                surf.as_str(),
+                                cands.clone(),
+                                Some(*picked),
+                            );
+                            if let Err(e) = log.record(&ev) {
+                                debug_log(&format!("観察ログ(文節)記録エラー: {e}"));
+                            }
+                        }
                     }
                     if let Some(prev_surface) = &correction {
                         let corr = ObservationEvent::correction(
@@ -1553,7 +1597,7 @@ impl NukoInputController {
             Ok(None)
         };
 
-        let new_seg = match resized {
+        let mut new_seg = match resized {
             Ok(Some(s)) => s,
             Ok(None) => return Bool::YES, // 伸縮不可: 消費して no-op
             Err(e) => {
@@ -1561,6 +1605,11 @@ impl NukoInputController {
                 return Bool::YES;
             }
         };
+
+        // 伸縮した文節以外は、前に選んだ候補を読み一致で復元する。これが無いと
+        // 「別の文節を Shift で調整すると、先に選んだ候補 (阿部 等) が既定 (安倍) に
+        // 戻る」(2026-09 ユーザー報告)。伸縮した文節は読みが変わるので既定のまま。
+        Self::restore_segment_selections(&mut new_seg, &segmented);
 
         // 3. state 差し替え + UI 更新
         let surface = new_seg.current_surface();
@@ -1706,6 +1755,32 @@ mod tests {
             new.segments[2].surface(),
             Some("。"),
             "新規文節は既定のまま"
+        );
+    }
+
+    /// ★ 伸縮シナリオ: ある文節を Shift で調整して読みが変わっても、**変わって
+    /// いない文節の選択は保持**される (2026-09: 阿部を選んだ後に別文節を Shift
+    /// すると安倍に戻る問題の回帰)。
+    #[test]
+    fn restore_segment_selections_resize_keeps_unchanged() {
+        // old: [あべ→阿部(既定でない)][さんにたいして→...]
+        let mut old = SegmentedConversion::new(vec![
+            seg("あべ", &["安倍", "阿部"]),
+            seg("さんにたいして", &["さんに対して"]),
+        ]);
+        old.segments[0].select(1); // 阿部
+
+        // 伸縮後: [あべ(不変)][さんにた(読み変化)][いして(新)] — 選択は既定
+        let mut new = SegmentedConversion::new(vec![
+            seg("あべ", &["安倍", "阿部"]),
+            seg("さんにた", &["さんにた"]),
+            seg("いして", &["いして"]),
+        ]);
+        NukoInputController::restore_segment_selections(&mut new, &old);
+        assert_eq!(
+            new.segments[0].surface(),
+            Some("阿部"),
+            "★ 読み不変の あべ 文節は 阿部 を保持"
         );
     }
 

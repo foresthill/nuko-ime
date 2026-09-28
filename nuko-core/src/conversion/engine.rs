@@ -801,6 +801,39 @@ mod tests {
         );
     }
 
+    /// ★ 文節ごとに選んだ候補 (picked>0) が **1 回で** 訂正学習される
+    /// (2026-09 ユーザー報告: 文節ごとの選択が保持されない)。segmented 確定時に
+    /// 文節ごとの観察 (読み, 選択, 候補列, picked) を記録するようにした前提のテスト。
+    /// 「あべ→阿部」を picked=1 (既定でない) で 1 回確定した観察から学習が効く。
+    #[test]
+    fn per_segment_pick_learns_in_one_commit() {
+        use crate::learning::{extract_corrections, ObservationEvent};
+
+        // 文節「あべ」で既定でない候補「阿部」(index 1) を選んで確定した観察 1 件。
+        let events = vec![ObservationEvent::commit_with_candidates(
+            "あべ",
+            "阿部",
+            vec!["安倍".into(), "阿部".into(), "アベ".into()],
+            Some(1),
+        )];
+        // picked>0 は重み 3、min_seen=2 なので **1 回で** 選好化される。
+        let store = extract_corrections(&events, 2);
+        assert!(
+            store.preferred("あべ").is_some(),
+            "★ picked>0 は 1 回で学習される: {store:?}"
+        );
+
+        // convert に反映 (辞書に無い 阿部 も注入されて 1 位)。
+        let mut engine = ConversionEngine::new().unwrap();
+        engine.set_corrections(store);
+        let after = engine.convert("あべ", &ConversionContext::new()).unwrap();
+        assert_eq!(
+            after.selected().unwrap().surface,
+            "阿部",
+            "★ 文節で選んだ 阿部 が次から 1 位"
+        );
+    }
+
     #[cfg(feature = "akaza")]
     #[test]
     fn with_libakaza_falls_back_when_model_dir_missing() {
