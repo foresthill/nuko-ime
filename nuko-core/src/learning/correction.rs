@@ -120,6 +120,12 @@ impl CorrectionStore {
     pub fn suffix_targets(&self, seg_reading: &str) -> Vec<(String, i32)> {
         let mut out = Vec::new();
         for p in &self.preferences {
+            // 接尾ヒューリスティックは「名前 (2 文字以上) + 敬称/助詞」を狙う。
+            // 1 文字読み (あ→亜 等) を許すと「亜い」のような無関係表層を注入/bias
+            // してしまうため除外する (2026-09 分割境界学習で注入対応にした際の安全弁)。
+            if p.reading.chars().count() < 2 {
+                continue;
+            }
             if seg_reading.len() > p.reading.len()
                 && !p.reading.is_empty()
                 && seg_reading.starts_with(&p.reading)

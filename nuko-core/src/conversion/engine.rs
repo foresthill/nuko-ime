@@ -12,6 +12,32 @@ use crate::error::{NukoError, Result};
 use crate::input::{to_halfwidth_katakana, to_katakana};
 use crate::learning::{CorrectionStore, LearningManager};
 
+/// 自然分割の境界 (`nat_bounds` = 0 と `total` を含む累積オフセット) に対し、
+/// `hint` 読みが 1 文節になるよう強制境界を作った `force_ranges` を返す。
+///
+/// hint の内側にある自然境界は除去し、hint の両端を境界に加える。hint の外側は
+/// 自然境界を保つ。結果は 0..total を隙間なく覆う。
+#[cfg(feature = "akaza")]
+fn force_ranges_with_hint(
+    nat_bounds: &[usize],
+    total: usize,
+    hint: &std::ops::Range<usize>,
+) -> Vec<std::ops::Range<usize>> {
+    let mut b: Vec<usize> = nat_bounds
+        .iter()
+        .copied()
+        .filter(|&x| x <= hint.start || x >= hint.end) // hint 内側の境界を除去
+        .collect();
+    b.push(0);
+    b.push(total);
+    b.push(hint.start);
+    b.push(hint.end);
+    b.retain(|&x| x <= total);
+    b.sort_unstable();
+    b.dedup();
+    b.windows(2).map(|w| w[0]..w[1]).collect()
+}
+
 /// ひらがな / カタカナ / 半角カタカナ / 長音符か (辞書の「語」判定用)。
 fn is_kana_char(c: char) -> bool {
     matches!(c,
@@ -114,14 +140,35 @@ pub fn apply_segment_corrections(
                 changed = true;
             }
         }
-        // (2) 敬称/助詞込みで切られた文節を bias
-        //     (例: 文節「まつやさん」→ 松谷さん。libakaza は文中で名前を「さん」込みに切る)
+        // (1') 読み完全一致の学習表層が候補に無ければ **注入** する。
+        //      境界学習で 1 文節に切り直した語 (例: 文節「ざびさん」候補に「ザビさん」が
+        //      無い) や、辞書/libakaza に無い語をユーザー学習で出せるようにする。
+        //      flat の convert() と同じ扱い (2026-09 分割境界学習)。
+        if let Some((surface, bias)) = corrections.preferred(&seg_reading) {
+            if !seg.candidates.iter().any(|c| c.surface == surface) {
+                seg.candidates.push(
+                    Candidate::new(surface, &seg_reading)
+                        .with_score(bias)
+                        .with_source(CandidateSource::User),
+                );
+                changed = true;
+            }
+        }
+        // (2) 敬称/助詞込みで切られた文節を bias / 注入
+        //     (例: 文節「まつやさん」→ 松谷さん、「ざびさん」→ ザビさん。
+        //      libakaza は文中で名前を「さん」込みに切る)
         for (target, bias) in corrections.suffix_targets(&seg_reading) {
-            for c in &mut seg.candidates {
-                if c.surface == target {
-                    c.score = c.score.saturating_add(bias);
-                    changed = true;
-                }
+            if let Some(c) = seg.candidates.iter_mut().find(|c| c.surface == target) {
+                c.score = c.score.saturating_add(bias);
+                changed = true;
+            } else {
+                // 目標表層 (訂正表層 + 接尾かな) が候補に無ければ注入する。
+                seg.candidates.push(
+                    Candidate::new(&target, &seg_reading)
+                        .with_score(bias)
+                        .with_source(CandidateSource::User),
+                );
+                changed = true;
             }
         }
         if changed {
@@ -424,12 +471,85 @@ impl ConversionEngine {
         if segmented.is_empty() {
             return Ok(None);
         }
+        // 分割境界の学習: 学習した読み (訂正) を **分割境界のヒント** にして再分割する。
+        // libakaza は名前を誤分割することがあり (例: ざびさん→[ざ][びさん])、
+        // 文節読みが「ざび」にならないと「ざび→ザビ」の学習が効かない。学習した読みが
+        // 文中に現れ、自然分割で 1 文節になっていなければ、そこを強制境界にする
+        // (2026-09 ユーザー要望「文節の切り方の学習」)。
+        if let Some(forced) = self.resegment_with_hints(backend, reading, &segmented)? {
+            segmented = forced;
+        }
         // Layer 2: **文節ごとに** 個人選好 (訂正学習) の bias を適用して並べ替える。
         // flat の convert() では適用済みだが convert_segmented では未適用だったため、
         // 「まつや→松谷」等の学習が **複数文節の文の中では効かない** バグがあった
         // (2026-09 ユーザー報告: 単体「まつや」は松谷、「まつやさんと…」は松也)。
         apply_segment_corrections(&mut segmented, &self.corrections);
         Ok(Some(segmented))
+    }
+
+    /// 学習した読み (訂正) を分割境界のヒントにして再分割する。
+    ///
+    /// `natural` の自然分割に対し、訂正読み (2 文字以上) が `reading` の部分文字列として
+    /// 現れ、かつ**単一の自然文節になっていない**（誤分割で跨いでいる）ものを探し、
+    /// 最長のものをその読みが 1 文節になるよう強制境界を作って再変換する。
+    /// ヒントが無い / 自然分割と同じなら `None`（再変換しない）。
+    #[cfg(feature = "akaza")]
+    fn resegment_with_hints(
+        &self,
+        backend: &LibakazaBackend,
+        reading: &str,
+        natural: &SegmentedConversion,
+    ) -> Result<Option<SegmentedConversion>> {
+        if self.corrections.is_empty() {
+            return Ok(None);
+        }
+        // 自然分割の境界 (0 と total を含む累積バイトオフセット)。
+        let mut nat_bounds = vec![0usize];
+        let mut off = 0usize;
+        for s in &natural.segments {
+            off += s.reading.len();
+            nat_bounds.push(off);
+        }
+        let total = reading.len();
+
+        // ヒント候補: 訂正読み (2 文字以上) で reading に部分一致し、単一自然文節でないもの。
+        // 最長 (バイト長) を採用する。
+        let mut best: Option<std::ops::Range<usize>> = None;
+        for p in &self.corrections.preferences {
+            let r = p.reading.as_str();
+            if r.chars().count() < 2 {
+                continue;
+            }
+            let mut from = 0usize;
+            while let Some(pos) = reading[from..].find(r) {
+                let start = from + pos;
+                let range = start..start + r.len();
+                // 単一自然文節 = 両端が境界 かつ 内側に境界が無い → 既に unit なので不要。
+                let is_single_segment = nat_bounds.contains(&range.start)
+                    && nat_bounds.contains(&range.end)
+                    && !nat_bounds.iter().any(|&b| b > range.start && b < range.end);
+                if !is_single_segment && best.as_ref().map_or(true, |b| range.len() > b.len()) {
+                    best = Some(range.clone());
+                }
+                from = start + r.len();
+            }
+        }
+        let Some(hint) = best else {
+            return Ok(None);
+        };
+
+        let forced = force_ranges_with_hint(&nat_bounds, total, &hint);
+        // 自然分割と同じなら再変換不要。
+        let nat_ranges: Vec<std::ops::Range<usize>> =
+            nat_bounds.windows(2).map(|w| w[0]..w[1]).collect();
+        if forced == nat_ranges {
+            return Ok(None);
+        }
+        let re = backend.convert_segmented_forced(reading, &forced)?;
+        if re.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(re))
     }
 
     /// 文節境界を伸縮して再変換する (Shift+→ / Shift+← 用、libakaza 有効時のみ)。
@@ -672,6 +792,48 @@ mod tests {
         );
     }
 
+    /// ★ 分割境界学習: 敬称込み文節の目標表層が **候補に無くても注入** される。
+    /// (2026-09 ざびさん: 境界を [ざびさん] に切り直しても候補は kana ばかりで
+    ///  「ザビさん」が無い → suffix_targets 注入で 1 位に出す)
+    #[test]
+    fn segment_corrections_inject_honorific_target_missing_from_candidates() {
+        use crate::conversion::{Segment, SegmentedConversion};
+        use crate::learning::{extract_corrections, ObservationEvent};
+
+        // ざび→ザビ を学習
+        let store = extract_corrections(
+            &[ObservationEvent::commit_with_candidates(
+                "ざび",
+                "ザビ",
+                vec!["ざび".into(), "ザビ".into()],
+                Some(1),
+            )],
+            2,
+        );
+        let cand = |s: &str, r: &str, score: i32| {
+            Candidate::new(s, r)
+                .with_score(score)
+                .with_source(CandidateSource::System)
+        };
+        // 文節読み「ざびさん」候補は kana/カナのみ (「ザビさん」は無い)
+        let mut segmented = SegmentedConversion::new(vec![Segment::new(
+            "ざびさん",
+            vec![
+                cand("ざびさん", "ざびさん", 0),
+                cand("ザビサン", "ざびさん", -5),
+            ],
+        )]);
+
+        apply_segment_corrections(&mut segmented, &store);
+
+        assert_eq!(
+            segmented.segments[0].surface(),
+            Some("ザビさん"),
+            "★ 候補に無い ザビさん を注入して 1 位に出す"
+        );
+        assert!(segmented.corrections_applied);
+    }
+
     /// ★ 学習にマッチしない文節では corrections_applied は立たない。
     /// (nn 曖昧語で「訂正が無ければ flat (ん+母音 代替) を使う」判定の土台)
     #[test]
@@ -829,6 +991,27 @@ mod tests {
         );
     }
 
+    /// ★ 分割境界の学習: 自然境界にヒントの境界を強制する純粋ロジック。
+    #[cfg(feature = "akaza")]
+    #[test]
+    fn force_ranges_with_hint_merges_crossing_boundary() {
+        // 自然 [ざ(0..3)][びさん(3..12)][おおさか(12..24)] を hint ざび(0..6) で割る。
+        // 内側の 3 を除去、6 を追加 → [0..6(ざび)][6..12(さん)][12..24]
+        let nb = vec![0, 3, 12, 24];
+        assert_eq!(
+            force_ranges_with_hint(&nb, 24, &(0..6)),
+            vec![0..6, 6..12, 12..24]
+        );
+    }
+
+    /// ★ hint が既に単一自然文節なら結果は自然境界と同じ (再変換不要の判定に使う)。
+    #[cfg(feature = "akaza")]
+    #[test]
+    fn force_ranges_with_hint_noop_when_already_segment() {
+        let nb = vec![0, 6, 12]; // [0..6][6..12]
+        assert_eq!(force_ranges_with_hint(&nb, 12, &(0..6)), vec![0..6, 6..12]);
+    }
+
     /// ★ 静的辞書の複合語 (よしゅく→予祝) を has_dict_word で検出し、flat convert が
     /// 候補に含める (2026-09 ユーザー報告: 予祝 が出ない)。segmented だと [よ][しゅく]
     /// に割れて出ないので、has_dict_word=true → flat 優先 で 1 語として出す。
@@ -953,9 +1136,10 @@ mod tests {
             "せんねん",           // nn: 千円
             "みのさんに",         // ユーザー報告: flat で Shift しても文節にならない
             "みのさん",
-            "さわれる",    // 学習 さわれる→触れる が分割で効かない (ユーザー報告)
-            "1もじ",       // 学習 1もじ→1文字 が分割で効かない
-            "にほんご？",  // 記号混じり読みも libakaza が [日本語][？] と割る
+            "さわれる", // 学習 さわれる→触れる が分割で効かない (ユーザー報告)
+            "1もじ",    // 学習 1もじ→1文字 が分割で効かない
+            "ざびさんとおおさかにいってきました", // 分割境界の学習: ざび→ザビ を境界ヒントに
+            "にほんご？", // 記号混じり読みも libakaza が [日本語][？] と割る
             "こんにちは1", // 数字混じり読みの耐性確認
             "こんにちは12",
         ] {
