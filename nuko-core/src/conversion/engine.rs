@@ -15,6 +15,24 @@ use crate::learning::{CorrectionStore, LearningManager};
 /// 自然分割の境界 (`nat_bounds` = 0 と `total` を含む累積オフセット) に対し、
 /// `hint` 読みが 1 文節になるよう強制境界を作った `force_ranges` を返す。
 ///
+/// hint が自然境界の run を **ちょうど覆う** (= 隣接する複数の自然文節を統合するだけ) か。
+///
+/// - 両端 (`range.start` / `range.end`) が自然境界 (`nat_bounds`) に一致し、
+/// - 内側に自然境界が 1 つ以上ある (= 現状 2 文節以上に割れている)
+///
+/// ときだけ `true`。これは「隣接文節をまとめる」= **merge-only** な安全操作を意味する。
+///
+/// 片端でも境界からズレる hint は自然文節を **分割** する。短い共通語 (いか→以下 等) が
+/// 「体格→た以下く」「生活→背以下つ」のように無関係語を破壊するため、分割は採用しない
+/// (2026-09-29 回帰修正: ユーザー報告「急に精度が糞化した」の根治)。
+#[cfg(feature = "akaza")]
+fn hint_merges_whole_segments(nat_bounds: &[usize], range: &std::ops::Range<usize>) -> bool {
+    let starts_at_bound = nat_bounds.contains(&range.start);
+    let ends_at_bound = nat_bounds.contains(&range.end);
+    let has_internal_bound = nat_bounds.iter().any(|&b| b > range.start && b < range.end);
+    starts_at_bound && ends_at_bound && has_internal_bound
+}
+
 /// hint の内側にある自然境界は除去し、hint の両端を境界に加える。hint の外側は
 /// 自然境界を保つ。結果は 0..total を隙間なく覆う。
 #[cfg(feature = "akaza")]
@@ -512,8 +530,13 @@ impl ConversionEngine {
         }
         let total = reading.len();
 
-        // ヒント候補: 訂正読み (2 文字以上) で reading に部分一致し、単一自然文節でないもの。
-        // 最長 (バイト長) を採用する。
+        // ヒント候補: 訂正読み (2 文字以上) で reading に部分一致し、**自然境界の run を
+        // ちょうど覆う** (= 隣接文節を統合するだけ) もの。最長 (バイト長) を採用する。
+        //
+        // ★ merge-only 制約 (2026-09-29 回帰修正): 自然文節を **分割** するヒントは採用しない。
+        //   「いか→以下」のような短い共通語が「体格(たいかく)→た以下く」「生活→背以下つ」と
+        //   無関係語を破壊した (ユーザー報告「急に精度が糞化した」)。統合 (ざびさん) は安全だが
+        //   分割は危険なので、両端が自然境界に一致するヒントだけに限定する。
         let mut best: Option<std::ops::Range<usize>> = None;
         for p in &self.corrections.preferences {
             let r = p.reading.as_str();
@@ -524,11 +547,9 @@ impl ConversionEngine {
             while let Some(pos) = reading[from..].find(r) {
                 let start = from + pos;
                 let range = start..start + r.len();
-                // 単一自然文節 = 両端が境界 かつ 内側に境界が無い → 既に unit なので不要。
-                let is_single_segment = nat_bounds.contains(&range.start)
-                    && nat_bounds.contains(&range.end)
-                    && !nat_bounds.iter().any(|&b| b > range.start && b < range.end);
-                if !is_single_segment && best.as_ref().map_or(true, |b| range.len() > b.len()) {
+                if hint_merges_whole_segments(&nat_bounds, &range)
+                    && best.as_ref().map_or(true, |b| range.len() > b.len())
+                {
                     best = Some(range.clone());
                 }
                 from = start + r.len();
@@ -1012,6 +1033,44 @@ mod tests {
         assert_eq!(force_ranges_with_hint(&nb, 12, &(0..6)), vec![0..6, 6..12]);
     }
 
+    /// ★★ 回帰の核 (2026-09-29): 境界学習は **merge-only**。
+    /// 隣接文節をまとめる hint だけ採用し、自然文節を分割する hint は拒否する。
+    #[cfg(feature = "akaza")]
+    #[test]
+    fn hint_merges_whole_segments_accepts_merge_rejects_split() {
+        // ざびさん: 自然 [ざ(0..3)][びさん(3..12)]。hint ざびさん(0..12) は
+        // 両端が境界に一致し内側に境界(3)がある → 統合 = 採用。
+        let nb_zabi = vec![0, 3, 12];
+        assert!(
+            hint_merges_whole_segments(&nb_zabi, &(0..12)),
+            "隣接文節の統合 (ざびさん) は採用"
+        );
+
+        // 体格(たいかく): 自然 [たい(0..6)][かく(6..12)]。学習 いか→以下 の
+        // ヒント範囲は 3..9 で、両端とも自然境界(0,6,12)に無い → 分割 = 拒否。
+        // これを採用すると「体格→た以下く」に壊れる (回帰)。
+        let nb_taikaku = vec![0, 6, 12];
+        assert!(
+            !hint_merges_whole_segments(&nb_taikaku, &(3..9)),
+            "★ 自然文節を分割する いか(3..9) は拒否 (体格を壊さない)"
+        );
+
+        // よいかな: 自然 [よ(0..3)][いか(3..9)][な(9..12)]。よい→良い を学習しても
+        // ヒント よい(0..6) は end=6 が境界に無い (いか の途中) → 拒否。
+        // よいかな は「分割」が要るため境界学習では自動修正できない (要フルモデル/手動)。
+        let nb_yoikana = vec![0, 3, 9, 12];
+        assert!(
+            !hint_merges_whole_segments(&nb_yoikana, &(0..6)),
+            "★ よい(0..6) は いか の途中で終わる → 拒否 (分割は不可)"
+        );
+
+        // 既に単一文節の hint (内側に境界なし) は統合対象が無い → 拒否 (再変換不要)。
+        assert!(
+            !hint_merges_whole_segments(&[0, 6, 12], &(0..6)),
+            "内側境界の無い hint は統合しない"
+        );
+    }
+
     /// ★ 静的辞書の複合語 (よしゅく→予祝) を has_dict_word で検出し、flat convert が
     /// 候補に含める (2026-09 ユーザー報告: 予祝 が出ない)。segmented だと [よ][しゅく]
     /// に割れて出ないので、has_dict_word=true → flat 優先 で 1 語として出す。
@@ -1142,6 +1201,9 @@ mod tests {
             "にほんご？", // 記号混じり読みも libakaza が [日本語][？] と割る
             "こんにちは1", // 数字混じり読みの耐性確認
             "こんにちは12",
+            "どうかえしたらよいかな", // ユーザー報告: よいかな→[よ][以下][な] 誤分割
+            "たいかく", // 回帰(修正済): いか→以下 が体格を「た以下く」に割ってはいけない
+            "せいかつ", // 回帰(修正済): 生活を「背以下つ」に割ってはいけない
         ] {
             let nn = super::nn_alternate_readings(input).len() > 1;
             println!("\n=== 入力: {input} (nn_ambiguous={nn}) ===");
