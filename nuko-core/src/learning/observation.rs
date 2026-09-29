@@ -103,6 +103,15 @@ impl ObservationEvent {
             corrected: corrected.into(),
         }
     }
+
+    /// このイベントの読み(かな)。`Commit` / `Correction` いずれも読みを持つ。
+    #[must_use]
+    pub fn reading(&self) -> &str {
+        match self {
+            ObservationEvent::Commit { reading, .. }
+            | ObservationEvent::Correction { reading, .. } => reading,
+        }
+    }
 }
 
 /// 観察ログ本体。追記のみ・ローカルのみ。
@@ -206,6 +215,34 @@ impl ObservationLog {
         }
         Ok(())
     }
+
+    /// 与えたイベント列でログを **丸ごと書き直す** (透明性: 特定の学習を忘れる用)。
+    ///
+    /// `enabled` に関わらず実行する (ユーザー明示操作)。空なら記録は残さない
+    /// (追記実装と揃えて、全消去時はファイル自体を消す)。
+    pub fn rewrite(&self, events: &[ObservationEvent]) -> Result<()> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        if events.is_empty() {
+            if path.exists() {
+                std::fs::remove_file(path)?;
+            }
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut buf = String::new();
+        for ev in events {
+            let line = serde_json::to_string(ev)
+                .map_err(|e| NukoError::Learning(format!("観察イベントの直列化に失敗: {e}")))?;
+            buf.push_str(&line);
+            buf.push('\n');
+        }
+        std::fs::write(path, buf)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -220,6 +257,56 @@ mod tests {
             name
         ));
         p
+    }
+
+    #[test]
+    fn reading_returns_kana_for_both_variants() {
+        assert_eq!(
+            ObservationEvent::commit("いって", "言って").reading(),
+            "いって"
+        );
+        assert_eq!(
+            ObservationEvent::correction("いって", "言って", "行って").reading(),
+            "いって"
+        );
+    }
+
+    /// ★ forget の土台: 特定の読みを除いて書き直せる (再学習で戻らない durable 忘却)。
+    #[test]
+    fn rewrite_replaces_log_contents() {
+        let path = tmp_path("rewrite");
+        let _ = std::fs::remove_file(&path);
+        let log = ObservationLog::new(true, &path);
+        log.record(&ObservationEvent::commit("いって", "言って"))
+            .unwrap();
+        log.record(&ObservationEvent::commit("あす", "明日"))
+            .unwrap();
+        log.record(&ObservationEvent::commit("いって", "言って"))
+            .unwrap();
+
+        // いって を除去して書き直す。
+        let kept: Vec<_> = log
+            .read_all()
+            .unwrap()
+            .into_iter()
+            .filter(|ev| ev.reading() != "いって")
+            .collect();
+        log.rewrite(&kept).unwrap();
+
+        let after = log.read_all().unwrap();
+        assert_eq!(after.len(), 1, "★ いって が消えて あす だけ残る");
+        assert_eq!(after[0].reading(), "あす");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn rewrite_empty_removes_file() {
+        let path = tmp_path("rewrite-empty");
+        let log = ObservationLog::new(true, &path);
+        log.record(&ObservationEvent::commit("あ", "亜")).unwrap();
+        assert!(path.exists());
+        log.rewrite(&[]).unwrap();
+        assert!(!path.exists(), "★ 空で書き直すとファイルごと消える");
     }
 
     /// ★ 既定(disabled)では 1 バイトも書かない = プライバシー既定の担保。
