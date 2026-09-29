@@ -3,6 +3,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::*;
+use nuko_core::learning::dreaming::{
+    build_prompt, digest_observations, merge_proposals, parse_proposal, DreamProvider, MockProvider,
+};
 use nuko_core::learning::{extract_corrections, CorrectionStore, ObservationLog};
 use nuko_core::prelude::*;
 use std::path::{Path, PathBuf};
@@ -56,6 +59,18 @@ enum Commands {
         #[command(subcommand)]
         action: Option<LearnAction>,
     },
+    /// Layer 3: AI dreaming (観察を整理して選好を提案)。既定は dry-run。
+    Dream {
+        /// プロンプトに載せる読みの最大件数
+        #[arg(long, default_value = "40")]
+        max_readings: usize,
+        /// 推論プロバイダ (現状 "mock" のみ。未指定なら dry-run でプロンプトを表示)
+        #[arg(long)]
+        provider: Option<String>,
+        /// 提案を corrections.toml にマージして保存する (プロバイダ指定時のみ有効)
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -94,6 +109,11 @@ fn main() -> Result<()> {
         Commands::DictInfo => cmd_dict_info(),
         Commands::Info => cmd_info(),
         Commands::Learn { action } => cmd_learn(action),
+        Commands::Dream {
+            max_readings,
+            provider,
+            apply,
+        } => cmd_dream(max_readings, provider.as_deref(), apply),
     }
 }
 
@@ -228,6 +248,84 @@ fn cmd_learn(action: Option<LearnAction>) -> Result<()> {
         LearnAction::Relearn { min_seen } => learn_relearn(&dir, min_seen),
         LearnAction::Clear => learn_clear(&dir),
     }
+}
+
+/// Layer 3: AI dreaming。観察を要約してプロンプトを組み立て、
+/// プロバイダ未指定なら dry-run で表示、指定なら推論→提案マージ。
+fn cmd_dream(max_readings: usize, provider: Option<&str>, apply: bool) -> Result<()> {
+    let dir = nuko_data_dir()?;
+    let obs = ObservationLog::new(true, dir.join("observations.jsonl"));
+    let events = obs.read_all().unwrap_or_default();
+    let store = CorrectionStore::load(dir.join("corrections.toml")).unwrap_or_default();
+    let digest = digest_observations(&events, max_readings);
+    let prompt = build_prompt(&digest, &store);
+
+    println!("{}", "ぬこIME dreaming (Layer 3)".cyan().bold());
+    println!(
+        "観察 {} 件 → 読み {} 件を要約 / 学習済み {} 件",
+        events.len().to_string().yellow(),
+        digest.readings.len().to_string().yellow(),
+        store.len().to_string().yellow()
+    );
+    println!();
+
+    let Some(provider_name) = provider else {
+        // dry-run: 送信されるプロンプトをそのまま見せる (API キー不要)。
+        println!(
+            "{}",
+            "── プロバイダ未指定: dry-run (以下が送信されるプロンプト) ──".dimmed()
+        );
+        println!("{prompt}");
+        println!();
+        println!(
+            "  {} 実推論は `nuko dream --provider mock` (雛形)。実 LLM 連携は今後。",
+            "ヒント:".dimmed()
+        );
+        return Ok(());
+    };
+
+    // プロバイダを解決 (現状 mock のみ)。
+    let provider: Box<dyn DreamProvider> = match provider_name {
+        "mock" => Box::new(MockProvider::empty()),
+        other => {
+            anyhow::bail!("未知のプロバイダ: {other} (現状 \"mock\" のみ対応)");
+        }
+    };
+
+    let raw = provider.complete(&prompt)?;
+    let proposal = parse_proposal(&raw)?;
+    let (merged, report) = merge_proposals(&store, &proposal, 2);
+
+    println!(
+        "{} が {} 件提案 → 新規 {} 件 / 恒等除外 {} 件 / 既存重複 {} 件",
+        provider.name().cyan(),
+        proposal.proposals.len(),
+        report.added.len().to_string().green(),
+        report.skipped_identity.len(),
+        report.skipped_existing.len()
+    );
+    for p in &report.added {
+        println!(
+            "  {} → {}  {}",
+            p.reading.yellow(),
+            p.prefer.white().bold(),
+            "(AI提案)".dimmed()
+        );
+    }
+
+    if apply && !report.added.is_empty() {
+        merged.save(dir.join("corrections.toml"))?;
+        println!(
+            "{} corrections.toml に保存しました。NukoIME 再起動で反映されます。",
+            "✅".green()
+        );
+    } else if !report.added.is_empty() {
+        println!(
+            "  {} 保存するには `--apply` を付けてください。",
+            "注:".dimmed()
+        );
+    }
+    Ok(())
 }
 
 /// 学習した選好を一覧表示する共通ヘルパ。
