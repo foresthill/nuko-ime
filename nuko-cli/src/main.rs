@@ -89,6 +89,14 @@ enum LearnAction {
     },
     /// 学習データ (観察ログ + 訂正選好) を削除する
     Clear,
+    /// 特定の読みの学習を忘れる (誤学習の取消。観察ログからも除去して再学習で戻さない)
+    Forget {
+        /// 忘れる読み (かな)。例: いって
+        reading: String,
+        /// この表層に限定して忘れる (省略時はその読みの全学習)
+        #[arg(long)]
+        surface: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -247,7 +255,67 @@ fn cmd_learn(action: Option<LearnAction>) -> Result<()> {
         LearnAction::Off => learn_toggle(&dir, false),
         LearnAction::Relearn { min_seen } => learn_relearn(&dir, min_seen),
         LearnAction::Clear => learn_clear(&dir),
+        LearnAction::Forget { reading, surface } => {
+            learn_forget(&dir, &reading, surface.as_deref())
+        }
     }
+}
+
+/// 特定の読みの学習を忘れる。観察ログから該当イベントを除去して書き直し、
+/// 訂正選好を再抽出する (= 再学習しても戻らない、durable な忘却)。
+fn learn_forget(dir: &Path, reading: &str, surface: Option<&str>) -> Result<()> {
+    use nuko_core::learning::ObservationEvent;
+
+    let obs = ObservationLog::new(true, dir.join("observations.jsonl"));
+    let events = obs.read_all()?;
+    let before = events.len();
+
+    // 読み一致 (surface 指定時はさらに表層/訂正後一致) を除去。
+    let kept: Vec<ObservationEvent> = events
+        .into_iter()
+        .filter(|ev| {
+            if ev.reading() != reading {
+                return true; // 別の読みは残す
+            }
+            match surface {
+                None => false, // 読み一致は全部忘れる
+                Some(s) => match ev {
+                    ObservationEvent::Commit { surface, .. } => surface != s,
+                    ObservationEvent::Correction { corrected, .. } => corrected != s,
+                },
+            }
+        })
+        .collect();
+
+    let removed = before - kept.len();
+    if removed == 0 {
+        println!(
+            "{} 読み「{}」{}の学習は見つかりませんでした。",
+            "…".dimmed(),
+            reading.yellow(),
+            surface.map(|s| format!("→「{s}」")).unwrap_or_default()
+        );
+        return Ok(());
+    }
+
+    // 観察ログを書き直し → 訂正選好を再抽出して保存 (durable)。
+    obs.rewrite(&kept)?;
+    let store = extract_corrections(&kept, 2);
+    store.save(dir.join("corrections.toml"))?;
+
+    println!(
+        "{} 読み「{}」{}の学習を忘れました (観察 {} 件除去、選好 {} 件に再構築)。",
+        "✅".green(),
+        reading.yellow(),
+        surface.map(|s| format!("→「{s}」")).unwrap_or_default(),
+        removed.to_string().yellow(),
+        store.len().to_string().yellow()
+    );
+    println!(
+        "  {} NukoIME を再起動すると反映されます (入力ソースを切替→戻す)。",
+        "注:".dimmed()
+    );
+    Ok(())
 }
 
 /// Layer 3: AI dreaming。観察を要約してプロンプトを組み立て、
