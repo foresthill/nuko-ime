@@ -25,6 +25,13 @@ use crate::error::{NukoError, Result};
 /// (スケールの厳密なチューニングは変換への配線時に詰める)
 const CORRECTION_BOOST: i32 = 300_000;
 
+/// [`CorrectionStore::suffix_targets`] が許可する接尾かな (敬称のみ)。
+///
+/// libakaza が名前を敬称込み 1 文節に切る (まつやさん / ざびさん) ケースだけを狙う。
+/// 一般語尾 (じょうぶ・かつ 等) を許すと `だい→台` の学習が `だいじょうぶ`(大丈夫) を
+/// 「台じょうぶ」に壊す (2026-09-29 実測)。ゆえに敬称の閉じたリストに限定する。
+const HONORIFIC_SUFFIXES: &[&str] = &["さん", "くん", "ちゃん", "さま", "様", "君"];
+
 /// 個人の変換選好 1 件。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Preference {
@@ -113,16 +120,15 @@ impl CorrectionStore {
     /// 読み「まつやさん」= 訂正読み「まつや」+ 接尾「さん」を検出し、
     /// 目標表層「松谷さん」= 訂正表層「松谷」+ 接尾「さん」を bias する。
     ///
-    /// 接尾かな (さん・くん・と・の 等の敬称/助詞) はそのまま表層に出るため、
-    /// **目標表層が実在候補と完全一致したときだけ** 発火する安全な近似。
-    /// tail が漢字化される語では目標が候補に無く、no-op になる。
+    /// 接尾は **敬称 ([`HONORIFIC_SUFFIXES`]) のみ** に限定する。名前+敬称だけを狙い、
+    /// 「訂正読み + 任意のかな」に広げると別語を壊す (2026-09-29 実測:
+    /// `だい→台` の学習が `だいじょうぶ`(大丈夫) を「台じょうぶ」に押し上げた回帰)。
     #[must_use]
     pub fn suffix_targets(&self, seg_reading: &str) -> Vec<(String, i32)> {
         let mut out = Vec::new();
         for p in &self.preferences {
-            // 接尾ヒューリスティックは「名前 (2 文字以上) + 敬称/助詞」を狙う。
-            // 1 文字読み (あ→亜 等) を許すと「亜い」のような無関係表層を注入/bias
-            // してしまうため除外する (2026-09 分割境界学習で注入対応にした際の安全弁)。
+            // 名前 (2 文字以上) を狙う。1 文字読み (あ→亜 等) は「亜い」のような
+            // 無関係表層を作るため除外。
             if p.reading.chars().count() < 2 {
                 continue;
             }
@@ -131,6 +137,10 @@ impl CorrectionStore {
                 && seg_reading.starts_with(&p.reading)
             {
                 let tail = &seg_reading[p.reading.len()..];
+                // ★ tail は敬称のみ許可。じょうぶ・かつ 等の一般語尾では発火させない。
+                if !HONORIFIC_SUFFIXES.contains(&tail) {
+                    continue;
+                }
                 let target = format!("{}{}", p.prefer, tail);
                 let bias = CORRECTION_BOOST + (p.weight as i32).saturating_mul(10).min(50_000);
                 out.push((target, bias));
@@ -417,6 +427,29 @@ mod tests {
         assert!(
             store.suffix_targets("べつのなまえ").is_empty(),
             "★ 前方一致しない読みは対象外"
+        );
+    }
+
+    /// ★★ 回帰 (2026-09-29): 一般語尾は suffix_targets の対象外。
+    /// `だい→台` の学習が `だいじょうぶ`(大丈夫) を「台じょうぶ」に壊してはいけない。
+    /// tail「じょうぶ」は敬称でないので発火しない。
+    #[test]
+    fn suffix_targets_ignores_non_honorific_tail() {
+        let events = vec![commit("だい", "台"), commit("だい", "台")];
+        let store = extract_corrections(&events, 2);
+        assert!(
+            store.suffix_targets("だいじょうぶ").is_empty(),
+            "★ 敬称でない語尾 (じょうぶ) では発火しない = 台じょうぶ を作らない"
+        );
+        // 敬称 tail は従来どおり発火する (回帰しない)。
+        let events2 = vec![commit("たろう", "太郎"), commit("たろう", "太郎")];
+        let store2 = extract_corrections(&events2, 2);
+        assert!(
+            store2
+                .suffix_targets("たろうさん")
+                .iter()
+                .any(|(s, _)| s == "太郎さん"),
+            "★ 敬称 さん は従来どおり 太郎さん を返す"
         );
     }
 
