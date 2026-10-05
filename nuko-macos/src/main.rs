@@ -1,4 +1,7 @@
 #![allow(non_snake_case)]
+// unknown_lints を先に許可 → 下行の新 lint 名を旧 clippy が未知扱いしても壊れない (forward-compat)。
+#![allow(unknown_lints)]
+#![allow(clippy::assert_is_empty)] // clippy 1.99+ の新 lint (テスト assert! の可読性優先)
 
 mod candidate_panel;
 mod commit;
