@@ -974,6 +974,49 @@ mod tests {
         );
     }
 
+    /// ★★ 学習の end-to-end テスト (2026-10-05 ユーザー質問「学習自体のテストは作れるか」)。
+    ///
+    /// 「文全体の読み→表層」を 1 回意図的に確定した観察から選好を抽出すると、
+    /// convert がその複合語を 1 位に注入する。これは **情報公開課 固有ではなくパターン**
+    /// (任意の複合語に効く) であることを、同一コードパスを複数語で回して示す。
+    /// 単字曖昧文節 (か→課) を bare で学習できない語を、文脈=複合語として救う仕組み。
+    #[test]
+    fn learned_compound_is_injected_first_as_general_pattern() {
+        use crate::learning::{extract_corrections, ObservationEvent};
+        let ctx = ConversionContext::new();
+
+        for (reading, surface) in [
+            ("じょうほうこうかいか", "情報公開課"),
+            ("こうほうかちょう", "広報課長"),
+        ] {
+            let mut engine = ConversionEngine::new().unwrap();
+
+            // 前提: 学習前は複合語そのものは 1 位でない (辞書に無い長い複合語)
+            let before = engine.convert(reading, &ctx).unwrap();
+            assert_ne!(
+                before.iter().next().unwrap().surface,
+                surface,
+                "前提: 学習前に {surface} が既定で出ることはない"
+            );
+
+            // controller の「複合語記録」を模す: 文全体を 1 回意図的に確定 (picked>0)
+            let events = vec![ObservationEvent::commit_with_candidates(
+                reading,
+                surface,
+                Vec::new(),
+                Some(1),
+            )];
+            engine.set_corrections(extract_corrections(&events, 2));
+
+            let after = engine.convert(reading, &ctx).unwrap();
+            assert_eq!(
+                after.iter().next().unwrap().surface,
+                surface,
+                "★ 学習した複合語 {surface} が 1 位 (パターン: 任意語に効く)"
+            );
+        }
+    }
+
     /// ★ Layer 2: 学習した表層が候補に無くても **注入** される (さわれる→触れる 型)。
     /// 辞書/libakaza に無い語 (可能形など) でも、ユーザー学習で 1 位に出せる。
     /// (2026-09 ユーザー報告: 分割される語の学習が効かない)
