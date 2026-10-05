@@ -15,6 +15,8 @@
 //! window.show(&candidates)?;
 //! ```
 
+#![allow(unknown_lints)]
+// 新しい clippy lint 名を旧 clippy が未知扱いしても壊れないように先頭で許可
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
@@ -29,7 +31,8 @@
     clippy::redundant_closure_for_method_calls,
     clippy::map_unwrap_or,
     clippy::items_after_statements,
-    clippy::doc_markdown
+    clippy::doc_markdown,
+    clippy::assert_is_empty             // clippy 1.99+ の新 lint
 )]
 
 pub mod candidate_window;

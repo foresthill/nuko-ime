@@ -17,6 +17,8 @@
 //! let candidates = engine.convert("にほんご")?;
 //! ```
 
+#![allow(unknown_lints)]
+// 新しい clippy lint 名 (例: assert_is_empty) を旧 clippy が未知扱いしても壊れないように先頭で許可
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(clippy::all)]
@@ -34,7 +36,8 @@
     clippy::redundant_closure_for_method_calls, // 可読性優先で残すケースを許容
     clippy::items_after_statements,     // ヘルパー定義位置の柔軟性を保つ
     clippy::map_unwrap_or,              // map(...).unwrap_or(...) も意図が明確なら許容
-    clippy::doc_markdown                // 日本語混在 doc で英単語にバッククォート強要を緩和
+    clippy::doc_markdown,               // 日本語混在 doc で英単語にバッククォート強要を緩和
+    clippy::assert_is_empty             // clippy 1.99+ の新 lint。テスト assert!(x.is_empty()) の可読性優先
 )]
 
 pub mod conversion;
