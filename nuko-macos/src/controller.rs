@@ -1244,9 +1244,13 @@ impl NukoInputController {
                             debug_log(&format!("観察ログ記録エラー: {e}"));
                         }
                     } else {
+                        let mut any_non_default = false;
                         for (r, surf, cands, picked) in &seg_observations {
                             if r.is_empty() || surf.is_empty() {
                                 continue;
+                            }
+                            if *picked > 0 {
+                                any_non_default = true;
                             }
                             let ev = ObservationEvent::commit_with_candidates(
                                 r.as_str(),
@@ -1256,6 +1260,26 @@ impl NukoInputController {
                             );
                             if let Err(e) = log.record(&ev) {
                                 debug_log(&format!("観察ログ(文節)記録エラー: {e}"));
+                            }
+                        }
+                        // 複合語の学習: 非既定の選択を含む segmented 確定は、**文全体**の
+                        // 読み→表層も記録する。単字の曖昧文節 (か→課) は bare では学習
+                        // できない (恒等 か→か が支配するため extract がスキップ) ので、
+                        // 文脈ごと (じょうほうこうかいか→情報公開課) で覚える。次回は
+                        // has_whole_correction 経由で flat 優先・注入される (だいじょうぶ
+                        // と同じ仕組み)。ユーザー報告「情報公開課 が何回選んでも学習されない」。
+                        if any_non_default
+                            && !reading.is_empty()
+                            && reading.as_str() != decision.commit_text.as_str()
+                        {
+                            let whole = ObservationEvent::commit_with_candidates(
+                                reading.as_str(),
+                                decision.commit_text.as_str(),
+                                Vec::new(),
+                                Some(1),
+                            );
+                            if let Err(e) = log.record(&whole) {
+                                debug_log(&format!("観察ログ(複合語)記録エラー: {e}"));
                             }
                         }
                     }

@@ -287,6 +287,42 @@ mod tests {
         assert_eq!(store.preferences[0].seen, 3);
     }
 
+    /// ★★ 複合語の学習 (2026-10-05 ユーザー報告「情報公開課 が何回選んでも学習されない」)。
+    /// 単字の曖昧文節「か」は素通し(助詞)が支配的なので bare では学習されない(恒等スキップ=
+    /// 助詞のかを守る)。だが複合語「じょうほうこうかいか→情報公開課」は 1 回の意図的確定で学習される。
+    #[test]
+    fn compound_learned_while_bare_ambiguous_char_stays_unlearned() {
+        let mut events = Vec::new();
+        for _ in 0..10 {
+            events.push(commit("か", "か")); // 助詞「か」を多数素通し
+        }
+        // 「か→課」を意図的に選択 (picked>0) しても…
+        events.push(ObservationEvent::commit_with_candidates(
+            "か",
+            "課",
+            vec!["か".into(), "課".into()],
+            Some(9),
+        ));
+        // 文全体 (複合語) も記録 (controller の新ロジックが入れる)
+        events.push(ObservationEvent::commit_with_candidates(
+            "じょうほうこうかいか",
+            "情報公開課",
+            Vec::new(),
+            Some(1),
+        ));
+        let store = extract_corrections(&events, 2);
+
+        assert!(
+            store.preferred("か").is_none(),
+            "★ bare「か」は学習しない (助詞のかを課にしない)"
+        );
+        assert_eq!(
+            store.preferred("じょうほうこうかいか").map(|(s, _)| s),
+            Some("情報公開課"),
+            "★ 複合語は 1 回の意図的確定で学習される"
+        );
+    }
+
     #[test]
     fn below_threshold_makes_no_preference() {
         let events = vec![commit("あ", "亜"), commit("あ", "亜")];
