@@ -240,6 +240,36 @@ pub fn decide_command(selector_name: &std::ffi::CStr, is_composing: bool) -> Com
     }
 }
 
+/// ファンクションキー (F6-F10) による文字種変換の種類。
+///
+/// macOS 日本語入力の慣例 (Apple 公式 / MS-IME 準拠):
+/// - F6 → ひらがな / F7 → 全角カタカナ / F8 → 半角カタカナ
+/// - F9 → 全角英数 / F10 → 半角英数 (生ローマ字が要るため現状は未対応 = None)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FKeyConversion {
+    /// F6: ひらがな
+    Hiragana,
+    /// F7: 全角カタカナ
+    Katakana,
+    /// F8: 半角カタカナ
+    HalfwidthKatakana,
+}
+
+/// macOS 仮想キーコード (`NSEvent.keyCode`) を F キー変換種にマップする。
+///
+/// `kVK_F6=0x61` / `kVK_F7=0x62` / `kVK_F8=0x64`。それ以外 (他キーの `noop:` 含む) は `None`。
+/// F9(`0x65`)/F10(`0x6D`) は全角/半角英数で、変換に生ローマ字が要るため現状は `None`
+/// (かな変換の F6-F8 を先行実装、英数は次段)。
+#[must_use]
+pub fn fkey_conversion(key_code: u16) -> Option<FKeyConversion> {
+    match key_code {
+        0x61 => Some(FKeyConversion::Hiragana),          // F6
+        0x62 => Some(FKeyConversion::Katakana),          // F7
+        0x64 => Some(FKeyConversion::HalfwidthKatakana), // F8
+        _ => None,
+    }
+}
+
 /// activation guard 閾値 (ms)。IME 活性化直後のこの時間内に来た Space は、
 /// ソース切替ショートカット (Ctrl+Space) 由来の「漏れ」と判定して握り潰す。
 pub const ACTIVATION_GUARD_MS: u128 = 150;
@@ -431,6 +461,32 @@ pub fn apply_segment_focus_shift(
     }
 
     (segmented.focused, segmented.current_surface())
+}
+
+#[cfg(test)]
+mod fkey_tests {
+    use super::{fkey_conversion, FKeyConversion};
+
+    /// ★ F6/F7/F8 の keyCode が正しい変換種にマップされる。
+    #[test]
+    fn fkey_conversion_maps_f6_f7_f8() {
+        assert_eq!(fkey_conversion(0x61), Some(FKeyConversion::Hiragana), "F6");
+        assert_eq!(fkey_conversion(0x62), Some(FKeyConversion::Katakana), "F7");
+        assert_eq!(
+            fkey_conversion(0x64),
+            Some(FKeyConversion::HalfwidthKatakana),
+            "F8"
+        );
+    }
+
+    /// ★ F9/F10/その他キー (noop: は多くのキーで届く) は None = 素通し。
+    #[test]
+    fn fkey_conversion_none_for_others() {
+        assert_eq!(fkey_conversion(0x65), None, "F9 は現状未対応");
+        assert_eq!(fkey_conversion(0x6D), None, "F10 は現状未対応");
+        assert_eq!(fkey_conversion(0x00), None, "A キー等は対象外");
+        assert_eq!(fkey_conversion(0x31), None, "Space 等は対象外");
+    }
 }
 
 #[cfg(test)]
