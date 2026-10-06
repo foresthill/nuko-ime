@@ -683,11 +683,8 @@ static READING_TO_SURFACE: Lazy<HashMap<String, Vec<(String, String)>>> = Lazy::
         // 予祝 (よしゅく): 予・祝は一般語だが「予祝」複合が辞書に無かった (2026-09 ユーザー)
         ("よしゅく", vec![("予祝", "名詞")]),
         ("よ", vec![("予", "名詞")]), // 単体 予 が候補に無かった (merge挿入なので既定は よ のまま)
-        // 助数詞の音便形 (2026-10 ユーザー: なんじゅっぽん→何十本)。
-        // ★ これは個別パッチ。「本/杯/匹…×数×音便」は何百何千あるクラスなので、
-        //   本来は model-pipeline のカウンター生成器で網羅すべき (docs/research 参照)。
-        //   ここでは実害の大きい頻出形だけ最小限に補う。
-        ("じゅっぽん", vec![("十本", "名詞")]), // 辞書は じゅうほん→十本 のみで音便 じゅっぽん が欠落
+        // 助数詞の単体音便 (じゅっぽん→十本 等) は counter.rs のルール生成器が網羅する。
+        // ここには生成器が扱わない **複合数** (何十/何百…) だけ残す (2026-10 ユーザー)。
         ("なんじゅっぽん", vec![("何十本", "名詞")]),
         // 丸・箇条書き記号 (2026-09 ユーザー: 黒丸●をよく使う)
         (
@@ -812,6 +809,17 @@ static READING_TO_SURFACE: Lazy<HashMap<String, Vec<(String, String)>>> = Lazy::
         map.entry(reading.to_string())
             .or_default()
             .extend(surface_list);
+    }
+
+    // 助数詞音便 (本/杯/匹… × 数 × 音便) を **規則から生成** して流し込む
+    // (別モジュール counter.rs)。「じゅっぽん→十本」等を個別登録せず網羅する。
+    // has_dict_word 経由で変換候補の 1 位に出せる (2026-10 ユーザー要望)。
+    for (reading, surfaces) in super::counter::counter_entries() {
+        let surface_list: Vec<(String, String)> = surfaces
+            .into_iter()
+            .map(|(s, pos)| (s, pos.to_string()))
+            .collect();
+        map.entry(reading).or_default().extend(surface_list);
     }
 
     map
