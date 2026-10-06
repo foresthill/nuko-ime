@@ -6,5 +6,8 @@ mod kana;
 mod mozc_table;
 mod romaji;
 
-pub use kana::{to_halfwidth_katakana, to_hiragana, to_katakana, KanaType};
+pub use kana::{
+    to_fullwidth_ascii, to_halfwidth_ascii, to_halfwidth_katakana, to_hiragana, to_katakana,
+    KanaType,
+};
 pub use romaji::RomajiConverter;

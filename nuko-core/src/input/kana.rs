@@ -163,6 +163,42 @@ pub fn to_halfwidth_katakana(input: &str) -> String {
         .collect()
 }
 
+/// 半角 ASCII 印字可能文字を全角に変換（F9: 全角英数）。
+///
+/// 入力した**ローマ字（ascii）そのもの**を全角ラテンにする。
+/// `0x20`(space)→`U+3000`、`0x21..=0x7E`→`U+FF01..=U+FF5E`。その他の文字はそのまま。
+///
+/// 例: `kawasaki` → `ｋａｗａｓａｋｉ`
+#[must_use]
+pub fn to_fullwidth_ascii(input: &str) -> String {
+    input
+        .chars()
+        .map(|c| match c {
+            ' ' => '\u{3000}',
+            '\u{21}'..='\u{7E}' => char::from_u32(c as u32 - 0x21 + 0xFF01).unwrap_or(c),
+            _ => c,
+        })
+        .collect()
+}
+
+/// 全角 ASCII を半角に変換（F10: 半角英数）。
+///
+/// `U+3000`→space、`U+FF01..=U+FF5E`→`0x21..=0x7E`。その他の文字はそのまま。
+/// 既に半角の ascii はそのまま返るので、ローマ字 ascii をそのまま確定する用途にも使える。
+///
+/// 例: `ｋａｗａｓａｋｉ` → `kawasaki`
+#[must_use]
+pub fn to_halfwidth_ascii(input: &str) -> String {
+    input
+        .chars()
+        .map(|c| match c {
+            '\u{3000}' => ' ',
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFF01 + 0x21).unwrap_or(c),
+            _ => c,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +218,43 @@ mod tests {
     #[test]
     fn test_to_halfwidth() {
         assert_eq!(to_halfwidth_katakana("にほんご"), "ニホンゴ");
+    }
+
+    #[test]
+    fn test_to_fullwidth_ascii() {
+        assert_eq!(to_fullwidth_ascii("kawasaki"), "ｋａｗａｓａｋｉ");
+        assert_eq!(to_fullwidth_ascii("abc123"), "ａｂｃ１２３");
+        assert_eq!(to_fullwidth_ascii("A!z"), "Ａ！ｚ");
+        assert_eq!(
+            to_fullwidth_ascii("a b"),
+            "ａ　ｂ",
+            "半角スペース→全角スペース"
+        );
+    }
+
+    #[test]
+    fn test_to_halfwidth_ascii() {
+        assert_eq!(to_halfwidth_ascii("ｋａｗａｓａｋｉ"), "kawasaki");
+        assert_eq!(to_halfwidth_ascii("Ａ！ｚ"), "A!z");
+        assert_eq!(
+            to_halfwidth_ascii("ａ　ｂ"),
+            "a b",
+            "全角スペース→半角スペース"
+        );
+        assert_eq!(
+            to_halfwidth_ascii("kawasaki"),
+            "kawasaki",
+            "既に半角はそのまま"
+        );
+    }
+
+    #[test]
+    fn test_ascii_width_roundtrip() {
+        let s = "Nuko-IME v0.1.2!";
+        assert_eq!(
+            to_halfwidth_ascii(&to_fullwidth_ascii(s)),
+            s,
+            "全角→半角で往復一致"
+        );
     }
 }
