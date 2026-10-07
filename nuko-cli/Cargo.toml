@@ -43,5 +43,8 @@ tracing-subscriber = { workspace = true }
 # ユーティリティ
 colored = "2.1"
 
+# HTTP (OpenRouter dreaming 用、軽量・同期・rustls TLS)
+ureq = { version = "2", features = ["json", "tls"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

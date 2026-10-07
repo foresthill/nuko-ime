@@ -1,5 +1,7 @@
 //! ぬこIME CLI
 
+mod openrouter;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::*;
@@ -64,9 +66,12 @@ enum Commands {
         /// プロンプトに載せる読みの最大件数
         #[arg(long, default_value = "40")]
         max_readings: usize,
-        /// 推論プロバイダ (現状 "mock" のみ。未指定なら dry-run でプロンプトを表示)
+        /// 推論プロバイダ ("mock" / "openrouter"。未指定なら dry-run でプロンプト表示)
         #[arg(long)]
         provider: Option<String>,
+        /// モデル (openrouter 用。未指定なら ai.toml の model、それも無ければエラー)
+        #[arg(long)]
+        model: Option<String>,
         /// 提案を corrections.toml にマージして保存する (プロバイダ指定時のみ有効)
         #[arg(long)]
         apply: bool,
@@ -120,8 +125,9 @@ fn main() -> Result<()> {
         Commands::Dream {
             max_readings,
             provider,
+            model,
             apply,
-        } => cmd_dream(max_readings, provider.as_deref(), apply),
+        } => cmd_dream(max_readings, provider.as_deref(), model.as_deref(), apply),
     }
 }
 
@@ -320,7 +326,12 @@ fn learn_forget(dir: &Path, reading: &str, surface: Option<&str>) -> Result<()> 
 
 /// Layer 3: AI dreaming。観察を要約してプロンプトを組み立て、
 /// プロバイダ未指定なら dry-run で表示、指定なら推論→提案マージ。
-fn cmd_dream(max_readings: usize, provider: Option<&str>, apply: bool) -> Result<()> {
+fn cmd_dream(
+    max_readings: usize,
+    provider: Option<&str>,
+    model: Option<&str>,
+    apply: bool,
+) -> Result<()> {
     let dir = nuko_data_dir()?;
     let obs = ObservationLog::new(true, dir.join("observations.jsonl"));
     let events = obs.read_all().unwrap_or_default();
@@ -346,17 +357,39 @@ fn cmd_dream(max_readings: usize, provider: Option<&str>, apply: bool) -> Result
         println!("{prompt}");
         println!();
         println!(
-            "  {} 実推論は `nuko dream --provider mock` (雛形)。実 LLM 連携は今後。",
+            "  {} 実推論は `nuko dream --provider openrouter` (要 OPENROUTER_API_KEY)。",
             "ヒント:".dimmed()
         );
         return Ok(());
     };
 
-    // プロバイダを解決 (現状 mock のみ)。
+    // プロバイダを解決 (mock / openrouter)。
     let provider: Box<dyn DreamProvider> = match provider_name {
         "mock" => Box::new(MockProvider::empty()),
+        "openrouter" => {
+            use crate::openrouter::{DreamConfig, OpenRouterProvider};
+            let cfg = DreamConfig::load(dir.join("ai.toml"))?;
+            let api_key = std::env::var("OPENROUTER_API_KEY").map_err(|_| {
+                anyhow::anyhow!(
+                    "OPENROUTER_API_KEY が未設定です。\n  export OPENROUTER_API_KEY=sk-or-... \
+                     を設定してください (設定画面でも入力可)。"
+                )
+            })?;
+            let model = model.map(String::from).or(cfg.model).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "モデル未指定です。--model か ai.toml の model を設定してください \
+                         (例: anthropic/claude-3.5-sonnet)。"
+                )
+            })?;
+            println!(
+                "  {} openrouter / model={}",
+                "プロバイダ:".dimmed(),
+                model.cyan()
+            );
+            Box::new(OpenRouterProvider::new(api_key, model, cfg.base_url))
+        }
         other => {
-            anyhow::bail!("未知のプロバイダ: {other} (現状 \"mock\" のみ対応)");
+            anyhow::bail!("未知のプロバイダ: {other} (\"mock\" / \"openrouter\")");
         }
     };
 
