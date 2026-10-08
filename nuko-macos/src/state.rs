@@ -122,8 +122,14 @@ pub fn learning_status_text() -> String {
     if store.is_empty() {
         s.push_str("学習した変換選好: まだありません\n");
     } else {
-        s.push_str(&format!("学習した変換選好（{} 件）:\n", store.len()));
-        for p in &store.preferences {
+        // パネルはスクロール可能なので全件表示する (よく使う順 = seen 降順)。
+        s.push_str(&format!(
+            "学習した変換選好（{} 件・よく使う順）:\n",
+            store.len()
+        ));
+        let mut prefs: Vec<_> = store.preferences.iter().collect();
+        prefs.sort_by(|a, b| b.seen.cmp(&a.seen).then_with(|| a.reading.cmp(&b.reading)));
+        for p in &prefs {
             s.push_str(&format!("　{} → {}（{}回）\n", p.reading, p.prefer, p.seen));
         }
     }
