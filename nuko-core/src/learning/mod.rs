@@ -7,6 +7,7 @@ pub mod dreaming;
 mod frequency;
 mod manager;
 pub mod observation;
+pub mod segmentation;
 
 pub use correction::{extract_corrections, CorrectionStore, Preference};
 pub use dreaming::{
@@ -15,3 +16,4 @@ pub use dreaming::{
 };
 pub use manager::LearningManager;
 pub use observation::{ObservationEvent, ObservationLog};
+pub use segmentation::{ranges_from_segment_readings, SegmentationEntry, SegmentationStore};

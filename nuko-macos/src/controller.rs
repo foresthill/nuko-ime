@@ -1266,8 +1266,21 @@ impl NukoInputController {
             })
             .unwrap_or_default();
 
+        // 文節位置の学習: この入力を Shift で切り直して確定したなら、切り方を覚える
+        // (次から同じ読みでその区切りを再適用。2026-10 ユーザー要望)。
+        let learn_segmentation =
+            state.segment_resized && state.segmented.is_some() && !reading.is_empty();
+
         state.reset();
         drop(state);
+
+        if learn_segmentation {
+            let seg_readings: Vec<String> = seg_observations
+                .iter()
+                .map(|(r, _, _, _)| r.clone())
+                .collect();
+            crate::state::learn_segmentation_and_save(&reading, &seg_readings);
+        }
 
         Self::hide_candidate_panel();
 
@@ -1704,6 +1717,8 @@ impl NukoInputController {
             let mut state = self.ivars().state.borrow_mut();
             state.segmented = Some(new_seg);
             state.candidates = Some(focused_candidates);
+            // この入力は明示的に切り直された → 確定時に文節位置を学習する。
+            state.segment_resized = true;
         }
         debug_log(&format!(
             "handle_segment_resize: extend_right={extend_right} focused={focused} surface='{surface}'"
