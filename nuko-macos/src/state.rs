@@ -122,23 +122,15 @@ pub fn learning_status_text() -> String {
     if store.is_empty() {
         s.push_str("学習した変換選好: まだありません\n");
     } else {
-        // 全件 (数百〜) を出すとパネルが画面を超えて閉じられなくなるため、
-        // **よく使う順 (seen 降順) に上位 SHOW_MAX 件** だけ表示して残りは件数で示す。
-        const SHOW_MAX: usize = 25;
+        // パネルはスクロール可能なので全件表示する (よく使う順 = seen 降順)。
         s.push_str(&format!(
-            "学習した変換選好（{} 件・よく使う順に一部）:\n",
+            "学習した変換選好（{} 件・よく使う順）:\n",
             store.len()
         ));
         let mut prefs: Vec<_> = store.preferences.iter().collect();
         prefs.sort_by(|a, b| b.seen.cmp(&a.seen).then_with(|| a.reading.cmp(&b.reading)));
-        for p in prefs.iter().take(SHOW_MAX) {
+        for p in &prefs {
             s.push_str(&format!("　{} → {}（{}回）\n", p.reading, p.prefer, p.seen));
-        }
-        if store.len() > SHOW_MAX {
-            s.push_str(&format!(
-                "　…他 {} 件（全件は `nuko learn show`）\n",
-                store.len() - SHOW_MAX
-            ));
         }
     }
     // ── ここに乗るロジックのヘルプ (ユーザー要望) ──
