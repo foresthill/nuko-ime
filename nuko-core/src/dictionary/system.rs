@@ -1133,9 +1133,35 @@ mod tests {
         assert!(has("せんたくし", "選択肢"), "せんたくし→選択肢");
         assert!(has("よしゅく", "予祝"), "よしゅく→予祝");
         assert!(has("よ", "予"), "よ→予 (単体)");
-        // 助数詞の音便形 (個別パッチ。クラス全体はカウンター生成器が本筋)
-        assert!(has("じゅっぽん", "十本"), "じゅっぽん→十本 (音便形)");
+        // 複合数 (生成器対象外) の個別パッチ
         assert!(has("なんじゅっぽん", "何十本"), "なんじゅっぽん→何十本");
+    }
+
+    /// ★ 助数詞ルール生成器 (counter.rs) の出力が **実際にシステム辞書へ流し込まれている**
+    /// ことを end-to-end で保証する (merge ループの回帰ガード)。音便の各パターンを網羅。
+    #[test]
+    fn counter_readings_merged_into_dict() {
+        let dict = SystemDictionary::new().unwrap();
+        let has = |reading: &str, surface: &str| {
+            dict.lookup(reading)
+                .unwrap_or_default()
+                .iter()
+                .any(|c| c.surface == surface)
+        };
+        // は行: 促音便+半濁音 / 濁音 / 無変化
+        assert!(has("いっぽん", "一本"), "1本");
+        assert!(has("さんぼん", "三本"), "3本 (濁音)");
+        assert!(has("ろっぽん", "六本"), "6本");
+        assert!(has("じゅっぽん", "十本"), "10本");
+        assert!(has("じっぽん", "十本"), "10本 (別形)");
+        assert!(has("なんぼん", "何本"), "何本");
+        assert!(has("いっぱい", "一杯"), "1杯");
+        assert!(has("さんびき", "三匹"), "3匹");
+        // か行/さ行: 促音のみ
+        assert!(has("じゅっかい", "十回"), "10回");
+        assert!(has("はっさつ", "八冊"), "8冊");
+        // 無変化
+        assert!(has("いちまい", "一枚"), "1枚");
     }
 
     #[test]
