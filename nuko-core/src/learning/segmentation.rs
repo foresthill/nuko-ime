@@ -198,4 +198,31 @@ mod tests {
         // 長さ不一致は None
         assert_eq!(ranges_from_segment_readings(&s, total + 1), None);
     }
+
+    /// ★ lookup は **読み全体の完全一致** のみ (部分一致で誤適用しない)。
+    #[test]
+    fn lookup_is_exact_match_only() {
+        let mut store = SegmentationStore::default();
+        store.learn("ざびさんと", &segs(&["ざび", "さん", "と"]));
+        assert!(store.lookup("ざびさん").is_none(), "前方一致では引かない");
+        assert!(
+            store.lookup("ざびさんとおおさか").is_none(),
+            "後続があっても引かない"
+        );
+        assert!(store.lookup("ざびさんと").is_some(), "完全一致のみ");
+    }
+
+    /// ★ save→load で往復一致 (永続化の回帰ガード)。
+    #[test]
+    fn save_load_roundtrip() {
+        let mut store = SegmentationStore::default();
+        store.learn("ざびさんと", &segs(&["ざび", "さん", "と"]));
+        store.learn("あいう", &segs(&["あ", "いう"]));
+        let path = std::env::temp_dir().join(format!("nuko-seg-test-{}.toml", std::process::id()));
+        store.save(&path).unwrap();
+        let loaded = SegmentationStore::load(&path).unwrap();
+        assert_eq!(loaded.lookup("ざびさんと"), store.lookup("ざびさんと"));
+        assert_eq!(loaded.len(), 2);
+        let _ = std::fs::remove_file(&path);
+    }
 }

@@ -1278,6 +1278,7 @@ mod tests {
     #[cfg(feature = "akaza")]
     #[test]
     #[ignore = "実機モデルが要る診断用"]
+    #[allow(clippy::too_many_lines)] // 診断テスト: 多数の入力を目視するため長い
     fn diag_segment_matsuya() {
         let home = std::env::var("HOME").expect("HOME");
         let base = format!("{home}/Library/Application Support/nuko-ime");
@@ -1385,6 +1386,31 @@ mod tests {
                 .collect();
             println!("  flat convert('{d}') = {cands:?}");
         }
+
+        // ★ 文節位置の学習 end-to-end: 学習した切り方が convert_segmented で再現されるか。
+        println!("\n=== 文節位置の学習: ざびさんと → [ざび][さん][と] を学習して再変換 ===");
+        let before: Vec<String> = engine
+            .convert_segmented("ざびさんと")
+            .unwrap()
+            .map(|s| s.segments.iter().map(|x| x.reading.clone()).collect())
+            .unwrap_or_default();
+        println!("  学習前の分割 読み={before:?}");
+        let learned = engine.learn_segmentation(
+            "ざびさんと",
+            &["ざび".to_string(), "さん".to_string(), "と".to_string()],
+        );
+        println!("  learn_segmentation = {learned}");
+        let after: Vec<String> = engine
+            .convert_segmented("ざびさんと")
+            .unwrap()
+            .map(|s| s.segments.iter().map(|x| x.reading.clone()).collect())
+            .unwrap_or_default();
+        println!("  学習後の分割 読み={after:?}");
+        assert_eq!(
+            after,
+            vec!["ざび".to_string(), "さん".to_string(), "と".to_string()],
+            "★ 学習した切り方 [ざび][さん][と] が再適用される"
+        );
     }
 
     #[cfg(feature = "akaza")]
