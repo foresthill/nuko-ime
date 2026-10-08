@@ -121,7 +121,11 @@ impl LearningStatusPanel {
         self.label.setStringValue(&ns);
 
         let lines = text.lines().count().max(1);
-        let height = (lines as f64) * LINE_HEIGHT + PADDING * 2.0;
+        let raw_height = (lines as f64) * LINE_HEIGHT + PADDING * 2.0;
+        // ★ 画面の可視高さを超えないようにクランプする。超えると ✕ ボタンが画面外に
+        //   出て閉じられなくなる (2026-10 ユーザー報告)。85% を上限にする。
+        let max_height = screen_visible_height().map_or(720.0, |h| h * 0.85);
+        let height = raw_height.min(max_height);
         let content = NSSize::new(WIDTH, height);
         self.panel.setContentSize(content);
         self.layout(height);
@@ -138,6 +142,13 @@ impl LearningStatusPanel {
             self.panel.orderOut(None);
         }
     }
+}
+
+/// メインスクリーンの可視領域の高さ (メニューバー等を除く)。
+fn screen_visible_height() -> Option<f64> {
+    let mtm = MainThreadMarker::new()?;
+    let screen = NSScreen::mainScreen(mtm)?;
+    Some(screen.visibleFrame().size.height)
 }
 
 /// メインスクリーンの可視領域中央に置くための top-left 座標を返す。
