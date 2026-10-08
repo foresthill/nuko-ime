@@ -240,10 +240,75 @@ pub fn decide_command(selector_name: &std::ffi::CStr, is_composing: bool) -> Com
     }
 }
 
-// 注: F キー (F6-F10) の文字種変換は撤去した。F キーは方式1 では noop: として届き、
-// keyCode を伴わず NSApp.currentEvent も IME では KeyDown を返さないため識別不能
-// (2026-10 実機で keyCode=None 確認)。識別には handleEvent:(方式3) が要り落とし穴 #9。
-// 復活させるなら方式3 への移行を伴う大改修として別途。
+// 注: 以下 3 つ (FKeyConversion / KeyAction / command_for_keycode) は **方式3 移行の土台**。
+// handleEvent 実装で結線するまで未使用なので dead_code を許可する
+// (docs/spikes/method3-migration-plan.md)。純粋関数なので先にテストで固める。
+/// ファンクションキー (F6-F10) による文字種変換の種類。
+///
+/// F6 → ひらがな / F7 → 全角カタカナ / F8 → 半角カタカナ。
+/// F9/F10 (全角/半角英数) は生ローマ字が要るため現状は対象外。
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FKeyConversion {
+    /// F6: ひらがな
+    Hiragana,
+    /// F7: 全角カタカナ
+    Katakana,
+    /// F8: 半角カタカナ
+    HalfwidthKatakana,
+}
+
+/// 方式3 (`handleEvent:`) で keyCode から決まる動作。
+///
+/// handleEvent 内で NSEvent を分類した結果。`PassThrough` は「特殊キーではない →
+/// 呼び出し側が `characters()` を文字として処理する（または非 composing で素通し）」。
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyAction {
+    /// 矢印/Enter/Esc/Backspace/Tab 等 → 既存の [`CommandAction`]。
+    Command(CommandAction),
+    /// F6/F7/F8 → 文字種変換。
+    Fkey(FKeyConversion),
+    /// 特殊キーでない（文字として処理）/ 非 composing で素通し。
+    PassThrough,
+}
+
+/// macOS 仮想キーコード (`NSEvent.keyCode`, kVK_*) + Shift + composing から
+/// [`KeyAction`] を決める純粋関数（方式3 移行の中核・テスト可能）。
+///
+/// 一次ソース: Carbon `HIToolbox/Events.h` の `kVK_*`。実機 handleEvent のログでも確認する。
+/// 非 composing 時は特殊キーを横取りしない（[`decide_command`] と同じ不変条件）。
+#[allow(dead_code)]
+#[must_use]
+pub fn command_for_keycode(key_code: u16, shift: bool, is_composing: bool) -> KeyAction {
+    // 不変条件: 未変換状態では特殊キーを奪わない（F キー含む）。
+    if !is_composing {
+        return KeyAction::PassThrough;
+    }
+    match key_code {
+        0x24 => KeyAction::Command(CommandAction::Commit), // Return
+        0x33 => KeyAction::Command(CommandAction::Backspace), // Delete (Backspace)
+        0x35 => KeyAction::Command(CommandAction::Cancel), // Escape
+        0x30 => KeyAction::Command(CommandAction::RegisterWord), // Tab
+        0x7B => KeyAction::Command(if shift {
+            CommandAction::ResizeSegmentLeft
+        } else {
+            CommandAction::FocusShiftLeft
+        }), // Left
+        0x7C => KeyAction::Command(if shift {
+            CommandAction::ResizeSegmentRight
+        } else {
+            CommandAction::FocusShiftRight
+        }), // Right
+        0x7D => KeyAction::Command(CommandAction::SelectNext), // Down
+        0x7E => KeyAction::Command(CommandAction::SelectPrev), // Up
+        0x61 => KeyAction::Fkey(FKeyConversion::Hiragana), // F6
+        0x62 => KeyAction::Fkey(FKeyConversion::Katakana), // F7
+        0x64 => KeyAction::Fkey(FKeyConversion::HalfwidthKatakana), // F8
+        // Space(0x31) や英字は文字として characters() で処理する → PassThrough。
+        _ => KeyAction::PassThrough,
+    }
+}
 
 /// activation guard 閾値 (ms)。IME 活性化直後のこの時間内に来た Space は、
 /// ソース切替ショートカット (Ctrl+Space) 由来の「漏れ」と判定して握り潰す。
@@ -436,6 +501,85 @@ pub fn apply_segment_focus_shift(
     }
 
     (segmented.focused, segmented.current_surface())
+}
+
+#[cfg(test)]
+mod keycode_tests {
+    use super::{command_for_keycode, CommandAction, FKeyConversion, KeyAction};
+
+    /// ★ 非 composing では特殊キーを奪わない（素通し）。
+    #[test]
+    fn non_composing_passes_through_everything() {
+        for kc in [0x24, 0x33, 0x35, 0x7B, 0x62] {
+            assert_eq!(
+                command_for_keycode(kc, false, false),
+                KeyAction::PassThrough
+            );
+        }
+    }
+
+    /// ★ 編集キーが正しい CommandAction にマップされる。
+    #[test]
+    fn editing_keys_map_to_commands() {
+        let c = |kc, shift| command_for_keycode(kc, shift, true);
+        assert_eq!(c(0x24, false), KeyAction::Command(CommandAction::Commit)); // Return
+        assert_eq!(c(0x33, false), KeyAction::Command(CommandAction::Backspace)); // BS
+        assert_eq!(c(0x35, false), KeyAction::Command(CommandAction::Cancel)); // Esc
+        assert_eq!(
+            c(0x30, false),
+            KeyAction::Command(CommandAction::RegisterWord)
+        ); // Tab
+        assert_eq!(
+            c(0x7D, false),
+            KeyAction::Command(CommandAction::SelectNext)
+        ); // Down
+        assert_eq!(
+            c(0x7E, false),
+            KeyAction::Command(CommandAction::SelectPrev)
+        ); // Up
+    }
+
+    /// ★ 矢印は Shift で文節移動 ⇄ 文節伸縮が切り替わる。
+    #[test]
+    fn arrows_depend_on_shift() {
+        let c = |kc, shift| command_for_keycode(kc, shift, true);
+        assert_eq!(
+            c(0x7B, false),
+            KeyAction::Command(CommandAction::FocusShiftLeft)
+        );
+        assert_eq!(
+            c(0x7B, true),
+            KeyAction::Command(CommandAction::ResizeSegmentLeft)
+        );
+        assert_eq!(
+            c(0x7C, false),
+            KeyAction::Command(CommandAction::FocusShiftRight)
+        );
+        assert_eq!(
+            c(0x7C, true),
+            KeyAction::Command(CommandAction::ResizeSegmentRight)
+        );
+    }
+
+    /// ★ F6/F7/F8 が文字種変換にマップされる（方式3 の本命）。
+    #[test]
+    fn fkeys_map_to_conversion() {
+        let c = |kc| command_for_keycode(kc, false, true);
+        assert_eq!(c(0x61), KeyAction::Fkey(FKeyConversion::Hiragana)); // F6
+        assert_eq!(c(0x62), KeyAction::Fkey(FKeyConversion::Katakana)); // F7
+        assert_eq!(c(0x64), KeyAction::Fkey(FKeyConversion::HalfwidthKatakana));
+        // F8
+    }
+
+    /// ★ 文字キー・Space・未対応 F キーは PassThrough（文字として処理）。
+    #[test]
+    fn chars_and_space_pass_through() {
+        let c = |kc| command_for_keycode(kc, false, true);
+        assert_eq!(c(0x31), KeyAction::PassThrough, "Space は文字扱い");
+        assert_eq!(c(0x00), KeyAction::PassThrough, "A キー");
+        assert_eq!(c(0x65), KeyAction::PassThrough, "F9 は未対応");
+        assert_eq!(c(0x6D), KeyAction::PassThrough, "F10 は未対応");
+    }
 }
 
 #[cfg(test)]
