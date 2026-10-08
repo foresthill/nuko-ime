@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, Bool, NSObjectProtocol, Sel};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker};
-use objc2_app_kit::{NSApplication, NSEvent, NSMenu, NSScreen};
+use objc2_app_kit::{NSEvent, NSMenu, NSScreen};
 use objc2_foundation::{NSArray, NSPoint, NSRange, NSString};
 use objc2_input_method_kit::{IMKInputController, IMKServer};
 use tracing::{debug, error, info, warn};
@@ -729,18 +729,11 @@ impl NukoInputController {
         // 非 composing 時は必ず PassThrough になる不変条件もそこで保証。
         let sel_name = selector.name();
 
-        // F6-F10 は方式1では `noop:` セレクタとして届く (実機ログで確認)。
-        // どの F キーかはセレクタでは分からないので NSApp.currentEvent の keyCode で判別し、
-        // 未確定文字列を文字種変換する (確定せず composition に残す = 変換状態のまま)。
-        // F6/F7/F8 = ひらがな/全角カタカナ/半角カタカナ。F9/F10 は未対応 (fkey_conversion=None)。
-        if is_composing && sel_name.to_bytes() == b"noop:" {
-            let key_code = Self::current_key_code();
-            debug_log(&format!("noop: during composing, keyCode={key_code:?}"));
-            if let Some(kind) = key_code.and_then(crate::commit::fkey_conversion) {
-                self.apply_fkey_conversion(client, kind);
-                return Bool::YES;
-            }
-        }
+        // 注: F6-F10 (文字種変換) は **方式1 では実装不可**。F キーは noop: セレクタとして
+        // 届くが keyCode を伴わず、NSApp.currentEvent も IME プロセスでは KeyDown を返さない
+        // (実機ログで keyCode=None を確認, 2026-10)。識別には生 NSEvent = handleEvent:(方式3)
+        // が要り、それは落とし穴 #9 (打てなくなる/クラッシュ) なので採用しない。カタカナ等は
+        // Space 循環で出せる。F キー対応は方式3 への移行を伴う大改修として将来検討。
 
         let action = crate::commit::decide_command(sel_name, is_composing);
 
@@ -855,56 +848,6 @@ impl NukoInputController {
 
         let array: Retained<NSArray<NSString>> = NSArray::from_retained_slice(&ns_strings);
         Some(unsafe { Retained::cast_unchecked(array) })
-    }
-
-    /// 現在処理中の NSEvent の keyCode を返す (F キー判別用、方式1維持)。
-    ///
-    /// `didCommandBySelector:` の `noop:` は多くのキーで届き、セレクタだけでは
-    /// どの F キーかが分からない。NSApp.currentEvent (= いま処理中のキーイベント) の
-    /// keyCode を読んで F6-F10 を判別する。取得不能なら None (= 何もしない、安全)。
-    fn current_key_code() -> Option<u16> {
-        let mtm = MainThreadMarker::new()?;
-        let app = NSApplication::sharedApplication(mtm);
-        let event = app.currentEvent()?;
-        // ★ keyCode() は **キーイベント以外**で呼ぶと AppKit が例外を投げ、release
-        //   (panic=abort) では **プロセスが即死** する。F7 押下で currentEvent が
-        //   KeyDown でないケースがあり「日本語が二度と打てなくなる」クラッシュになった
-        //   (2026-10 ユーザー報告)。KeyDown のときだけ keyCode を読む。
-        if event.r#type() != objc2_app_kit::NSEventType::KeyDown {
-            return None;
-        }
-        Some(event.keyCode())
-    }
-
-    /// F キー (F6/F7/F8) の文字種変換を未確定文字列に適用する。
-    ///
-    /// composition (かな) を ひらがな/全角カタカナ/半角カタカナ に変換し、単一候補として
-    /// 差し替えて marked text を更新する。**確定しない**ので変換状態のまま残り、
-    /// Enter でその形が確定する (ユーザー要望「かな/カナにした後も変換状態で残す」)。
-    fn apply_fkey_conversion(&self, client: &AnyObject, kind: crate::commit::FKeyConversion) {
-        use crate::commit::FKeyConversion;
-        use nuko_core::input::{to_halfwidth_katakana, to_hiragana, to_katakana};
-
-        let reading = self.ivars().state.borrow().composition.clone();
-        if reading.is_empty() {
-            return;
-        }
-        let converted = match kind {
-            FKeyConversion::Hiragana => to_hiragana(&reading),
-            FKeyConversion::Katakana => to_katakana(&reading),
-            FKeyConversion::HalfwidthKatakana => to_halfwidth_katakana(&reading),
-        };
-        {
-            let mut state = self.ivars().state.borrow_mut();
-            // 文節モードを解除し、変換結果を単一候補として持たせる
-            // (decide_commit が flat 候補の selected を確定する)。
-            state.segmented = None;
-            let mut list = CandidateList::new();
-            list.push(Candidate::new(&converted, &reading).with_source(CandidateSource::User));
-            state.candidates = Some(list);
-        }
-        Self::hide_candidate_panel();
-        Self::set_marked_text_on_client(client, &converted);
     }
 
     /// クライアントに setMarkedText を送信
