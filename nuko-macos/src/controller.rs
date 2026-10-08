@@ -866,6 +866,13 @@ impl NukoInputController {
         let mtm = MainThreadMarker::new()?;
         let app = NSApplication::sharedApplication(mtm);
         let event = app.currentEvent()?;
+        // ★ keyCode() は **キーイベント以外**で呼ぶと AppKit が例外を投げ、release
+        //   (panic=abort) では **プロセスが即死** する。F7 押下で currentEvent が
+        //   KeyDown でないケースがあり「日本語が二度と打てなくなる」クラッシュになった
+        //   (2026-10 ユーザー報告)。KeyDown のときだけ keyCode を読む。
+        if event.r#type() != objc2_app_kit::NSEventType::KeyDown {
+            return None;
+        }
         Some(event.keyCode())
     }
 
