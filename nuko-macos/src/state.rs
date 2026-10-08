@@ -133,12 +133,30 @@ pub fn learning_status_text() -> String {
             s.push_str(&format!("　{} → {}（{}回）\n", p.reading, p.prefer, p.seen));
         }
     }
+
+    // ── 文節の切り方の学習 (2026-10 追加) ──
+    let seg_store = nuko_core::learning::SegmentationStore::load(dir.join("segmentations.toml"))
+        .unwrap_or_default();
+    s.push_str("──────────\n");
+    if seg_store.is_empty() {
+        s.push_str("文節の切り方の学習: まだありません\n");
+        s.push_str("　（変換中に Shift+←→ で文節を切り直して確定すると覚えます）\n");
+    } else {
+        s.push_str(&format!("文節の切り方の学習（{} 件）:\n", seg_store.len()));
+        let mut entries: Vec<_> = seg_store.entries.iter().collect();
+        entries.sort_by(|a, b| a.reading.cmp(&b.reading));
+        for e in &entries {
+            let boxed: String = e.segments.iter().map(|s| format!("[{s}]")).collect();
+            s.push_str(&format!("　{} → {}\n", e.reading, boxed));
+        }
+    }
+
     // ── ここに乗るロジックのヘルプ (ユーザー要望) ──
     s.push_str("──────────\n");
     s.push_str(&format!(
         "💡 同じ変換を{MIN_SEEN}回以上、または既定でない候補を選ぶと学習され、\n"
     ));
-    s.push_str("　次からその変換が上位に来ます（読み＝そのままの確定は対象外）。");
+    s.push_str("　次からその変換が上位に来ます。文節は Shift+←→ で直すと切り方を覚えます。");
     s
 }
 
@@ -413,6 +431,28 @@ fn setup_corrections(engine: &mut ConversionEngine) {
     if let Err(e) = engine.load_corrections(&corrections_path) {
         tracing::warn!(error = %e, "corrections.toml load 失敗 (選好なしで継続)");
     }
+    // 文節位置の学習 (ユーザーが Shift で切り直した切り方) を load する。
+    if let Err(e) = engine.load_segmentations(dir.join("segmentations.toml")) {
+        tracing::warn!(error = %e, "segmentations.toml load 失敗 (文節学習なしで継続)");
+    }
+}
+
+/// 文節の「切り方」を学習して保存し、稼働エンジンへ即反映する。
+///
+/// ユーザーが Shift+←→ で文節を切り直して確定したとき、controller が呼ぶ。
+/// `segments` は各文節の読み。連結が `reading` に一致しない等は学習されない
+/// ([`ConversionEngine::learn_segmentation`] の規約)。
+pub fn learn_segmentation_and_save(reading: &str, segments: &[String]) {
+    let Some(dir) = nuko_app_support_dir() else {
+        return;
+    };
+    with_engine_mut(|engine| {
+        if engine.learn_segmentation(reading, segments) {
+            if let Err(e) = engine.segmentations().save(dir.join("segmentations.toml")) {
+                tracing::warn!(error = %e, "segmentations.toml 保存失敗");
+            }
+        }
+    });
 }
 
 /// メニュー「学習を今すぐ研ぎ直す」から呼ぶライブ再学習。
@@ -510,6 +550,11 @@ pub struct InputState {
     /// 活性化から短時間以内の Space は「ショートカットの漏れ」と判定して
     /// 破棄する目的で記録する。
     pub activated_at: Option<Instant>,
+    /// この入力で文節を Shift+←→ で切り直したか。
+    ///
+    /// `true` のまま確定したら「ユーザーが明示的に直した切り方」とみなし、
+    /// 文節位置を学習する ([`learn_segmentation_and_save`])。既定の切り方は学習しない。
+    pub segment_resized: bool,
     // 注: 「かな」キー押下時刻は controller 横断で効かせる必要があるため
     // InputState (per-controller ivar) ではなく thread_local `LAST_KANA_PRESS`
     // (このファイル上部) で保持する。落とし穴 #4 (controller 複数生成) 対策。
@@ -526,6 +571,7 @@ impl InputState {
             is_composing: false,
             japanese_mode: true, // デフォルトは日本語入力モード
             activated_at: None,
+            segment_resized: false,
         }
     }
 
@@ -536,6 +582,7 @@ impl InputState {
         self.candidates = None;
         self.segmented = None;
         self.is_composing = false;
+        self.segment_resized = false;
     }
 
     /// 変換結果が存在するか (`candidates` か `segmented` のどちらかが Some)

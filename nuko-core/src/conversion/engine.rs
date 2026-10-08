@@ -10,7 +10,7 @@ use super::{Candidate, CandidateList, CandidateSource, ConversionContext};
 use crate::dictionary::DictionaryManager;
 use crate::error::{NukoError, Result};
 use crate::input::{to_halfwidth_katakana, to_katakana};
-use crate::learning::{CorrectionStore, LearningManager};
+use crate::learning::{CorrectionStore, LearningManager, SegmentationStore};
 
 /// 自然分割の境界 (`nat_bounds` = 0 と `total` を含む累積オフセット) に対し、
 /// `hint` 読みが 1 文節になるよう強制境界を作った `force_ranges` を返す。
@@ -209,6 +209,8 @@ pub struct ConversionEngine {
     libakaza: Option<LibakazaBackend>,
     /// Layer 2 訂正学習の個人選好 (変換時に候補へ bias)。空なら変換は無変化。
     corrections: CorrectionStore,
+    /// 文節位置の学習 (ユーザーが切り直した「切り方」)。空なら無変化。
+    segmentations: SegmentationStore,
 }
 
 impl ConversionEngine {
@@ -223,6 +225,7 @@ impl ConversionEngine {
             #[cfg(feature = "akaza")]
             libakaza: None,
             corrections: CorrectionStore::default(),
+            segmentations: SegmentationStore::default(),
         })
     }
 
@@ -255,6 +258,7 @@ impl ConversionEngine {
             learning,
             libakaza,
             corrections: CorrectionStore::default(),
+            segmentations: SegmentationStore::default(),
         })
     }
 
@@ -298,6 +302,40 @@ impl ConversionEngine {
         self.corrections = CorrectionStore::load(path)?;
         tracing::info!(count = self.corrections.len(), "訂正選好 (Layer 2) を load");
         Ok(())
+    }
+
+    /// `segmentations.toml` から文節位置の学習を load する(無ければ空)。
+    ///
+    /// # エラー
+    /// ファイルはあるがパースに失敗した場合。
+    pub fn load_segmentations(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        self.segmentations = SegmentationStore::load(path)?;
+        tracing::info!(count = self.segmentations.len(), "文節位置の学習を load");
+        Ok(())
+    }
+
+    /// 文節位置の学習ストアを設定する。
+    pub fn set_segmentations(&mut self, segmentations: SegmentationStore) {
+        self.segmentations = segmentations;
+    }
+
+    /// 文節位置の学習ストアへの参照(保存・表示用)。
+    #[must_use]
+    pub fn segmentations(&self) -> &SegmentationStore {
+        &self.segmentations
+    }
+
+    /// 文節の「切り方」を学習する(ユーザーが Shift で切り直して確定したとき)。
+    ///
+    /// `reading` 全体の切り方を `segments`(各文節の読み)で覚える。学習したら `true`。
+    /// 連結不一致・1 文節・同じ切り方は学習しない([`SegmentationStore::learn`] の規約)。
+    /// 呼び出し側は `true` のとき `segmentations().save(path)` で永続化する。
+    pub fn learn_segmentation(&mut self, reading: &str, segments: &[String]) -> bool {
+        let changed = self.segmentations.learn(reading, segments);
+        if changed {
+            tracing::info!(reading, "文節位置を学習");
+        }
+        changed
     }
 
     /// libakaza バックエンドが有効か (= load 成功して保持されているか)
@@ -489,12 +527,13 @@ impl ConversionEngine {
         if segmented.is_empty() {
             return Ok(None);
         }
-        // 分割境界の学習: 学習した読み (訂正) を **分割境界のヒント** にして再分割する。
-        // libakaza は名前を誤分割することがあり (例: ざびさん→[ざ][びさん])、
-        // 文節読みが「ざび」にならないと「ざび→ザビ」の学習が効かない。学習した読みが
-        // 文中に現れ、自然分割で 1 文節になっていなければ、そこを強制境界にする
-        // (2026-09 ユーザー要望「文節の切り方の学習」)。
-        if let Some(forced) = self.resegment_with_hints(backend, reading, &segmented)? {
+        // ★ 文節位置の学習 (最優先): ユーザーが Shift で切り直した「切り方」を覚えていれば、
+        //   読み全体一致でその境界を強制再適用する (2026-10 ユーザー要望「文節位置の学習」)。
+        //   ヒント方式より強い = 本人が明示的に直した区切りを尊重する。
+        if let Some(forced) = self.resegment_from_learned(backend, reading)? {
+            segmented = forced;
+        } else if let Some(forced) = self.resegment_with_hints(backend, reading, &segmented)? {
+            // 学習済みの切り方が無ければ、訂正読みを境界ヒントにして再分割する。
             segmented = forced;
         }
         // Layer 2: **文節ごとに** 個人選好 (訂正学習) の bias を適用して並べ替える。
@@ -503,6 +542,30 @@ impl ConversionEngine {
         // (2026-09 ユーザー報告: 単体「まつや」は松谷、「まつやさんと…」は松也)。
         apply_segment_corrections(&mut segmented, &self.corrections);
         Ok(Some(segmented))
+    }
+
+    /// **学習した文節位置** (ユーザーが切り直した切り方) を読み全体一致で強制再適用する。
+    ///
+    /// `segmentations` に `reading` ちょうどの切り方があれば、その各文節読みから
+    /// `force_ranges` を作って `convert_segmented_forced` で再変換する。無ければ `None`。
+    /// = 本人が Shift で直した区切りを最優先で尊重する (2026-10)。
+    #[cfg(feature = "akaza")]
+    fn resegment_from_learned(
+        &self,
+        backend: &LibakazaBackend,
+        reading: &str,
+    ) -> Result<Option<SegmentedConversion>> {
+        let Some(segs) = self.segmentations.lookup(reading) else {
+            return Ok(None);
+        };
+        let Some(force) = crate::learning::ranges_from_segment_readings(segs, reading.len()) else {
+            return Ok(None); // 連結不一致 (壊れた学習) は無視
+        };
+        let re = backend.convert_segmented_forced(reading, &force)?;
+        if re.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(re))
     }
 
     /// 学習した読み (訂正) を分割境界のヒントにして再分割する。
