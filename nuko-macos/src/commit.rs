@@ -178,76 +178,38 @@ pub fn decide_digit_select_and_commit(state: &InputState, digit: char) -> Option
 ///
 /// 副作用 (do_commit / do_cancel / 候補移動 / marked text 更新) は引き続き
 /// 呼び出し側の責務。本 enum は「何をすべきか」だけを表す。
+/// composing 中の特殊キーの動作。方式3 では [`command_for_keycode`] が keyCode から決める。
+/// (非 composing・未知キー・文字キーは handleEvent 側で [`KeyAction::PassThrough`] として扱う。)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandAction {
-    /// 未変換 (= 非 composing) → IME は処理しない (passthrough, `Bool::NO`)
-    PassThrough,
-    /// Enter (`insertNewline:`) → 確定
+    /// Enter → 確定
     Commit,
-    /// Escape (`cancelOperation:`) → 取消
+    /// Escape → 取消
     Cancel,
-    /// Backspace (`deleteBackward:`) → 1 文字削除
+    /// Backspace → 1 文字削除
     Backspace,
-    /// Left (`moveLeft:`) → 文節フォーカスを前へ (segmented モードのみ実効)
+    /// Left → 文節フォーカスを前へ (segmented モードのみ実効)
     FocusShiftLeft,
-    /// Right (`moveRight:`) → 文節フォーカスを後ろへ (segmented モードのみ実効)
+    /// Right → 文節フォーカスを後ろへ (segmented モードのみ実効)
     FocusShiftRight,
-    /// Down (`moveDown:`) → 次候補
+    /// Down → 次候補
     SelectNext,
-    /// Up (`moveUp:`) → 前候補
+    /// Up → 前候補
     SelectPrev,
-    /// Shift+Left (`moveLeftAndModifySelection:`) → focused 文節を縮める (segmented のみ)
+    /// Shift+Left → focused 文節を縮める (segmented のみ)
     ResizeSegmentLeft,
-    /// Shift+Right (`moveRightAndModifySelection:`) → focused 文節を伸ばす (segmented のみ)
+    /// Shift+Right → focused 文節を伸ばす (segmented のみ)
     ResizeSegmentRight,
-    /// Tab (`insertTab:`) → 単語登録候補があれば登録 (無ければ Tab は素通し)
+    /// Tab → 単語登録候補があれば登録 (無ければ素通し)
     RegisterWord,
-    /// 未知のセレクタ → 確定してからパススルー (`Bool::NO`)
-    CommitAndPassThrough,
 }
 
-/// セレクタ名 (`&CStr`) と composing 状態から実行すべきアクションを返す。
-///
-/// ## 守りたい不変条件
-///
-/// 1. **非 composing 時はセレクタに関わらず必ず `PassThrough`** — 未変換状態で
-///    IME が Enter/矢印を横取りするとアプリの挙動を壊す (= 過去のバグ源)。
-/// 2. **既知セレクタは composing 時のみ専用アクションになる**。
-/// 3. **未知セレクタは `CommitAndPassThrough`** — 未確定テキストを取りこぼさず
-///    確定してから OS に処理を返す。
-///
-/// 純粋関数: 入力は `&CStr` と `bool` のみ。ObjC ランタイム不要。
-#[must_use]
-pub fn decide_command(selector_name: &std::ffi::CStr, is_composing: bool) -> CommandAction {
-    // 不変条件 1: 未変換状態は常にパススルー
-    if !is_composing {
-        return CommandAction::PassThrough;
-    }
-
-    match selector_name.to_bytes() {
-        b"insertNewline:" => CommandAction::Commit,
-        b"cancelOperation:" => CommandAction::Cancel,
-        b"deleteBackward:" => CommandAction::Backspace,
-        b"moveLeft:" => CommandAction::FocusShiftLeft,
-        b"moveRight:" => CommandAction::FocusShiftRight,
-        b"moveDown:" => CommandAction::SelectNext,
-        b"moveUp:" => CommandAction::SelectPrev,
-        // Shift+←→ (文節伸縮)。macOS は selection 拡張のセレクタとして配送する。
-        b"moveLeftAndModifySelection:" => CommandAction::ResizeSegmentLeft,
-        b"moveRightAndModifySelection:" => CommandAction::ResizeSegmentRight,
-        b"insertTab:" => CommandAction::RegisterWord,
-        _ => CommandAction::CommitAndPassThrough,
-    }
-}
-
-// 注: 以下 3 つ (FKeyConversion / KeyAction / command_for_keycode) は **方式3 移行の土台**。
 // handleEvent 実装で結線するまで未使用なので dead_code を許可する
 // (docs/spikes/method3-migration-plan.md)。純粋関数なので先にテストで固める。
 /// ファンクションキー (F6-F10) による文字種変換の種類。
 ///
 /// F6 → ひらがな / F7 → 全角カタカナ / F8 → 半角カタカナ。
 /// F9/F10 (全角/半角英数) は生ローマ字が要るため現状は対象外。
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FKeyConversion {
     /// F6: ひらがな
@@ -262,7 +224,6 @@ pub enum FKeyConversion {
 ///
 /// handleEvent 内で NSEvent を分類した結果。`PassThrough` は「特殊キーではない →
 /// 呼び出し側が `characters()` を文字として処理する（または非 composing で素通し）」。
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyAction {
     /// 矢印/Enter/Esc/Backspace/Tab 等 → 既存の [`CommandAction`]。
@@ -277,8 +238,7 @@ pub enum KeyAction {
 /// [`KeyAction`] を決める純粋関数（方式3 移行の中核・テスト可能）。
 ///
 /// 一次ソース: Carbon `HIToolbox/Events.h` の `kVK_*`。実機 handleEvent のログでも確認する。
-/// 非 composing 時は特殊キーを横取りしない（[`decide_command`] と同じ不変条件）。
-#[allow(dead_code)]
+/// 非 composing 時は特殊キーを横取りしない（未変換状態で特殊キーを奪わない）。
 #[must_use]
 pub fn command_for_keycode(key_code: u16, shift: bool, is_composing: bool) -> KeyAction {
     // 不変条件: 未変換状態では特殊キーを奪わない（F キー含む）。
@@ -1134,97 +1094,8 @@ mod tests {
         );
     }
 
-    // -- テスト基盤 #4: decide_command の不変条件テスト群 --
-    //
-    // 守りたい不変条件:
-    //   1. 非 composing 時はどんなセレクタでも必ず PassThrough
-    //   2. 既知セレクタ (Enter/Esc/BS/矢印) は composing 時に専用アクション
-    //   3. 未知セレクタは CommitAndPassThrough (= 未確定を取りこぼさない)
-
-    /// 不変条件 1: 非 composing なら全セレクタが PassThrough
-    #[test]
-    fn non_composing_always_passes_through() {
-        let selectors = [
-            c"insertNewline:",
-            c"cancelOperation:",
-            c"deleteBackward:",
-            c"moveLeft:",
-            c"moveRight:",
-            c"moveDown:",
-            c"moveUp:",
-            c"someUnknownSelector:",
-        ];
-        for sel in selectors {
-            assert_eq!(
-                decide_command(sel, /*is_composing=*/ false),
-                CommandAction::PassThrough,
-                "★ 非 composing 時は {sel:?} でも PassThrough でなければならない"
-            );
-        }
-    }
-
-    /// 不変条件 2: composing 時の既知セレクタが正しいアクションに対応
-    #[test]
-    fn composing_known_selectors_map_to_actions() {
-        let cases = [
-            (c"insertNewline:", CommandAction::Commit),
-            (c"cancelOperation:", CommandAction::Cancel),
-            (c"deleteBackward:", CommandAction::Backspace),
-            (c"moveLeft:", CommandAction::FocusShiftLeft),
-            (c"moveRight:", CommandAction::FocusShiftRight),
-            (c"moveDown:", CommandAction::SelectNext),
-            (c"moveUp:", CommandAction::SelectPrev),
-            (
-                c"moveLeftAndModifySelection:",
-                CommandAction::ResizeSegmentLeft,
-            ),
-            (
-                c"moveRightAndModifySelection:",
-                CommandAction::ResizeSegmentRight,
-            ),
-        ];
-        for (sel, expected) in cases {
-            assert_eq!(
-                decide_command(sel, /*is_composing=*/ true),
-                expected,
-                "★ composing 時 {sel:?} は {expected:?} に対応すべき"
-            );
-        }
-    }
-
-    /// 不変条件 3: composing 時の未知セレクタは CommitAndPassThrough
-    #[test]
-    fn composing_unknown_selector_commits_and_passes_through() {
-        assert_eq!(
-            decide_command(c"someRandomSelector:", /*is_composing=*/ true),
-            CommandAction::CommitAndPassThrough,
-            "★ 未知セレクタは確定してから OS にパススルー (未確定を取りこぼさない)"
-        );
-        // 空セレクタや無関係なものも同様
-        assert_eq!(
-            decide_command(c"", /*is_composing=*/ true),
-            CommandAction::CommitAndPassThrough,
-        );
-        assert_eq!(
-            decide_command(c"noop:", /*is_composing=*/ true),
-            CommandAction::CommitAndPassThrough,
-        );
-    }
-
-    /// 回帰: Enter は composing 時のみ Commit、非 composing では PassThrough。
-    /// (= 未変換状態で IME が Enter を横取りして改行を潰すバグの防止)
-    #[test]
-    fn enter_is_committed_only_while_composing() {
-        assert_eq!(
-            decide_command(c"insertNewline:", true),
-            CommandAction::Commit
-        );
-        assert_eq!(
-            decide_command(c"insertNewline:", false),
-            CommandAction::PassThrough,
-            "★ 未変換状態の Enter は IME が触らずアプリに渡す"
-        );
-    }
+    // 注: decide_command (セレクタ→アクション, 方式1) のテストは、方式3 移行で
+    // command_for_keycode に置き換わったため keycode_tests モジュールへ移った。
 
     // -- テスト基盤 #5: decide_space_action の不変条件テスト群 --
 
