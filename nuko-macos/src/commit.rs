@@ -208,8 +208,12 @@ pub enum CommandAction {
 // (docs/spikes/method3-migration-plan.md)。純粋関数なので先にテストで固める。
 /// ファンクションキー (F6-F10) による文字種変換の種類。
 ///
-/// F6 → ひらがな / F7 → 全角カタカナ / F8 → 半角カタカナ。
-/// F9/F10 (全角/半角英数) は生ローマ字が要るため現状は対象外。
+/// F6 → ひらがな / F7 → 全角カタカナ / F8 → 半角カタカナ /
+/// F9 → 全角英数 / F10 → 半角英数。
+///
+/// F9/F10 は**かなでなく打った生ローマ字**を変換する (例「howaito」→ ｈｏｗａｉｔｏ / howaito)。
+/// 連打で 小文字 → 大文字 → 先頭大文字 を循環する (MS-IME / Google 等の標準)。
+/// 出典: Wikipedia "Language input keys" / Microsoft User interface。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FKeyConversion {
     /// F6: ひらがな
@@ -218,6 +222,10 @@ pub enum FKeyConversion {
     Katakana,
     /// F8: 半角カタカナ
     HalfwidthKatakana,
+    /// F9: 全角英数 (生ローマ字を全角ラテンへ。連打で大小文字循環)
+    FullwidthAlnum,
+    /// F10: 半角英数 (生ローマ字を半角ラテンへ。連打で大小文字循環)
+    HalfwidthAlnum,
 }
 
 /// 方式3 (`handleEvent:`) で keyCode から決まる動作。
@@ -265,6 +273,8 @@ pub fn command_for_keycode(key_code: u16, shift: bool, is_composing: bool) -> Ke
         0x61 => KeyAction::Fkey(FKeyConversion::Hiragana), // F6
         0x62 => KeyAction::Fkey(FKeyConversion::Katakana), // F7
         0x64 => KeyAction::Fkey(FKeyConversion::HalfwidthKatakana), // F8
+        0x65 => KeyAction::Fkey(FKeyConversion::FullwidthAlnum), // F9
+        0x6D => KeyAction::Fkey(FKeyConversion::HalfwidthAlnum), // F10
         // Space(0x31) や英字は文字として characters() で処理する → PassThrough。
         _ => KeyAction::PassThrough,
     }
@@ -537,8 +547,16 @@ mod keycode_tests {
         let c = |kc| command_for_keycode(kc, false, true);
         assert_eq!(c(0x31), KeyAction::PassThrough, "Space は文字扱い");
         assert_eq!(c(0x00), KeyAction::PassThrough, "A キー");
-        assert_eq!(c(0x65), KeyAction::PassThrough, "F9 は未対応");
-        assert_eq!(c(0x6D), KeyAction::PassThrough, "F10 は未対応");
+        assert_eq!(
+            c(0x65),
+            KeyAction::Fkey(FKeyConversion::FullwidthAlnum),
+            "F9=全角英数"
+        );
+        assert_eq!(
+            c(0x6D),
+            KeyAction::Fkey(FKeyConversion::HalfwidthAlnum),
+            "F10=半角英数"
+        );
     }
 }
 

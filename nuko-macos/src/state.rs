@@ -555,6 +555,16 @@ pub struct InputState {
     /// `true` のまま確定したら「ユーザーが明示的に直した切り方」とみなし、
     /// 文節位置を学習する ([`learn_segmentation_and_save`])。既定の切り方は学習しない。
     pub segment_resized: bool,
+    /// 現在の composition に対して**打った生ローマ字 (ascii)** の連結。
+    ///
+    /// F9/F10 (全角/半角英数) は「かな」でなく打った ascii を変換するため保持する
+    /// (例「howaito」→ ホワイト だが F10 では howaito を出す)。新規入力で積み、
+    /// reset で消える。
+    pub raw_input: String,
+    /// F9/F10 連打の大小文字サイクル段階 (0=小文字 / 1=大文字 / 2=先頭大文字)。
+    ///
+    /// 同じ英数 F キーを連打すると 3 段で循環する。新しい文字入力が来たら 0 に戻す。
+    pub fkey_alnum_stage: u8,
     // 注: 「かな」キー押下時刻は controller 横断で効かせる必要があるため
     // InputState (per-controller ivar) ではなく thread_local `LAST_KANA_PRESS`
     // (このファイル上部) で保持する。落とし穴 #4 (controller 複数生成) 対策。
@@ -572,6 +582,8 @@ impl InputState {
             japanese_mode: true, // デフォルトは日本語入力モード
             activated_at: None,
             segment_resized: false,
+            raw_input: String::new(),
+            fkey_alnum_stage: 0,
         }
     }
 
@@ -582,6 +594,8 @@ impl InputState {
         self.candidates = None;
         self.segmented = None;
         self.is_composing = false;
+        self.raw_input.clear();
+        self.fkey_alnum_stage = 0;
         self.segment_resized = false;
     }
 

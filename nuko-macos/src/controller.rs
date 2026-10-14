@@ -722,6 +722,9 @@ impl NukoInputController {
                     if !kana.is_empty() {
                         state.composition.push_str(&kana);
                     }
+                    // F9/F10 用に生 ascii を保持 (この経路は候補確定後の新規入力)。
+                    state.raw_input.push(c);
+                    state.fkey_alnum_stage = 0;
                 }
             }
             let composing = !state.composition.is_empty() || !state.romaji.buffer().is_empty();
@@ -743,6 +746,9 @@ impl NukoInputController {
                 if !kana.is_empty() {
                     state.composition.push_str(&kana);
                 }
+                // F9/F10 (英数) 用に生 ascii を保持。新規文字が来たので英数サイクルは 0 に戻す。
+                state.raw_input.push(c);
+                state.fkey_alnum_stage = 0;
                 any_processed = true;
             }
         }
@@ -877,22 +883,51 @@ impl NukoInputController {
     /// 差し替えて marked text を更新する。**確定しない**ので変換状態のまま残り、Enter で確定。
     fn apply_fkey_conversion(&self, client: &AnyObject, kind: crate::commit::FKeyConversion) {
         use crate::commit::FKeyConversion;
-        use nuko_core::input::{to_halfwidth_katakana, to_hiragana, to_katakana};
+        use nuko_core::input::{to_alnum_fkey, to_halfwidth_katakana, to_hiragana, to_katakana};
 
         let reading = self.ivars().state.borrow().composition.clone();
-        if reading.is_empty() {
-            return;
-        }
-        let converted = match kind {
-            FKeyConversion::Hiragana => to_hiragana(&reading),
-            FKeyConversion::Katakana => to_katakana(&reading),
-            FKeyConversion::HalfwidthKatakana => to_halfwidth_katakana(&reading),
+
+        // F9/F10 (英数) は「かな」でなく**打った生ローマ字**を変換する。連打で
+        // 小文字→大文字→先頭大文字 を循環する (段階は state.fkey_alnum_stage)。
+        let (converted, display_reading) = match kind {
+            FKeyConversion::FullwidthAlnum | FKeyConversion::HalfwidthAlnum => {
+                let raw = self.ivars().state.borrow().raw_input.clone();
+                if raw.is_empty() {
+                    return;
+                }
+                let fullwidth = matches!(kind, FKeyConversion::FullwidthAlnum);
+                let stage = self.ivars().state.borrow().fkey_alnum_stage;
+                let out = to_alnum_fkey(&raw, fullwidth, stage);
+                // 次の連打のために段階を 1 つ進める (3 で循環)。
+                self.ivars().state.borrow_mut().fkey_alnum_stage = (stage + 1) % 3;
+                // reading は学習キーにしないため raw をそのまま使う (かな変換はしない)。
+                (out, raw)
+            }
+            kana_kind => {
+                if reading.is_empty() {
+                    return;
+                }
+                // かな系 F キーを押したら英数サイクルはリセットする。
+                self.ivars().state.borrow_mut().fkey_alnum_stage = 0;
+                let out = match kana_kind {
+                    FKeyConversion::Hiragana => to_hiragana(&reading),
+                    FKeyConversion::Katakana => to_katakana(&reading),
+                    FKeyConversion::HalfwidthKatakana => to_halfwidth_katakana(&reading),
+                    // 英数 2 種は上の枝で処理済み。
+                    FKeyConversion::FullwidthAlnum | FKeyConversion::HalfwidthAlnum => {
+                        unreachable!()
+                    }
+                };
+                (out, reading.clone())
+            }
         };
         {
             let mut state = self.ivars().state.borrow_mut();
             state.segmented = None;
             let mut list = CandidateList::new();
-            list.push(Candidate::new(&converted, &reading).with_source(CandidateSource::User));
+            list.push(
+                Candidate::new(&converted, &display_reading).with_source(CandidateSource::User),
+            );
             state.candidates = Some(list);
         }
         Self::hide_candidate_panel();

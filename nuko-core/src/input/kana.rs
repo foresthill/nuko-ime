@@ -200,6 +200,49 @@ pub fn to_halfwidth_ascii(input: &str) -> String {
         .collect()
 }
 
+/// F9/F10 の英数変換で連打したときの大小文字サイクル段階。
+///
+/// MS-IME / Google 等の標準: 1 回目=小文字, 2 回目=大文字, 3 回目=先頭大文字。
+/// 以降はこの 3 段を循環する。出典: Wikipedia "Language input keys"。
+fn apply_alnum_case(raw: &str, stage: u8) -> String {
+    match stage % 3 {
+        0 => raw.to_lowercase(),
+        1 => raw.to_uppercase(),
+        // 2: 先頭の英字のみ大文字、残りは小文字 (Howaito)。
+        _ => {
+            let lower = raw.to_lowercase();
+            let mut out = String::with_capacity(lower.len());
+            let mut done = false;
+            for c in lower.chars() {
+                if !done && c.is_alphabetic() {
+                    out.extend(c.to_uppercase());
+                    done = true;
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        }
+    }
+}
+
+/// F9 (全角英数) / F10 (半角英数): 打った生ローマ字 `raw` を英数に変換する。
+///
+/// `fullwidth=true` で全角ラテン (F9)、false で半角 (F10)。`stage` は連打段階
+/// (0=小文字 / 1=大文字 / 2=先頭大文字、以降 3 で循環)。
+///
+/// 例: `to_alnum_fkey("howaito", false, 0)` → `"howaito"`,
+///     `(.., true, 1)` → `"ＨＯＷＡＩＴＯ"`, `(.., false, 2)` → `"Howaito"`。
+#[must_use]
+pub fn to_alnum_fkey(raw: &str, fullwidth: bool, stage: u8) -> String {
+    let cased = apply_alnum_case(raw, stage);
+    if fullwidth {
+        to_fullwidth_ascii(&cased)
+    } else {
+        to_halfwidth_ascii(&cased)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,6 +286,24 @@ mod tests {
             "ａ　ｂ",
             "半角スペース→全角スペース"
         );
+    }
+
+    #[test]
+    fn test_to_alnum_fkey_cycle() {
+        // F10 (半角英数): 小文字 → 大文字 → 先頭大文字 を循環 (出典 Wikipedia/MS-IME)。
+        assert_eq!(to_alnum_fkey("howaito", false, 0), "howaito");
+        assert_eq!(to_alnum_fkey("howaito", false, 1), "HOWAITO");
+        assert_eq!(to_alnum_fkey("howaito", false, 2), "Howaito");
+        // stage は 3 で循環 (3→0 相当)。
+        assert_eq!(to_alnum_fkey("howaito", false, 3), "howaito");
+        // F9 (全角英数): 同じ段階で全角ラテンに。
+        assert_eq!(to_alnum_fkey("abc", true, 0), "ａｂｃ");
+        assert_eq!(to_alnum_fkey("abc", true, 1), "ＡＢＣ");
+        assert_eq!(to_alnum_fkey("abc", true, 2), "Ａｂｃ");
+        // 数字混じり: 先頭大文字は「最初の英字」に効く。
+        assert_eq!(to_alnum_fkey("123abc", false, 2), "123Abc");
+        // 既に大文字で打っても stage の規則が優先 (小文字化してから適用)。
+        assert_eq!(to_alnum_fkey("Kawasaki", false, 0), "kawasaki");
     }
 
     #[test]
