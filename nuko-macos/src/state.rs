@@ -100,6 +100,24 @@ where
 
 /// 学習状況を人間可読なテキストにまとめる (パネル表示用)。
 ///
+/// メニューのヘッダに出す 1 行サマリ (例: "ぬこIME ・ 学習 42 選好 ・ 観察 1200 件（ON）")。
+///
+/// `learning_status_text` と同じデータ源を参照するが、メニュー項目タイトル用に 1 行へ圧縮する。
+pub fn menu_status_line() -> String {
+    let Some(dir) = nuko_app_support_dir() else {
+        return "ぬこIME".to_string();
+    };
+    let enabled = dir.join("OBSERVE_ENABLED").exists();
+    let count = ObservationLog::new(true, dir.join("observations.jsonl"))
+        .count()
+        .unwrap_or(0);
+    let prefs = CorrectionStore::load(dir.join("corrections.toml"))
+        .map(|s| s.len())
+        .unwrap_or(0);
+    let obs = if enabled { "ON" } else { "OFF" };
+    format!("ぬこIME ・ 学習 {prefs} 選好 ・ 観察 {count} 件（{obs}）")
+}
+
 /// CLI `nuko learn show` と同じ情報 (オプトイン状態・観察件数・訂正選好) を、
 /// GUI パネル向けにプレーンテキストで返す。
 pub fn learning_status_text() -> String {
