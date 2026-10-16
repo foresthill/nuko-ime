@@ -541,7 +541,55 @@ impl ConversionEngine {
         // 「まつや→松谷」等の学習が **複数文節の文の中では効かない** バグがあった
         // (2026-09 ユーザー報告: 単体「まつや」は松谷、「まつやさんと…」は松也)。
         apply_segment_corrections(&mut segmented, &self.corrections);
+        // P2 (2026-10 ユーザー報告「文中で 単位 が出ない」): ん+母音 の代替候補を
+        // 各文節の **末尾に追加** する。flat の convert() は原文＋代替読みをマージして
+        // 「じかんあるとき」等を出すが、segmented は未対応だった (= 文中の 単位/範囲/
+        // 千円 等が出なかった)。末尾追加のみで既存の順序・選択は変えないので、
+        // 残念/案内 等を displace しない (回帰ゼロ優先)。
+        self.merge_nn_alternates_into_segments(backend, &mut segmented);
         Ok(Some(segmented))
+    }
+
+    /// 各文節の読みに「ん+な行」があれば、「ん+母音」の代替読みも libakaza で変換し、
+    /// その候補を文節の **末尾に追加** する (重複 surface と代替読みそのまま=かな は除く)。
+    ///
+    /// flat の [`Self::convert`] が原文＋代替読みをマージするのと同じ思想を segmented にも
+    /// 適用する。ただし **並べ替えず末尾に足すだけ** にして既存の順序・選択を保つ
+    /// (= 残念(ざんねん)/案内(あんない) の正解を押し下げない。ランキング昇格は
+    /// モデル実機検証を伴う follow-up で行う)。
+    #[cfg(feature = "akaza")]
+    fn merge_nn_alternates_into_segments(
+        &self,
+        backend: &LibakazaBackend,
+        segmented: &mut super::SegmentedConversion,
+    ) {
+        /// 1 文節あたり 1 代替読みから足す候補の上限 (パネル肥大化を防ぐ)。
+        const MAX_ALT_CANDS_PER_SEG: usize = 3;
+        for seg in &mut segmented.segments {
+            let alts = nn_alternate_readings(&seg.reading);
+            // alts[0] は原文。代替 (1..) だけを変換して候補末尾に足す。
+            for alt in alts.iter().skip(1) {
+                let Ok(cands) = backend.convert(alt) else {
+                    continue; // 代替変換失敗は無視 (原文候補は維持)
+                };
+                let mut added = 0usize;
+                for c in cands {
+                    if added >= MAX_ALT_CANDS_PER_SEG {
+                        break;
+                    }
+                    // 代替読みそのまま (かな) はノイズなので入れない。
+                    if c.surface == *alt {
+                        continue;
+                    }
+                    // 既存 surface と重複は入れない。
+                    if seg.candidates.iter().any(|x| x.surface == c.surface) {
+                        continue;
+                    }
+                    seg.candidates.push(c);
+                    added += 1;
+                }
+            }
+        }
     }
 
     /// **学習した文節位置** (ユーザーが切り直した切り方) を読み全体一致で強制再適用する。
