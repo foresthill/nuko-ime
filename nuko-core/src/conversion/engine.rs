@@ -980,6 +980,46 @@ mod tests {
         );
     }
 
+    /// ★★ P2 回帰 (2026-10-16 ユーザー報告「たんに と出て 単位(たんい) が出ない」):
+    ///
+    /// 「ん+母音」の語は `nn_alternate_readings` で代替読みを生成して救う方式。
+    /// ここでは **代替生成が正しいこと** と、**壊してはいけない語の原文が保持される**
+    /// ことを純粋関数レベルで固定する (= P1「ローマ字フリップ」なら壊れる語の防波堤)。
+    ///
+    /// 実際に「単位」が候補に出るか (libakaza ランキング) はモデル依存のため
+    /// diag/smoke-test で検証する。本テストは「仕組みの入力側」を保証する。
+    #[test]
+    fn nn_alternate_tani_and_preserves_zannen_annai() {
+        // 単位: たんに → たんい を生成 (んに→んい)。これが libakaza で 単位 になる。
+        let tani = nn_alternate_readings("たんに");
+        assert!(tani.contains(&"たんに".to_string()), "★ 原文 たんに は保持");
+        assert!(
+            tani.contains(&"たんい".to_string()),
+            "★ 代替 たんい を生成 (→ 単位 の読み)"
+        );
+
+        // ★ 壊してはいけない: 残念(ざんねん)/案内(あんない) は **原文が必ず残る**。
+        //   代替 (ざんえん/あんあい) は追加されるだけで、libakaza が原文を高スコアにする。
+        //   P1 (ローマ字で んね→んえ に固定) はこの原文を**消す**ので禁止。
+        let zannen = nn_alternate_readings("ざんねん");
+        assert!(
+            zannen.contains(&"ざんねん".to_string()),
+            "★ 残念: 原文 ざんねん は必ず保持 (P1 なら消える = 回帰)"
+        );
+        let annai = nn_alternate_readings("あんない");
+        assert!(
+            annai.contains(&"あんない".to_string()),
+            "★ 案内: 原文 あんない は必ず保持"
+        );
+
+        // 文中 (複数文節相当) の読みでも ん+母音 代替が出る。P2 で segmented にも効かせる対象。
+        let sentence = nn_alternate_readings("めーるたんにで");
+        assert!(
+            sentence.contains(&"めーるたんいで".to_string()),
+            "★ 文中の たんに→たんい も代替生成 (P2: これを segmented 変換にも適用する)"
+        );
+    }
+
     /// ★ 単語登録した語は変換で 1 位に来る (USER_DICT_BOOST)。
     #[test]
     fn user_dict_candidate_ranks_first() {
