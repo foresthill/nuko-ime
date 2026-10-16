@@ -1,5 +1,6 @@
 //! ぬこIME CLI
 
+mod anthropic;
 mod openrouter;
 
 use anyhow::Result;
@@ -66,10 +67,10 @@ enum Commands {
         /// プロンプトに載せる読みの最大件数
         #[arg(long, default_value = "40")]
         max_readings: usize,
-        /// 推論プロバイダ ("mock" / "openrouter"。未指定なら dry-run でプロンプト表示)
+        /// 推論プロバイダ ("mock" / "openrouter" / "anthropic"。未指定なら dry-run でプロンプト表示)
         #[arg(long)]
         provider: Option<String>,
-        /// モデル (openrouter 用。未指定なら ai.toml の model、それも無ければエラー)
+        /// モデル (openrouter/anthropic 用。未指定なら ai.toml の model、それも無ければエラー)
         #[arg(long)]
         model: Option<String>,
         /// 提案を corrections.toml にマージして保存する (プロバイダ指定時のみ有効)
@@ -357,7 +358,8 @@ fn cmd_dream(
         println!("{prompt}");
         println!();
         println!(
-            "  {} 実推論は `nuko dream --provider openrouter` (要 OPENROUTER_API_KEY)。",
+            "  {} 実推論は `nuko dream --provider openrouter` (要 OPENROUTER_API_KEY) \
+             または `--provider anthropic` (要 ANTHROPIC_API_KEY)。",
             "ヒント:".dimmed()
         );
         return Ok(());
@@ -388,8 +390,30 @@ fn cmd_dream(
             );
             Box::new(OpenRouterProvider::new(api_key, model, cfg.base_url))
         }
+        "anthropic" | "claude" => {
+            use crate::anthropic::{model_hint, AnthropicProvider};
+            let cfg = crate::openrouter::DreamConfig::load(dir.join("ai.toml"))?;
+            let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
+                anyhow::anyhow!(
+                    "ANTHROPIC_API_KEY が未設定です。\n  export ANTHROPIC_API_KEY=sk-ant-... \
+                     を設定してください (設定画面でも入力可)。"
+                )
+            })?;
+            let model = model.map(String::from).or(cfg.model).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "モデル未指定です。--model か ai.toml の model を設定してください ({})。",
+                    model_hint()
+                )
+            })?;
+            println!(
+                "  {} anthropic / model={}",
+                "プロバイダ:".dimmed(),
+                model.cyan()
+            );
+            Box::new(AnthropicProvider::new(api_key, model))
+        }
         other => {
-            anyhow::bail!("未知のプロバイダ: {other} (\"mock\" / \"openrouter\")");
+            anyhow::bail!("未知のプロバイダ: {other} (\"mock\" / \"openrouter\" / \"anthropic\")");
         }
     };
 
