@@ -178,72 +178,107 @@ pub fn decide_digit_select_and_commit(state: &InputState, digit: char) -> Option
 ///
 /// 副作用 (do_commit / do_cancel / 候補移動 / marked text 更新) は引き続き
 /// 呼び出し側の責務。本 enum は「何をすべきか」だけを表す。
+/// composing 中の特殊キーの動作。方式3 では [`command_for_keycode`] が keyCode から決める。
+/// (非 composing・未知キー・文字キーは handleEvent 側で [`KeyAction::PassThrough`] として扱う。)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandAction {
-    /// 未変換 (= 非 composing) → IME は処理しない (passthrough, `Bool::NO`)
-    PassThrough,
-    /// Enter (`insertNewline:`) → 確定
+    /// Enter → 確定
     Commit,
-    /// Escape (`cancelOperation:`) → 取消
+    /// Escape → 取消
     Cancel,
-    /// Backspace (`deleteBackward:`) → 1 文字削除
+    /// Backspace → 1 文字削除
     Backspace,
-    /// Left (`moveLeft:`) → 文節フォーカスを前へ (segmented モードのみ実効)
+    /// Left → 文節フォーカスを前へ (segmented モードのみ実効)
     FocusShiftLeft,
-    /// Right (`moveRight:`) → 文節フォーカスを後ろへ (segmented モードのみ実効)
+    /// Right → 文節フォーカスを後ろへ (segmented モードのみ実効)
     FocusShiftRight,
-    /// Down (`moveDown:`) → 次候補
+    /// Down → 次候補
     SelectNext,
-    /// Up (`moveUp:`) → 前候補
+    /// Up → 前候補
     SelectPrev,
-    /// Shift+Left (`moveLeftAndModifySelection:`) → focused 文節を縮める (segmented のみ)
+    /// Shift+Left → focused 文節を縮める (segmented のみ)
     ResizeSegmentLeft,
-    /// Shift+Right (`moveRightAndModifySelection:`) → focused 文節を伸ばす (segmented のみ)
+    /// Shift+Right → focused 文節を伸ばす (segmented のみ)
     ResizeSegmentRight,
-    /// Tab (`insertTab:`) → 単語登録候補があれば登録 (無ければ Tab は素通し)
+    /// Tab → 単語登録候補があれば登録 (無ければ素通し)
     RegisterWord,
-    /// 未知のセレクタ → 確定してからパススルー (`Bool::NO`)
-    CommitAndPassThrough,
 }
 
-/// セレクタ名 (`&CStr`) と composing 状態から実行すべきアクションを返す。
+// handleEvent 実装で結線するまで未使用なので dead_code を許可する
+// (docs/spikes/method3-migration-plan.md)。純粋関数なので先にテストで固める。
+/// ファンクションキー (F6-F10) による文字種変換の種類。
 ///
-/// ## 守りたい不変条件
+/// F6 → ひらがな / F7 → 全角カタカナ / F8 → 半角カタカナ /
+/// F9 → 全角英数 / F10 → 半角英数。
 ///
-/// 1. **非 composing 時はセレクタに関わらず必ず `PassThrough`** — 未変換状態で
-///    IME が Enter/矢印を横取りするとアプリの挙動を壊す (= 過去のバグ源)。
-/// 2. **既知セレクタは composing 時のみ専用アクションになる**。
-/// 3. **未知セレクタは `CommitAndPassThrough`** — 未確定テキストを取りこぼさず
-///    確定してから OS に処理を返す。
+/// F9/F10 は**かなでなく打った生ローマ字**を変換する (例「howaito」→ ｈｏｗａｉｔｏ / howaito)。
+/// 連打で 小文字 → 大文字 → 先頭大文字 を循環する (MS-IME / Google 等の標準)。
+/// 出典: Wikipedia "Language input keys" / Microsoft User interface。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FKeyConversion {
+    /// F6: ひらがな
+    Hiragana,
+    /// F7: 全角カタカナ
+    Katakana,
+    /// F8: 半角カタカナ
+    HalfwidthKatakana,
+    /// F9: 全角英数 (生ローマ字を全角ラテンへ。連打で大小文字循環)
+    FullwidthAlnum,
+    /// F10: 半角英数 (生ローマ字を半角ラテンへ。連打で大小文字循環)
+    HalfwidthAlnum,
+}
+
+/// 方式3 (`handleEvent:`) で keyCode から決まる動作。
 ///
-/// 純粋関数: 入力は `&CStr` と `bool` のみ。ObjC ランタイム不要。
+/// handleEvent 内で NSEvent を分類した結果。`PassThrough` は「特殊キーではない →
+/// 呼び出し側が `characters()` を文字として処理する（または非 composing で素通し）」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyAction {
+    /// 矢印/Enter/Esc/Backspace/Tab 等 → 既存の [`CommandAction`]。
+    Command(CommandAction),
+    /// F6/F7/F8 → 文字種変換。
+    Fkey(FKeyConversion),
+    /// 特殊キーでない（文字として処理）/ 非 composing で素通し。
+    PassThrough,
+}
+
+/// macOS 仮想キーコード (`NSEvent.keyCode`, kVK_*) + Shift + composing から
+/// [`KeyAction`] を決める純粋関数（方式3 移行の中核・テスト可能）。
+///
+/// 一次ソース: Carbon `HIToolbox/Events.h` の `kVK_*`。実機 handleEvent のログでも確認する。
+/// 非 composing 時は特殊キーを横取りしない（未変換状態で特殊キーを奪わない）。
 #[must_use]
-pub fn decide_command(selector_name: &std::ffi::CStr, is_composing: bool) -> CommandAction {
-    // 不変条件 1: 未変換状態は常にパススルー
+pub fn command_for_keycode(key_code: u16, shift: bool, is_composing: bool) -> KeyAction {
+    // 不変条件: 未変換状態では特殊キーを奪わない（F キー含む）。
     if !is_composing {
-        return CommandAction::PassThrough;
+        return KeyAction::PassThrough;
     }
-
-    match selector_name.to_bytes() {
-        b"insertNewline:" => CommandAction::Commit,
-        b"cancelOperation:" => CommandAction::Cancel,
-        b"deleteBackward:" => CommandAction::Backspace,
-        b"moveLeft:" => CommandAction::FocusShiftLeft,
-        b"moveRight:" => CommandAction::FocusShiftRight,
-        b"moveDown:" => CommandAction::SelectNext,
-        b"moveUp:" => CommandAction::SelectPrev,
-        // Shift+←→ (文節伸縮)。macOS は selection 拡張のセレクタとして配送する。
-        b"moveLeftAndModifySelection:" => CommandAction::ResizeSegmentLeft,
-        b"moveRightAndModifySelection:" => CommandAction::ResizeSegmentRight,
-        b"insertTab:" => CommandAction::RegisterWord,
-        _ => CommandAction::CommitAndPassThrough,
+    match key_code {
+        0x24 => KeyAction::Command(CommandAction::Commit), // Return
+        0x33 => KeyAction::Command(CommandAction::Backspace), // Delete (Backspace)
+        0x35 => KeyAction::Command(CommandAction::Cancel), // Escape
+        0x30 => KeyAction::Command(CommandAction::RegisterWord), // Tab
+        0x7B => KeyAction::Command(if shift {
+            CommandAction::ResizeSegmentLeft
+        } else {
+            CommandAction::FocusShiftLeft
+        }), // Left
+        0x7C => KeyAction::Command(if shift {
+            CommandAction::ResizeSegmentRight
+        } else {
+            CommandAction::FocusShiftRight
+        }), // Right
+        0x7D => KeyAction::Command(CommandAction::SelectNext), // Down
+        0x7E => KeyAction::Command(CommandAction::SelectPrev), // Up
+        0x61 => KeyAction::Fkey(FKeyConversion::Hiragana), // F6
+        0x62 => KeyAction::Fkey(FKeyConversion::Katakana), // F7
+        0x64 => KeyAction::Fkey(FKeyConversion::HalfwidthKatakana), // F8
+        0x65 => KeyAction::Fkey(FKeyConversion::FullwidthAlnum), // F9
+        0x6D => KeyAction::Fkey(FKeyConversion::HalfwidthAlnum), // F10
+        // Space(0x31) や英字は文字として characters() で処理する → PassThrough。
+        _ => KeyAction::PassThrough,
     }
 }
-
-// 注: F キー (F6-F10) の文字種変換は撤去した。F キーは方式1 では noop: として届き、
-// keyCode を伴わず NSApp.currentEvent も IME では KeyDown を返さないため識別不能
-// (2026-10 実機で keyCode=None 確認)。識別には handleEvent:(方式3) が要り落とし穴 #9。
-// 復活させるなら方式3 への移行を伴う大改修として別途。
 
 /// activation guard 閾値 (ms)。IME 活性化直後のこの時間内に来た Space は、
 /// ソース切替ショートカット (Ctrl+Space) 由来の「漏れ」と判定して握り潰す。
@@ -436,6 +471,93 @@ pub fn apply_segment_focus_shift(
     }
 
     (segmented.focused, segmented.current_surface())
+}
+
+#[cfg(test)]
+mod keycode_tests {
+    use super::{command_for_keycode, CommandAction, FKeyConversion, KeyAction};
+
+    /// ★ 非 composing では特殊キーを奪わない（素通し）。
+    #[test]
+    fn non_composing_passes_through_everything() {
+        for kc in [0x24, 0x33, 0x35, 0x7B, 0x62] {
+            assert_eq!(
+                command_for_keycode(kc, false, false),
+                KeyAction::PassThrough
+            );
+        }
+    }
+
+    /// ★ 編集キーが正しい CommandAction にマップされる。
+    #[test]
+    fn editing_keys_map_to_commands() {
+        let c = |kc, shift| command_for_keycode(kc, shift, true);
+        assert_eq!(c(0x24, false), KeyAction::Command(CommandAction::Commit)); // Return
+        assert_eq!(c(0x33, false), KeyAction::Command(CommandAction::Backspace)); // BS
+        assert_eq!(c(0x35, false), KeyAction::Command(CommandAction::Cancel)); // Esc
+        assert_eq!(
+            c(0x30, false),
+            KeyAction::Command(CommandAction::RegisterWord)
+        ); // Tab
+        assert_eq!(
+            c(0x7D, false),
+            KeyAction::Command(CommandAction::SelectNext)
+        ); // Down
+        assert_eq!(
+            c(0x7E, false),
+            KeyAction::Command(CommandAction::SelectPrev)
+        ); // Up
+    }
+
+    /// ★ 矢印は Shift で文節移動 ⇄ 文節伸縮が切り替わる。
+    #[test]
+    fn arrows_depend_on_shift() {
+        let c = |kc, shift| command_for_keycode(kc, shift, true);
+        assert_eq!(
+            c(0x7B, false),
+            KeyAction::Command(CommandAction::FocusShiftLeft)
+        );
+        assert_eq!(
+            c(0x7B, true),
+            KeyAction::Command(CommandAction::ResizeSegmentLeft)
+        );
+        assert_eq!(
+            c(0x7C, false),
+            KeyAction::Command(CommandAction::FocusShiftRight)
+        );
+        assert_eq!(
+            c(0x7C, true),
+            KeyAction::Command(CommandAction::ResizeSegmentRight)
+        );
+    }
+
+    /// ★ F6/F7/F8 が文字種変換にマップされる（方式3 の本命）。
+    #[test]
+    fn fkeys_map_to_conversion() {
+        let c = |kc| command_for_keycode(kc, false, true);
+        assert_eq!(c(0x61), KeyAction::Fkey(FKeyConversion::Hiragana)); // F6
+        assert_eq!(c(0x62), KeyAction::Fkey(FKeyConversion::Katakana)); // F7
+        assert_eq!(c(0x64), KeyAction::Fkey(FKeyConversion::HalfwidthKatakana));
+        // F8
+    }
+
+    /// ★ 文字キー・Space・未対応 F キーは PassThrough（文字として処理）。
+    #[test]
+    fn chars_and_space_pass_through() {
+        let c = |kc| command_for_keycode(kc, false, true);
+        assert_eq!(c(0x31), KeyAction::PassThrough, "Space は文字扱い");
+        assert_eq!(c(0x00), KeyAction::PassThrough, "A キー");
+        assert_eq!(
+            c(0x65),
+            KeyAction::Fkey(FKeyConversion::FullwidthAlnum),
+            "F9=全角英数"
+        );
+        assert_eq!(
+            c(0x6D),
+            KeyAction::Fkey(FKeyConversion::HalfwidthAlnum),
+            "F10=半角英数"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -990,97 +1112,8 @@ mod tests {
         );
     }
 
-    // -- テスト基盤 #4: decide_command の不変条件テスト群 --
-    //
-    // 守りたい不変条件:
-    //   1. 非 composing 時はどんなセレクタでも必ず PassThrough
-    //   2. 既知セレクタ (Enter/Esc/BS/矢印) は composing 時に専用アクション
-    //   3. 未知セレクタは CommitAndPassThrough (= 未確定を取りこぼさない)
-
-    /// 不変条件 1: 非 composing なら全セレクタが PassThrough
-    #[test]
-    fn non_composing_always_passes_through() {
-        let selectors = [
-            c"insertNewline:",
-            c"cancelOperation:",
-            c"deleteBackward:",
-            c"moveLeft:",
-            c"moveRight:",
-            c"moveDown:",
-            c"moveUp:",
-            c"someUnknownSelector:",
-        ];
-        for sel in selectors {
-            assert_eq!(
-                decide_command(sel, /*is_composing=*/ false),
-                CommandAction::PassThrough,
-                "★ 非 composing 時は {sel:?} でも PassThrough でなければならない"
-            );
-        }
-    }
-
-    /// 不変条件 2: composing 時の既知セレクタが正しいアクションに対応
-    #[test]
-    fn composing_known_selectors_map_to_actions() {
-        let cases = [
-            (c"insertNewline:", CommandAction::Commit),
-            (c"cancelOperation:", CommandAction::Cancel),
-            (c"deleteBackward:", CommandAction::Backspace),
-            (c"moveLeft:", CommandAction::FocusShiftLeft),
-            (c"moveRight:", CommandAction::FocusShiftRight),
-            (c"moveDown:", CommandAction::SelectNext),
-            (c"moveUp:", CommandAction::SelectPrev),
-            (
-                c"moveLeftAndModifySelection:",
-                CommandAction::ResizeSegmentLeft,
-            ),
-            (
-                c"moveRightAndModifySelection:",
-                CommandAction::ResizeSegmentRight,
-            ),
-        ];
-        for (sel, expected) in cases {
-            assert_eq!(
-                decide_command(sel, /*is_composing=*/ true),
-                expected,
-                "★ composing 時 {sel:?} は {expected:?} に対応すべき"
-            );
-        }
-    }
-
-    /// 不変条件 3: composing 時の未知セレクタは CommitAndPassThrough
-    #[test]
-    fn composing_unknown_selector_commits_and_passes_through() {
-        assert_eq!(
-            decide_command(c"someRandomSelector:", /*is_composing=*/ true),
-            CommandAction::CommitAndPassThrough,
-            "★ 未知セレクタは確定してから OS にパススルー (未確定を取りこぼさない)"
-        );
-        // 空セレクタや無関係なものも同様
-        assert_eq!(
-            decide_command(c"", /*is_composing=*/ true),
-            CommandAction::CommitAndPassThrough,
-        );
-        assert_eq!(
-            decide_command(c"noop:", /*is_composing=*/ true),
-            CommandAction::CommitAndPassThrough,
-        );
-    }
-
-    /// 回帰: Enter は composing 時のみ Commit、非 composing では PassThrough。
-    /// (= 未変換状態で IME が Enter を横取りして改行を潰すバグの防止)
-    #[test]
-    fn enter_is_committed_only_while_composing() {
-        assert_eq!(
-            decide_command(c"insertNewline:", true),
-            CommandAction::Commit
-        );
-        assert_eq!(
-            decide_command(c"insertNewline:", false),
-            CommandAction::PassThrough,
-            "★ 未変換状態の Enter は IME が触らずアプリに渡す"
-        );
-    }
+    // 注: decide_command (セレクタ→アクション, 方式1) のテストは、方式3 移行で
+    // command_for_keycode に置き換わったため keycode_tests モジュールへ移った。
 
     // -- テスト基盤 #5: decide_space_action の不変条件テスト群 --
 

@@ -10,9 +10,9 @@
 use std::cell::RefCell;
 
 use objc2::rc::{Allocated, Retained};
-use objc2::runtime::{AnyObject, Bool, NSObjectProtocol, Sel};
+use objc2::runtime::{AnyObject, Bool, NSObjectProtocol};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker};
-use objc2_app_kit::{NSEvent, NSMenu, NSScreen};
+use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType, NSMenu, NSScreen};
 use objc2_foundation::{NSArray, NSPoint, NSRange, NSString};
 use objc2_input_method_kit::{IMKInputController, IMKServer};
 use tracing::{debug, error, info, warn};
@@ -198,21 +198,23 @@ define_class!(
             this
         }
 
-        /// 文字キー入力を処理する
-        /// キーバインディング経由で呼ばれる（"a", "k", " " 等の文字）
-        #[unsafe(method(inputText:client:))]
-        fn input_text_client(&self, string: Option<&NSString>, sender: Option<&AnyObject>) -> Bool {
-            debug_log(&format!("inputText called: {:?}", string.map(|s| s.to_string())));
-            self._input_text_impl(string, sender)
+        /// 方式3: 生 NSEvent を直接受け取る (keyCode/修飾キーが取れる)。
+        ///
+        /// 方式1 (`inputText:` + `didCommandBySelector:`) から全面移行した。混在は
+        /// 落とし穴 #9 なので両者は実装しない。F キー等の keyCode 判別のために方式3 が必要。
+        #[unsafe(method(handleEvent:client:))]
+        fn handle_event(&self, event: Option<&NSEvent>, sender: Option<&AnyObject>) -> Bool {
+            self._handle_event_impl(event, sender)
         }
 
-        /// アクションセレクタを処理する
-        /// Enter, Escape, 矢印キー等がここに来る
-        #[unsafe(method(didCommandBySelector:client:))]
-        fn did_command_by_selector(&self, selector: Sel, sender: Option<&AnyObject>) -> Bool {
-            debug_log(&format!("didCommandBySelector called: {:?}", selector.name()));
-            self._did_command_impl(selector, sender)
-        }
+        // ★ `recognizedEvents:` は **登録しない**。
+        //    objc2 の `#[unsafe(method(recognizedEvents:))] -> usize` を登録すると、
+        //    IMK がクライアント接続時 (activateServer より前) にクラッシュし、
+        //    デバッグログにも .ips にも何も残らず「何も打てない」症状になる
+        //    (2026-10 実機で切り分け: 外したら activateServer→handleEvent が発火)。
+        //    recognizedEvents を省くと IMK の既定が使われ、KeyDown は handleEvent に届く
+        //    (実機確認済)。将来 FlagsChanged 等が必要になったら、正しい objc2 シグネチャを
+        //    精査してから再登録すること。
 
         /// 候補リストを返す
         #[unsafe(method_id(candidates:))]
@@ -320,16 +322,10 @@ define_class!(
             self._register_word_impl();
         }
 
-        // 注意: `handleEvent:client:` は **実装しない**。
-        //
-        // IMKServerInput の入力受信は 3 方式があり「1 つだけ」を選ぶ排他設計
-        // (Apple 公式: "An input method should choose one of those ways")。
-        // 本 IME は方式 1 = `inputText:client:` + `didCommandBySelector:client:`
-        // を採用している。ここに方式 3 の `handleEvent:client:` を被せると IMK は
-        // inputText: を呼ばなくなり日本語が打てなくなる (PR #51 の大デグレ)。
-        // さらに `IMKInputController` は `handleEvent:client:` の実装を持たないため
-        // `super` 呼び出しは "method not found" で abort する (PR #52 のクラッシュ)。
-        // 矢印キーは方式 1 の `didCommandBySelector:` (moveLeft:/moveRight:) で受ける。
+        // 注意: 本 IME は **方式3 (handleEvent:) 単独**。方式1 (inputText:/
+        // didCommandBySelector:) は実装しない。3 方式は排他で、混在は落とし穴 #9
+        // (打てない/クラッシュ, PR #51/#52)。方式3 一本化は keyCode/修飾キーを得るため
+        // (F キー等)。移行の経緯は docs/spikes/method3-migration-plan.md。
     }
 );
 
@@ -449,7 +445,55 @@ impl NukoInputController {
         });
     }
 
-    /// inputText:client: の実装
+    /// `handleEvent:client:` の実装 (方式3)。生 NSEvent を分類して既存ロジックへ振り分ける。
+    ///
+    /// - KeyDown 以外 / Command・Control 併用 (ショートカット) → 素通し (`Bool::NO`)
+    /// - keyCode + Shift + composing → `command_for_keycode` で [`KeyAction`] 判定
+    ///   - `Command` → `run_command_action` (Enter/Esc/BS/矢印/Shift伸縮/Tab)
+    ///   - `Fkey` → `apply_fkey_conversion` (F6/F7/F8)
+    ///   - `PassThrough` → `characters()` を文字として `_input_text_impl` (ローマ字/Space/記号/数字)
+    fn _handle_event_impl(&self, event: Option<&NSEvent>, sender: Option<&AnyObject>) -> Bool {
+        let (Some(event), Some(client)) = (event, sender) else {
+            return Bool::NO;
+        };
+        // KeyDown のみ処理 (FlagsChanged は状態把握用に受けるが消費しない)。
+        if event.r#type() != NSEventType::KeyDown {
+            return Bool::NO;
+        }
+        let mods = event.modifierFlags();
+        // Command/Control 併用はアプリのショートカット → IME は奪わない。
+        if mods.contains(NSEventModifierFlags::Command)
+            || mods.contains(NSEventModifierFlags::Control)
+        {
+            return Bool::NO;
+        }
+        let shift = mods.contains(NSEventModifierFlags::Shift);
+        let key_code = event.keyCode();
+        let is_composing = self.ivars().state.borrow().is_composing;
+
+        debug_log(&format!(
+            "handleEvent: keyCode={key_code} shift={shift} composing={is_composing}"
+        ));
+
+        match crate::commit::command_for_keycode(key_code, shift, is_composing) {
+            crate::commit::KeyAction::Command(cmd) => self.run_command_action(cmd, client),
+            crate::commit::KeyAction::Fkey(kind) => {
+                self.apply_fkey_conversion(client, kind);
+                Bool::YES
+            }
+            crate::commit::KeyAction::PassThrough => {
+                // 文字キー: characters() が印字文字列。無ければ (ファンクション等) 素通し。
+                match event.characters() {
+                    Some(s) if !s.to_string().is_empty() => {
+                        self._input_text_impl(Some(&s), Some(client))
+                    }
+                    _ => Bool::NO,
+                }
+            }
+        }
+    }
+
+    /// 文字入力の処理 (方式3 handleEvent の PassThrough 経路から呼ぶ)。
     fn _input_text_impl(&self, string: Option<&NSString>, sender: Option<&AnyObject>) -> Bool {
         // 学習状況パネルが出ていれば、打鍵で閉じる (邪魔にならないように)。
         crate::state::with_learning_panel(|p| {
@@ -707,6 +751,9 @@ impl NukoInputController {
                     if !kana.is_empty() {
                         state.composition.push_str(&kana);
                     }
+                    // F9/F10 用に生 ascii を保持 (この経路は候補確定後の新規入力)。
+                    state.raw_input.push(c);
+                    state.fkey_alnum_stage = 0;
                 }
             }
             let composing = !state.composition.is_empty() || !state.romaji.buffer().is_empty();
@@ -728,6 +775,9 @@ impl NukoInputController {
                 if !kana.is_empty() {
                     state.composition.push_str(&kana);
                 }
+                // F9/F10 (英数) 用に生 ascii を保持。新規文字が来たので英数サイクルは 0 に戻す。
+                state.raw_input.push(c);
+                state.fkey_alnum_stage = 0;
                 any_processed = true;
             }
         }
@@ -745,29 +795,12 @@ impl NukoInputController {
         Bool::YES
     }
 
-    /// didCommandBySelector:client: の実装
-    fn _did_command_impl(&self, selector: Sel, sender: Option<&AnyObject>) -> Bool {
-        let is_composing = self.ivars().state.borrow().is_composing;
-
-        let Some(client) = sender else {
-            return Bool::NO;
-        };
-
-        // セレクタ名 + composing 状態 → アクションの決定は純粋関数
-        // `crate::commit::decide_command` に委譲 (テスト基盤 #4)。
-        // 非 composing 時は必ず PassThrough になる不変条件もそこで保証。
-        let sel_name = selector.name();
-
-        // 注: F6-F10 (文字種変換) は **方式1 では実装不可**。F キーは noop: セレクタとして
-        // 届くが keyCode を伴わず、NSApp.currentEvent も IME プロセスでは KeyDown を返さない
-        // (実機ログで keyCode=None を確認, 2026-10)。識別には生 NSEvent = handleEvent:(方式3)
-        // が要り、それは落とし穴 #9 (打てなくなる/クラッシュ) なので採用しない。カタカナ等は
-        // Space 循環で出せる。F キー対応は方式3 への移行を伴う大改修として将来検討。
-
-        let action = crate::commit::decide_command(sel_name, is_composing);
-
+    /// [`CommandAction`] を実行する (方式3 `handleEvent:` から keyCode 経由で呼ぶ)。
+    ///
+    /// ロジックは方式1 時代の `didCommandBySelector:` 分岐をそのまま再利用。
+    /// `action` の決定は `commit::command_for_keycode` (純粋) が担う。
+    fn run_command_action(&self, action: CommandAction, client: &AnyObject) -> Bool {
         match action {
-            CommandAction::PassThrough => Bool::NO,
             CommandAction::Commit => {
                 // Enter: 確定
                 self.do_commit(client);
@@ -853,12 +886,6 @@ impl NukoInputController {
                     None => Bool::NO,
                 }
             }
-            CommandAction::CommitAndPassThrough => {
-                debug_log(&format!("unhandled selector: {sel_name:?}"));
-                // 未知のセレクタ: 確定してパススルー
-                self.do_commit(client);
-                Bool::NO
-            }
         }
     }
 
@@ -877,6 +904,63 @@ impl NukoInputController {
 
         let array: Retained<NSArray<NSString>> = NSArray::from_retained_slice(&ns_strings);
         Some(unsafe { Retained::cast_unchecked(array) })
+    }
+
+    /// F キー (F6/F7/F8) の文字種変換を未確定文字列に適用する (方式3 handleEvent から)。
+    ///
+    /// composition (かな) を ひらがな/全角カタカナ/半角カタカナ に変換し、単一候補として
+    /// 差し替えて marked text を更新する。**確定しない**ので変換状態のまま残り、Enter で確定。
+    fn apply_fkey_conversion(&self, client: &AnyObject, kind: crate::commit::FKeyConversion) {
+        use crate::commit::FKeyConversion;
+        use nuko_core::input::{to_alnum_fkey, to_halfwidth_katakana, to_hiragana, to_katakana};
+
+        let reading = self.ivars().state.borrow().composition.clone();
+
+        // F9/F10 (英数) は「かな」でなく**打った生ローマ字**を変換する。連打で
+        // 小文字→大文字→先頭大文字 を循環する (段階は state.fkey_alnum_stage)。
+        let (converted, display_reading) = match kind {
+            FKeyConversion::FullwidthAlnum | FKeyConversion::HalfwidthAlnum => {
+                let raw = self.ivars().state.borrow().raw_input.clone();
+                if raw.is_empty() {
+                    return;
+                }
+                let fullwidth = matches!(kind, FKeyConversion::FullwidthAlnum);
+                let stage = self.ivars().state.borrow().fkey_alnum_stage;
+                let out = to_alnum_fkey(&raw, fullwidth, stage);
+                // 次の連打のために段階を 1 つ進める (3 で循環)。
+                self.ivars().state.borrow_mut().fkey_alnum_stage = (stage + 1) % 3;
+                // reading は学習キーにしないため raw をそのまま使う (かな変換はしない)。
+                (out, raw)
+            }
+            kana_kind => {
+                if reading.is_empty() {
+                    return;
+                }
+                // かな系 F キーを押したら英数サイクルはリセットする。
+                self.ivars().state.borrow_mut().fkey_alnum_stage = 0;
+                let out = match kana_kind {
+                    FKeyConversion::Hiragana => to_hiragana(&reading),
+                    FKeyConversion::Katakana => to_katakana(&reading),
+                    FKeyConversion::HalfwidthKatakana => to_halfwidth_katakana(&reading),
+                    // 英数 2 種は上の枝で処理済み。
+                    FKeyConversion::FullwidthAlnum | FKeyConversion::HalfwidthAlnum => {
+                        unreachable!()
+                    }
+                };
+                (out, reading.clone())
+            }
+        };
+        {
+            let mut state = self.ivars().state.borrow_mut();
+            state.segmented = None;
+            let mut list = CandidateList::new();
+            list.push(
+                Candidate::new(&converted, &display_reading).with_source(CandidateSource::User),
+            );
+            state.candidates = Some(list);
+        }
+        Self::hide_candidate_panel();
+        Self::set_marked_text_on_client(client, &converted);
     }
 
     /// クライアントに setMarkedText を送信

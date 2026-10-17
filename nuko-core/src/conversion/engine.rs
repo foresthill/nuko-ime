@@ -1015,6 +1015,19 @@ mod tests {
         // せんねん → せんえん (千円) の代替
         let alts2 = nn_alternate_readings("せんねん");
         assert!(alts2.contains(&"せんえん".to_string()), "★ ん+ね→ん+え");
+        // 単語: はんねい → はんえい (反映/繁栄)。ユーザー報告 2026-10
+        // (hannei と打つと標準ローマ字で はんねい になる。反映 は はんえい 読み)。
+        let alts3 = nn_alternate_readings("はんねい");
+        assert!(
+            alts3.contains(&"はんえい".to_string()),
+            "★ 単語: ん+ね→ん+え で はんえい を生成"
+        );
+        // センテンス: これをはんねいする → これをはんえいする (これを反映する)
+        let alts4 = nn_alternate_readings("これをはんねいする");
+        assert!(
+            alts4.contains(&"これをはんえいする".to_string()),
+            "★ センテンス: 文中の ん+ね→ん+え も代替生成"
+        );
         // ん+な行 が無ければ原文のみ
         assert_eq!(
             nn_alternate_readings("こんにちは").len(),
@@ -1404,6 +1417,11 @@ mod tests {
             "しまもとちょう", // ユーザー報告: 誤学習 しまもとちょう→島本腸(12回確定で自己強化)を
             // forget 後は [しまもと][ちょう]→島本町 になる (地名接尾 町)
             "ちょう", // ちょう単体で 町 が1位に出る (モデルは町を知っている)
+            // nn 曖昧さ (ユーザー報告 2026-10): hannei→はんねい だが 反映 は はんえい 読み。
+            // nn_alternate で はんえい も変換し 反映 を救う。単語とセンテンスの両方。
+            "はんねい",               // 単語: 反映/繁栄 が出るべき
+            "これをはんねいする",     // センテンス: これを反映する
+            "へんこうをはんねいする", // センテンス: 変更を反映する
         ] {
             let nn = super::nn_alternate_readings(input).len() > 1;
             println!("\n=== 入力: {input} (nn_ambiguous={nn}) ===");
