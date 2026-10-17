@@ -541,7 +541,55 @@ impl ConversionEngine {
         // 「まつや→松谷」等の学習が **複数文節の文の中では効かない** バグがあった
         // (2026-09 ユーザー報告: 単体「まつや」は松谷、「まつやさんと…」は松也)。
         apply_segment_corrections(&mut segmented, &self.corrections);
+        // P2 (2026-10 ユーザー報告「文中で 単位 が出ない」): ん+母音 の代替候補を
+        // 各文節の **末尾に追加** する。flat の convert() は原文＋代替読みをマージして
+        // 「じかんあるとき」等を出すが、segmented は未対応だった (= 文中の 単位/範囲/
+        // 千円 等が出なかった)。末尾追加のみで既存の順序・選択は変えないので、
+        // 残念/案内 等を displace しない (回帰ゼロ優先)。
+        self.merge_nn_alternates_into_segments(backend, &mut segmented);
         Ok(Some(segmented))
+    }
+
+    /// 各文節の読みに「ん+な行」があれば、「ん+母音」の代替読みも libakaza で変換し、
+    /// その候補を文節の **末尾に追加** する (重複 surface と代替読みそのまま=かな は除く)。
+    ///
+    /// flat の [`Self::convert`] が原文＋代替読みをマージするのと同じ思想を segmented にも
+    /// 適用する。ただし **並べ替えず末尾に足すだけ** にして既存の順序・選択を保つ
+    /// (= 残念(ざんねん)/案内(あんない) の正解を押し下げない。ランキング昇格は
+    /// モデル実機検証を伴う follow-up で行う)。
+    #[cfg(feature = "akaza")]
+    fn merge_nn_alternates_into_segments(
+        &self,
+        backend: &LibakazaBackend,
+        segmented: &mut super::SegmentedConversion,
+    ) {
+        /// 1 文節あたり 1 代替読みから足す候補の上限 (パネル肥大化を防ぐ)。
+        const MAX_ALT_CANDS_PER_SEG: usize = 3;
+        for seg in &mut segmented.segments {
+            let alts = nn_alternate_readings(&seg.reading);
+            // alts[0] は原文。代替 (1..) だけを変換して候補末尾に足す。
+            for alt in alts.iter().skip(1) {
+                let Ok(cands) = backend.convert(alt) else {
+                    continue; // 代替変換失敗は無視 (原文候補は維持)
+                };
+                let mut added = 0usize;
+                for c in cands {
+                    if added >= MAX_ALT_CANDS_PER_SEG {
+                        break;
+                    }
+                    // 代替読みそのまま (かな) はノイズなので入れない。
+                    if c.surface == *alt {
+                        continue;
+                    }
+                    // 既存 surface と重複は入れない。
+                    if seg.candidates.iter().any(|x| x.surface == c.surface) {
+                        continue;
+                    }
+                    seg.candidates.push(c);
+                    added += 1;
+                }
+            }
+        }
     }
 
     /// **学習した文節位置** (ユーザーが切り直した切り方) を読み全体一致で強制再適用する。
@@ -990,6 +1038,46 @@ mod tests {
             nn_alternate_readings("あいうえお"),
             vec!["あいうえお".to_string()],
             "★ ん が無ければ代替なし"
+        );
+    }
+
+    /// ★★ P2 回帰 (2026-10-16 ユーザー報告「たんに と出て 単位(たんい) が出ない」):
+    ///
+    /// 「ん+母音」の語は `nn_alternate_readings` で代替読みを生成して救う方式。
+    /// ここでは **代替生成が正しいこと** と、**壊してはいけない語の原文が保持される**
+    /// ことを純粋関数レベルで固定する (= P1「ローマ字フリップ」なら壊れる語の防波堤)。
+    ///
+    /// 実際に「単位」が候補に出るか (libakaza ランキング) はモデル依存のため
+    /// diag/smoke-test で検証する。本テストは「仕組みの入力側」を保証する。
+    #[test]
+    fn nn_alternate_tani_and_preserves_zannen_annai() {
+        // 単位: たんに → たんい を生成 (んに→んい)。これが libakaza で 単位 になる。
+        let tani = nn_alternate_readings("たんに");
+        assert!(tani.contains(&"たんに".to_string()), "★ 原文 たんに は保持");
+        assert!(
+            tani.contains(&"たんい".to_string()),
+            "★ 代替 たんい を生成 (→ 単位 の読み)"
+        );
+
+        // ★ 壊してはいけない: 残念(ざんねん)/案内(あんない) は **原文が必ず残る**。
+        //   代替 (ざんえん/あんあい) は追加されるだけで、libakaza が原文を高スコアにする。
+        //   P1 (ローマ字で んね→んえ に固定) はこの原文を**消す**ので禁止。
+        let zannen = nn_alternate_readings("ざんねん");
+        assert!(
+            zannen.contains(&"ざんねん".to_string()),
+            "★ 残念: 原文 ざんねん は必ず保持 (P1 なら消える = 回帰)"
+        );
+        let annai = nn_alternate_readings("あんない");
+        assert!(
+            annai.contains(&"あんない".to_string()),
+            "★ 案内: 原文 あんない は必ず保持"
+        );
+
+        // 文中 (複数文節相当) の読みでも ん+母音 代替が出る。P2 で segmented にも効かせる対象。
+        let sentence = nn_alternate_readings("めーるたんにで");
+        assert!(
+            sentence.contains(&"めーるたんいで".to_string()),
+            "★ 文中の たんに→たんい も代替生成 (P2: これを segmented 変換にも適用する)"
         );
     }
 

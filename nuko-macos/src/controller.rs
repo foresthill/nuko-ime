@@ -98,10 +98,39 @@ fn punctuation_variants(c: char) -> Option<&'static [&'static str]> {
     }
 }
 
-/// デバッグログをファイルに書き出し（IMEプロセスのstdoutは見えないため）
+/// デバッグログを有効にするか（プロセス起動後 1 回だけ評価してキャッシュ）。
+///
+/// - debug ビルド: 有効（smoke-test 用）
+/// - release ビルド: **既定で無効**。診断したいときだけ `NUKO_DEBUG_LOG=1` で有効化
+///
+/// ⚠️ 2026-10: 以前は全ビルドで毎イベント append しており、通常使用中に
+/// `/tmp/nuko-ime-debug.log` が無制限に肥大化してディスクを満杯にしていた
+/// (実機で確認)。release を既定無効にして日常使用での肥大化を止める。
+fn debug_log_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| cfg!(debug_assertions) || std::env::var_os("NUKO_DEBUG_LOG").is_some())
+}
+
+/// デバッグログをファイルに書き出し（IMEプロセスのstdoutは見えないため）。
+/// 無効時は即 return するので release の日常使用ではゼロコスト。
 fn debug_log(msg: &str) {
     use std::io::Write;
+
+    if !debug_log_enabled() {
+        return;
+    }
+
     let path = std::path::Path::new("/tmp/nuko-ime-debug.log");
+
+    // 無制限成長の防止: 5 MiB を超えたら切り詰める (append 前に確認)。
+    const MAX_BYTES: u64 = 5 * 1024 * 1024;
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > MAX_BYTES {
+            let _ = std::fs::File::create(path); // truncate
+        }
+    }
+
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

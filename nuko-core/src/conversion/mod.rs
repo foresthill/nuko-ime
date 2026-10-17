@@ -7,9 +7,11 @@ mod candidate;
 mod context;
 mod engine;
 pub mod extend_clause;
+pub mod kyujitai;
 mod segment;
 
 pub use candidate::{Candidate, CandidateList, CandidateSource};
 pub use context::ConversionContext;
 pub use engine::{nn_alternate_readings, ConversionEngine};
+pub use kyujitai::{kyujitai_variant, to_kyujitai};
 pub use segment::{Segment, SegmentedConversion};
