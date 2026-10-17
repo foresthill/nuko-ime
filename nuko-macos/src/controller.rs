@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, Bool, NSObjectProtocol};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker};
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType, NSMenu, NSScreen};
+use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSScreen};
 use objc2_foundation::{NSArray, NSPoint, NSRange, NSString};
 use objc2_input_method_kit::{IMKInputController, IMKServer};
 use tracing::{debug, error, info, warn};
@@ -322,6 +322,12 @@ define_class!(
             self._register_word_impl();
         }
 
+        /// メニュー項目「ぬこIME について…」のアクション。
+        #[unsafe(method(nukoAbout:))]
+        fn nuko_about(&self, _sender: Option<&AnyObject>) {
+            self._about_impl();
+        }
+
         // 注意: 本 IME は **方式3 (handleEvent:) 単独**。方式1 (inputText:/
         // didCommandBySelector:) は実装しない。3 方式は排他で、混在は落とし穴 #9
         // (打てない/クラッシュ, PR #51/#52)。方式3 一本化は keyCode/修飾キーを得るため
@@ -341,7 +347,21 @@ impl NukoInputController {
         let empty = NSString::from_str("");
         // action のみ設定し target は nil。IMK が選択時に本 controller の
         // セレクタを呼ぶ (IMKInputController.h の menu 方式)。
+        //
+        // Phase 1 (ESET 風メニューの骨格): ①状態ヘッダ → ②学習セクション → ③情報
+        // の 3 セクションに区切る。旧字体トグル / BYOK 設定 / AI dreaming 実行は
+        // backend (辞書 / Keychain+設定窓 / CLI 連携) が整う Phase 2-3 で "動く項目"
+        // として足す (動かない項目は置かない)。
 
+        // ── ① 状態ヘッダ (無効化 = グレー表示。クリック不可の情報行) ──
+        let status = NSString::from_str(&crate::state::menu_status_line());
+        unsafe {
+            let header = menu.addItemWithTitle_action_keyEquivalent(&status, None, &empty);
+            header.setEnabled(false);
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+        }
+
+        // ── ② 学習セクション ──
         // 単語登録は **常に表示** する (発見性)。直近 2 件の確定履歴から
         // 「1つ前の読み → 直前の語」を提案する。未確定の composition に依存しない
         // ので、メニューを開いた瞬間に確定が走っても壊れない。
@@ -352,17 +372,14 @@ impl NukoInputController {
             None => "単語登録…（使い方を表示）".to_string(),
         };
         let reg_ns = NSString::from_str(&reg_title);
+        let show = NSString::from_str("学習状況を見る…");
+        let relearn = NSString::from_str("学習を今すぐ研ぎ直す");
         unsafe {
             let _ = menu.addItemWithTitle_action_keyEquivalent(
                 &reg_ns,
                 Some(sel!(nukoRegisterWord:)),
                 &empty,
             );
-        }
-
-        let show = NSString::from_str("学習状況を見る…");
-        let relearn = NSString::from_str("学習を今すぐ研ぎ直す");
-        unsafe {
             let _ = menu.addItemWithTitle_action_keyEquivalent(
                 &show,
                 Some(sel!(nukoShowLearning:)),
@@ -373,6 +390,14 @@ impl NukoInputController {
                 Some(sel!(nukoRelearn:)),
                 &empty,
             );
+        }
+
+        // ── ③ 情報セクション ──
+        unsafe {
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+            let about = NSString::from_str("ぬこIME について…");
+            let _ =
+                menu.addItemWithTitle_action_keyEquivalent(&about, Some(sel!(nukoAbout:)), &empty);
         }
         Some(menu)
     }
@@ -400,6 +425,21 @@ impl NukoInputController {
     /// メニュー「学習状況を見る…」: 現在の学習状況をパネル表示する。
     fn _show_learning_impl(&self) {
         self._present_learning(&crate::state::learning_status_text());
+    }
+
+    /// メニュー「ぬこIME について…」: バージョン等をパネル表示する。
+    fn _about_impl(&self) {
+        let text = format!(
+            concat!(
+                "🐈 ぬこIME v{}\n\n",
+                "日本人の、日本人による、日本人のためのIME\n",
+                "変換エンジン: libakaza + 静的辞書 + 個人頻度学習\n\n",
+                "GitHub: https://github.com/foresthill/nuko-ime\n",
+                "ライセンス: Apache-2.0 OR MIT",
+            ),
+            env!("CARGO_PKG_VERSION")
+        );
+        self._present_learning(&text);
     }
 
     /// メニュー「単語登録:…」: 「1つ前の読み → 直前に確定した語」を登録する。
