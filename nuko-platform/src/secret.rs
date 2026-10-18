@@ -12,7 +12,8 @@
 
 use crate::error::{PlatformError, Result};
 
-/// Keychain のサービス名 (全エントリ共通)。
+/// Keychain のサービス名 (全エントリ共通)。macOS 実装でのみ使用。
+#[cfg(target_os = "macos")]
 const SERVICE: &str = "nuko-ime";
 
 /// provider (例 `"anthropic"`) の API キーを secret store に保存する (既存は上書き)。
