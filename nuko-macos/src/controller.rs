@@ -12,7 +12,10 @@ use std::cell::RefCell;
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, Bool, NSObjectProtocol};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker};
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSScreen};
+use objc2_app_kit::{
+    NSControlStateValueOff, NSControlStateValueOn, NSEvent, NSEventModifierFlags, NSEventType,
+    NSMenu, NSMenuItem, NSScreen,
+};
 use objc2_foundation::{NSArray, NSPoint, NSRange, NSString};
 use objc2_input_method_kit::{IMKInputController, IMKServer};
 use tracing::{debug, error, info, warn};
@@ -334,6 +337,12 @@ define_class!(
             self._about_impl();
         }
 
+        /// メニュー項目「旧字体モード」のアクション (ON/OFF トグル)。
+        #[unsafe(method(nukoToggleKyujitai:))]
+        fn nuko_toggle_kyujitai(&self, _sender: Option<&AnyObject>) {
+            self._toggle_kyujitai_impl();
+        }
+
         // 注意: 本 IME は **方式3 (handleEvent:) 単独**。方式1 (inputText:/
         // didCommandBySelector:) は実装しない。3 方式は排他で、混在は落とし穴 #9
         // (打てない/クラッシュ, PR #51/#52)。方式3 一本化は keyCode/修飾キーを得るため
@@ -405,7 +414,23 @@ impl NukoInputController {
             );
         }
 
-        // ── ③ 情報セクション ──
+        // ── ③ 変換設定セクション ──
+        unsafe {
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+            let kyu = NSString::from_str("旧字体モード（國/體/學…）");
+            let kyu_item = menu.addItemWithTitle_action_keyEquivalent(
+                &kyu,
+                Some(sel!(nukoToggleKyujitai:)),
+                &empty,
+            );
+            kyu_item.setState(if crate::state::kyujitai_enabled() {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            });
+        }
+
+        // ── ④ 情報セクション ──
         unsafe {
             menu.addItem(&NSMenuItem::separatorItem(mtm));
             let about = NSString::from_str("ぬこIME について…");
@@ -470,6 +495,24 @@ impl NukoInputController {
             ),
             env!("CARGO_PKG_VERSION")
         );
+        self._present_learning(&text);
+    }
+
+    /// メニュー「旧字体モード」: ON/OFF をトグルして結果をパネル表示する。
+    fn _toggle_kyujitai_impl(&self) {
+        let on = crate::state::toggle_kyujitai();
+        let text = if on {
+            concat!(
+                "✅ 旧字体モード: ON\n\n",
+                "候補に旧字体版 (國/體/學/禮…) を追加します。\n",
+                "例: こくご → 国語 … 國語 も候補に。\n\n",
+                "※ 既定の新字体はそのまま 1 位 (旧字体は下位に出ます)。\n",
+                "※ 和多志 等の当て字は個人の単語登録でどうぞ。",
+            )
+            .to_string()
+        } else {
+            "⬜️ 旧字体モード: OFF\n\n新字体のみを候補にします。".to_string()
+        };
         self._present_learning(&text);
     }
 

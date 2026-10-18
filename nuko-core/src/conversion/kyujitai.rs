@@ -15,6 +15,11 @@
 //!
 //! 参考: 立命館 新旧字対照表 / asahi-net old_chara。
 
+use super::{Candidate, CandidateList, CandidateSource};
+
+/// 旧字体候補に付けるスコア (新字体より十分低く、末尾付近に出す)。
+const KYUJITAI_SCORE: i32 = -80;
+
 /// 新字体 → 旧字体 の **曖昧性のない 1:1 対応** (seed)。
 ///
 /// 1 新字体が複数の旧字体に対応し得る字 (弁/芸/予/余/糸/欠/台 等) は **含めない**。
@@ -70,6 +75,48 @@ pub fn kyujitai_variant(s: &str) -> Option<String> {
     (out != s).then_some(out)
 }
 
+/// 候補リストの各候補について旧字体版を作り、**末尾に追加** する (旧字体モード用)。
+///
+/// - 旧字体化できない候補 (かな/対象外) はスキップ ([`kyujitai_variant`] が `None`)。
+/// - 既に同じ表層があればスキップ (重複を出さない)。
+/// - 追加する候補は低スコア (`KYUJITAI_SCORE`) なので、新字体の既定を押し下げない。
+pub fn append_kyujitai_variants(candidates: &mut CandidateList) {
+    // iterate 中に push しないよう、先に (旧字体表層, 読み) を収集する。
+    let variants: Vec<(String, String)> = candidates
+        .iter()
+        .filter_map(|c| kyujitai_variant(&c.surface).map(|old| (old, c.reading.clone())))
+        .collect();
+    for (surface, reading) in variants {
+        if candidates.iter().any(|c| c.surface == surface) {
+            continue;
+        }
+        candidates.push(
+            Candidate::new(&surface, &reading)
+                .with_score(KYUJITAI_SCORE)
+                .with_source(CandidateSource::System),
+        );
+    }
+}
+
+/// [`append_kyujitai_variants`] の `Vec<Candidate>` 版 (文節候補=segment 用)。
+/// ロジックは同一: 旧字体版を末尾に低スコアで追加、重複/変化なしは除く。
+pub fn append_kyujitai_variants_vec(candidates: &mut Vec<Candidate>) {
+    let variants: Vec<(String, String)> = candidates
+        .iter()
+        .filter_map(|c| kyujitai_variant(&c.surface).map(|old| (old, c.reading.clone())))
+        .collect();
+    for (surface, reading) in variants {
+        if candidates.iter().any(|c| c.surface == surface) {
+            continue;
+        }
+        candidates.push(
+            Candidate::new(&surface, &reading)
+                .with_score(KYUJITAI_SCORE)
+                .with_source(CandidateSource::System),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +161,36 @@ mod tests {
     fn ambiguous_kanji_are_excluded() {
         assert_eq!(to_kyujitai("弁"), "弁", "弁 は曖昧なので置換しない");
         assert_eq!(to_kyujitai("弁当"), "弁當", "当→當 のみ。弁 は不変");
+    }
+
+    #[test]
+    fn append_variants_adds_old_forms_at_end() {
+        let mut list = CandidateList::new();
+        list.push(Candidate::new("国語", "こくご"));
+        list.push(Candidate::new("こくご", "こくご")); // かな候補 (対象字なし)
+        append_kyujitai_variants(&mut list);
+        assert!(list.iter().any(|c| c.surface == "國語"), "旧字体版を追加");
+        assert_eq!(
+            list.iter().filter(|c| c.surface == "國語").count(),
+            1,
+            "重複追加しない"
+        );
+        // かな候補からは旧字体が生まれない。
+        assert!(list
+            .iter()
+            .all(|c| c.surface != "こくご" || c.reading == "こくご"));
+    }
+
+    #[test]
+    fn append_variants_no_dup_when_already_present() {
+        let mut list = CandidateList::new();
+        list.push(Candidate::new("体", "からだ"));
+        list.push(Candidate::new("體", "からだ")); // 既に旧字体がある
+        append_kyujitai_variants(&mut list);
+        assert_eq!(
+            list.iter().filter(|c| c.surface == "體").count(),
+            1,
+            "既にある旧字体は重複追加しない"
+        );
     }
 }
