@@ -28,6 +28,10 @@ else
     cargo build --release -p nuko-macos
 fi
 
+# BYOK/AI dreaming 用の nuko CLI も同梱する。
+# メニュー「🤖 AIで学習を研ぎ直す」がこれを subprocess 起動する。
+cargo build --release --bin nuko -p nuko-cli
+
 echo "[2/4] .appバンドル作成中..."
 rm -rf "$PROJECT_ROOT/target/$APP_BUNDLE"
 mkdir -p "$PROJECT_ROOT/target/$APP_BUNDLE/Contents/MacOS"
@@ -35,6 +39,10 @@ mkdir -p "$PROJECT_ROOT/target/$APP_BUNDLE/Contents/Resources"
 
 # バイナリコピー
 cp "$PROJECT_ROOT/target/release/NukoIME" \
+   "$PROJECT_ROOT/target/$APP_BUNDLE/Contents/MacOS/"
+
+# nuko CLI を同梱 (IME から current_exe の隣 = Contents/MacOS/nuko として解決)
+cp "$PROJECT_ROOT/target/release/nuko" \
    "$PROJECT_ROOT/target/$APP_BUNDLE/Contents/MacOS/"
 
 # Info.plist コピー

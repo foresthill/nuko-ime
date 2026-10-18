@@ -527,6 +527,75 @@ pub fn relearn_now() -> nuko_core::error::Result<usize> {
     Ok(count)
 }
 
+/// 同梱/インストール済みの `nuko` CLI を探す。
+///
+/// 1) `.app` に同梱 (current_exe の隣: `Contents/MacOS/nuko`)
+/// 2) よくあるインストール先 (`~/.cargo/bin` / `/usr/local/bin` / `/opt/homebrew/bin`)
+fn resolve_nuko_binary() -> Option<std::path::PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let p = dir.join("nuko");
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    let mut cands: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        cands.push(std::path::PathBuf::from(home).join(".cargo/bin/nuko"));
+    }
+    cands.push(std::path::PathBuf::from("/usr/local/bin/nuko"));
+    cands.push(std::path::PathBuf::from("/opt/homebrew/bin/nuko"));
+    cands.into_iter().find(|p| p.exists())
+}
+
+/// corrections.toml を稼働中エンジンへ再読込する (AI dreaming 適用後など)。
+fn reload_corrections() {
+    if let Some(dir) = nuko_app_support_dir() {
+        let path = dir.join("corrections.toml");
+        if let Err(e) = with_engine_mut(|engine| engine.load_corrections(&path)) {
+            tracing::warn!(error = %e, "corrections 再読込に失敗");
+        }
+    }
+}
+
+/// メニュー「AIで学習を研ぎ直す」: 同梱 `nuko dream --apply` を実行し結果テキストを返す。
+///
+/// 設定 (provider/model) は `ai.toml`、API キーは Keychain を `nuko` 側が読む。
+/// 成功時は corrections.toml を再読込して稼働エンジンへ即反映する。
+///
+/// 注: 同期実行のため API 呼び出し中は数秒ブロックする (将来 非同期化)。
+pub fn run_ai_dreaming() -> std::result::Result<String, String> {
+    let Some(nuko) = resolve_nuko_binary() else {
+        return Err(
+            "nuko CLI が見つかりません。NukoIME.app に同梱されていない可能性があります\n\
+             (install.sh を更新して再インストールしてください)。"
+                .to_string(),
+        );
+    };
+    let out = std::process::Command::new(&nuko)
+        .args(["dream", "--apply"])
+        .output()
+        .map_err(|e| format!("nuko 実行に失敗: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() {
+        reload_corrections();
+        Ok(format!(
+            "🤖 AIで学習を研ぎ直しました\n\n{}\n\n✅ 学習に反映しました (再起動不要)。",
+            stdout.trim()
+        ))
+    } else {
+        Err(format!(
+            "AI dreaming に失敗しました:\n\n{}\n{}\n\n\
+             ・キー未設定なら: ターミナルで `nuko config set-key anthropic`\n\
+             ・ai.toml に enabled=true / provider=\"anthropic\" / model=\"...\" を設定",
+            stdout.trim(),
+            stderr.trim()
+        ))
+    }
+}
+
 /// 学習データの永続化パスを設定する
 ///
 /// 保存先: `~/Library/Application Support/nuko-ime/learning.json`
