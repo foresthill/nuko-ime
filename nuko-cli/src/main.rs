@@ -77,6 +77,32 @@ enum Commands {
         #[arg(long)]
         apply: bool,
     },
+    /// BYOK 設定: API キーを Keychain に保存/確認/削除する
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(Subcommand)]
+// 全 variant が "Key" 接尾なのは意図的 (すべて API キー操作)。CLI 名 set-key 等を保つ。
+#[allow(clippy::enum_variant_names)]
+enum ConfigAction {
+    /// API キーを Keychain に保存する (値は標準入力から読む。例: `echo $KEY | nuko config set-key anthropic`)
+    SetKey {
+        /// プロバイダ: anthropic / openrouter
+        provider: String,
+    },
+    /// 保存済みキーの有無を表示する (値は伏せる)
+    ShowKey {
+        /// プロバイダ: anthropic / openrouter
+        provider: String,
+    },
+    /// 保存済みキーを削除する
+    DeleteKey {
+        /// プロバイダ: anthropic / openrouter
+        provider: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -129,6 +155,7 @@ fn main() -> Result<()> {
             model,
             apply,
         } => cmd_dream(max_readings, provider.as_deref(), model.as_deref(), apply),
+        Commands::Config { action } => cmd_config(action),
     }
 }
 
@@ -327,6 +354,82 @@ fn learn_forget(dir: &Path, reading: &str, surface: Option<&str>) -> Result<()> 
 
 /// Layer 3: AI dreaming。観察を要約してプロンプトを組み立て、
 /// プロバイダ未指定なら dry-run で表示、指定なら推論→提案マージ。
+/// provider 名を正規化・検証する (`claude` は `anthropic` に寄せる)。
+fn normalize_provider(p: &str) -> Result<String> {
+    match p.to_lowercase().as_str() {
+        "anthropic" | "claude" => Ok("anthropic".to_string()),
+        "openrouter" => Ok("openrouter".to_string()),
+        other => anyhow::bail!("未知のプロバイダ: {other} (anthropic / openrouter)"),
+    }
+}
+
+/// API キーを環境変数 → Keychain の順で解決する。
+fn resolve_key(env_var: &str, provider: &str) -> Option<String> {
+    if let Ok(k) = std::env::var(env_var) {
+        if !k.is_empty() {
+            return Some(k);
+        }
+    }
+    nuko_platform::secret::get_api_key(provider).ok().flatten()
+}
+
+/// キーを伏せ字にする (先頭4 + 末尾4 のみ表示)。
+fn mask_key(k: &str) -> String {
+    let n = k.chars().count();
+    if n <= 8 {
+        return "*".repeat(n);
+    }
+    let head: String = k.chars().take(4).collect();
+    let tail: String = k.chars().skip(n - 4).collect();
+    format!("{head}…{tail} ({n}文字)")
+}
+
+/// `nuko config …`: BYOK の API キーを Keychain に保存/確認/削除する。
+fn cmd_config(action: ConfigAction) -> Result<()> {
+    match action {
+        ConfigAction::SetKey { provider } => {
+            let provider = normalize_provider(&provider)?;
+            // キーは標準入力から読む (シェル履歴や ps に残さないため)。
+            use std::io::Read;
+            let mut key = String::new();
+            std::io::stdin().read_to_string(&mut key)?;
+            let key = key.trim();
+            if key.is_empty() {
+                anyhow::bail!(
+                    "キーが空です。標準入力で渡してください (例: echo -n $KEY | nuko config set-key anthropic)"
+                );
+            }
+            nuko_platform::secret::set_api_key(&provider, key)?;
+            println!(
+                "{} {} の API キーを Keychain に保存しました。",
+                "✅".green(),
+                provider.cyan()
+            );
+        }
+        ConfigAction::ShowKey { provider } => {
+            let provider = normalize_provider(&provider)?;
+            match nuko_platform::secret::get_api_key(&provider)? {
+                Some(k) => println!(
+                    "🔑 {}: 保存済み ({})",
+                    provider.cyan(),
+                    mask_key(&k).dimmed()
+                ),
+                None => println!("— {}: 未登録", provider.cyan()),
+            }
+        }
+        ConfigAction::DeleteKey { provider } => {
+            let provider = normalize_provider(&provider)?;
+            nuko_platform::secret::delete_api_key(&provider)?;
+            println!(
+                "{} {} の API キーを削除しました。",
+                "✅".green(),
+                provider.cyan()
+            );
+        }
+    }
+    Ok(())
+}
+
 fn cmd_dream(
     max_readings: usize,
     provider: Option<&str>,
@@ -371,10 +474,10 @@ fn cmd_dream(
         "openrouter" => {
             use crate::openrouter::{DreamConfig, OpenRouterProvider};
             let cfg = DreamConfig::load(dir.join("ai.toml"))?;
-            let api_key = std::env::var("OPENROUTER_API_KEY").map_err(|_| {
+            let api_key = resolve_key("OPENROUTER_API_KEY", "openrouter").ok_or_else(|| {
                 anyhow::anyhow!(
-                    "OPENROUTER_API_KEY が未設定です。\n  export OPENROUTER_API_KEY=sk-or-... \
-                     を設定してください (設定画面でも入力可)。"
+                    "OPENROUTER_API_KEY が未設定です。環境変数か \
+                     `nuko config set-key openrouter` (Keychain) で設定してください。"
                 )
             })?;
             let model = model.map(String::from).or(cfg.model).ok_or_else(|| {
@@ -393,10 +496,10 @@ fn cmd_dream(
         "anthropic" | "claude" => {
             use crate::anthropic::{model_hint, AnthropicProvider};
             let cfg = crate::openrouter::DreamConfig::load(dir.join("ai.toml"))?;
-            let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
+            let api_key = resolve_key("ANTHROPIC_API_KEY", "anthropic").ok_or_else(|| {
                 anyhow::anyhow!(
-                    "ANTHROPIC_API_KEY が未設定です。\n  export ANTHROPIC_API_KEY=sk-ant-... \
-                     を設定してください (設定画面でも入力可)。"
+                    "ANTHROPIC_API_KEY が未設定です。環境変数か \
+                     `nuko config set-key anthropic` (Keychain) で設定してください。"
                 )
             })?;
             let model = model.map(String::from).or(cfg.model).ok_or_else(|| {
