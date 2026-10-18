@@ -35,6 +35,7 @@
 
 pub mod config;
 pub mod error;
+pub mod secret;
 
 #[cfg(target_os = "windows")]
 pub mod windows;
