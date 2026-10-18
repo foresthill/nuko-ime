@@ -385,6 +385,7 @@ fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
     setup_learning_persistence(&mut engine);
     setup_corrections(&mut engine);
     setup_user_dictionary(&mut engine);
+    engine.set_kyujitai_mode(kyujitai_enabled());
     Ok(engine)
 }
 
@@ -394,7 +395,38 @@ fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
     setup_learning_persistence(&mut engine);
     setup_corrections(&mut engine);
     setup_user_dictionary(&mut engine);
+    engine.set_kyujitai_mode(kyujitai_enabled());
     Ok(engine)
+}
+
+/// 旧字体モードが有効か (app support dir の `KYUJITAI_ENABLED` マーカーの有無)。既定 OFF。
+#[must_use]
+pub fn kyujitai_enabled() -> bool {
+    nuko_app_support_dir()
+        .map(|d| d.join("KYUJITAI_ENABLED").exists())
+        .unwrap_or(false)
+}
+
+/// 旧字体モードをトグルして **新しい状態** を返す。
+///
+/// マーカーファイル `KYUJITAI_ENABLED` を作成/削除し、稼働中エンジンへも即反映する。
+/// dir 取得不可時は false を返す (変更なし)。
+pub fn toggle_kyujitai() -> bool {
+    let Some(dir) = nuko_app_support_dir() else {
+        return false;
+    };
+    let marker = dir.join("KYUJITAI_ENABLED");
+    let now_on = if marker.exists() {
+        let _ = std::fs::remove_file(&marker);
+        false
+    } else {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(&marker, b"");
+        true
+    };
+    with_engine_mut(|engine| engine.set_kyujitai_mode(now_on));
+    tracing::info!(enabled = now_on, "旧字体モードを切り替え");
+    now_on
 }
 
 /// 単語登録の永続辞書 (`~/…/nuko-ime/user_dict.json`) を起動時にロードする。

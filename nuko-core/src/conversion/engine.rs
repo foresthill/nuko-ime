@@ -211,6 +211,8 @@ pub struct ConversionEngine {
     corrections: CorrectionStore,
     /// 文節位置の学習 (ユーザーが切り直した「切り方」)。空なら無変化。
     segmentations: SegmentationStore,
+    /// 旧字体モード。ON なら候補の旧字体版 (國/體/學…) を末尾に追加する。既定 OFF。
+    kyujitai_mode: bool,
 }
 
 impl ConversionEngine {
@@ -226,6 +228,7 @@ impl ConversionEngine {
             libakaza: None,
             corrections: CorrectionStore::default(),
             segmentations: SegmentationStore::default(),
+            kyujitai_mode: false,
         })
     }
 
@@ -259,6 +262,7 @@ impl ConversionEngine {
             libakaza,
             corrections: CorrectionStore::default(),
             segmentations: SegmentationStore::default(),
+            kyujitai_mode: false,
         })
     }
 
@@ -323,6 +327,17 @@ impl ConversionEngine {
     #[must_use]
     pub fn segmentations(&self) -> &SegmentationStore {
         &self.segmentations
+    }
+
+    /// 旧字体モードを設定する。ON なら候補に旧字体版を追加する (既定 OFF)。
+    pub fn set_kyujitai_mode(&mut self, on: bool) {
+        self.kyujitai_mode = on;
+    }
+
+    /// 旧字体モードが有効か。
+    #[must_use]
+    pub fn kyujitai_mode(&self) -> bool {
+        self.kyujitai_mode
     }
 
     /// 文節の「切り方」を学習する(ユーザーが Shift で切り直して確定したとき)。
@@ -495,6 +510,12 @@ impl ConversionEngine {
             }
         }
 
+        // 旧字体モード: 候補の旧字体版を末尾に追加 (ソート前。低スコアなので下位に出る)。
+        // OFF (既定) なら完全に無変化。
+        if self.kyujitai_mode {
+            super::kyujitai::append_kyujitai_variants(&mut candidates);
+        }
+
         // スコア順にソート
         candidates.sort_by_score();
 
@@ -547,6 +568,12 @@ impl ConversionEngine {
         // 千円 等が出なかった)。末尾追加のみで既存の順序・選択は変えないので、
         // 残念/案内 等を displace しない (回帰ゼロ優先)。
         self.merge_nn_alternates_into_segments(backend, &mut segmented);
+        // 旧字体モード: 各文節の候補に旧字体版を追加 (OFF 既定なら無変化)。
+        if self.kyujitai_mode {
+            for seg in &mut segmented.segments {
+                super::kyujitai::append_kyujitai_variants_vec(&mut seg.candidates);
+            }
+        }
         Ok(Some(segmented))
     }
 
@@ -1098,6 +1125,36 @@ mod tests {
             "駒谷",
             "★ 単語登録が最優先で 1 位"
         );
+    }
+
+    /// ★ 旧字体モード: ON のとき候補に旧字体版が加わり、OFF では加わらない (配線確認)。
+    #[test]
+    fn kyujitai_mode_adds_old_form_candidate() {
+        use crate::dictionary::UserEntry;
+        let mut engine = ConversionEngine::new().unwrap();
+        engine
+            .dictionary_mut()
+            .user_dictionary_mut()
+            .add(UserEntry::new("国語", "こくご"))
+            .unwrap();
+        let ctx = ConversionContext::new();
+
+        // OFF (既定): 旧字体 國語 は出ない。
+        let off = engine.convert("こくご", &ctx).unwrap();
+        assert!(
+            !off.iter().any(|c| c.surface == "國語"),
+            "OFF では旧字体を足さない"
+        );
+
+        // ON: 國語 が候補に加わる。
+        engine.set_kyujitai_mode(true);
+        let on = engine.convert("こくご", &ctx).unwrap();
+        assert!(
+            on.iter().any(|c| c.surface == "國語"),
+            "ON で旧字体 國語 を追加"
+        );
+        // 新字体 国語 (単語登録) は依然 1 位 (旧字体に押し下げられない)。
+        assert_eq!(on.iter().next().unwrap().surface, "国語");
     }
 
     /// Layer 2: 訂正選好の bias で候補順が変わり、選好を外せば元に戻る (非破壊)。
