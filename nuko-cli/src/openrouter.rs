@@ -18,7 +18,10 @@ pub struct DreamConfig {
     /// dreaming を有効にするか（既定 OFF）。
     #[serde(default)]
     pub enabled: bool,
-    /// 使用するモデル（例: `anthropic/claude-3.5-sonnet`）。未設定ならエラーで促す。
+    /// 使用するプロバイダ（`"anthropic"` / `"openrouter"`）。引数なし実行時に使う。
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// 使用するモデル（例: `claude-sonnet-5-5` / `anthropic/claude-3.5-sonnet`）。
     #[serde(default)]
     pub model: Option<String>,
     /// OpenRouter API のベース URL（既定 `https://openrouter.ai/api/v1`）。
@@ -34,6 +37,7 @@ impl Default for DreamConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            provider: None,
             model: None,
             base_url: default_base_url(),
         }

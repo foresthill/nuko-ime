@@ -452,21 +452,31 @@ fn cmd_dream(
     );
     println!();
 
-    let Some(provider_name) = provider else {
+    // ai.toml (BYOK 設定) を 1 回だけ読む。--provider 未指定なら ai.toml を使う:
+    // enabled かつ provider 設定済みなら実行、でなければ dry-run。
+    // → IME メニューは引数なし `nuko dream --apply` で ai.toml 駆動の実 dream ができる。
+    let cfg = crate::openrouter::DreamConfig::load(dir.join("ai.toml")).unwrap_or_default();
+    let effective_provider: Option<String> = provider
+        .map(String::from)
+        .or_else(|| cfg.enabled.then(|| cfg.provider.clone()).flatten());
+    let Some(provider_name) = effective_provider else {
         // dry-run: 送信されるプロンプトをそのまま見せる (API キー不要)。
         println!(
             "{}",
-            "── プロバイダ未指定: dry-run (以下が送信されるプロンプト) ──".dimmed()
+            "── プロバイダ未指定 / ai.toml 未設定: dry-run (以下が送信されるプロンプト) ──"
+                .dimmed()
         );
         println!("{prompt}");
         println!();
         println!(
-            "  {} 実推論は `nuko dream --provider openrouter` (要 OPENROUTER_API_KEY) \
-             または `--provider anthropic` (要 ANTHROPIC_API_KEY)。",
+            "  {} 実推論は `nuko dream --provider anthropic --model <id>` (要キー)。\n  \
+             または ai.toml に enabled=true / provider=\"anthropic\" / model=\"...\" を書けば \
+             `nuko dream --apply` だけで動きます。キーは `nuko config set-key` で Keychain に。",
             "ヒント:".dimmed()
         );
         return Ok(());
     };
+    let provider_name = provider_name.as_str();
 
     // プロバイダを解決 (mock / openrouter)。
     let provider: Box<dyn DreamProvider> = match provider_name {

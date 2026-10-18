@@ -310,6 +310,12 @@ define_class!(
             self._nuko_relearn_impl();
         }
 
+        /// メニュー項目「🤖 AIで学習を研ぎ直す（BYOK）」のアクション。
+        #[unsafe(method(nukoDreamAI:))]
+        fn nuko_dream_ai(&self, _sender: Option<&AnyObject>) {
+            self._dream_ai_impl();
+        }
+
         /// メニュー項目「学習状況を見る…」のアクション。
         #[unsafe(method(nukoShowLearning:))]
         fn nuko_show_learning(&self, _sender: Option<&AnyObject>) {
@@ -374,6 +380,7 @@ impl NukoInputController {
         let reg_ns = NSString::from_str(&reg_title);
         let show = NSString::from_str("学習状況を見る…");
         let relearn = NSString::from_str("学習を今すぐ研ぎ直す");
+        let dream_ai = NSString::from_str("🤖 AIで学習を研ぎ直す（BYOK）");
         unsafe {
             let _ = menu.addItemWithTitle_action_keyEquivalent(
                 &reg_ns,
@@ -388,6 +395,12 @@ impl NukoInputController {
             let _ = menu.addItemWithTitle_action_keyEquivalent(
                 &relearn,
                 Some(sel!(nukoRelearn:)),
+                &empty,
+            );
+            // AI dreaming (BYOK): 同梱 nuko dream --apply を実行して学習を研ぎ直す。
+            let _ = menu.addItemWithTitle_action_keyEquivalent(
+                &dream_ai,
+                Some(sel!(nukoDreamAI:)),
                 &empty,
             );
         }
@@ -417,6 +430,24 @@ impl NukoInputController {
                 debug_log(&format!("menu: relearn 失敗: {e}"));
                 warn!(error = %e, "メニューからの relearn に失敗");
                 format!("⚠️ 再学習に失敗しました: {e}")
+            }
+        };
+        self._present_learning(&text);
+    }
+
+    /// メニュー「🤖 AIで学習を研ぎ直す（BYOK）」: 同梱 `nuko dream --apply` を実行する。
+    ///
+    /// 注: 同期実行のため API 呼び出し中は数秒ブロックする (将来 非同期化)。
+    fn _dream_ai_impl(&self) {
+        info!("メニューから AI dreaming を実行");
+        let text = match crate::state::run_ai_dreaming() {
+            Ok(t) => {
+                debug_log("menu: AI dreaming 完了");
+                t
+            }
+            Err(e) => {
+                warn!(error = %e, "メニューからの AI dreaming に失敗");
+                format!("⚠️ {e}")
             }
         };
         self._present_learning(&text);
