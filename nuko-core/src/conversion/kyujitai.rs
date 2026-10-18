@@ -79,7 +79,7 @@ pub fn kyujitai_variant(s: &str) -> Option<String> {
 ///
 /// - 旧字体化できない候補 (かな/対象外) はスキップ ([`kyujitai_variant`] が `None`)。
 /// - 既に同じ表層があればスキップ (重複を出さない)。
-/// - 追加する候補は低スコア ([`KYUJITAI_SCORE`]) なので、新字体の既定を押し下げない。
+/// - 追加する候補は低スコア (`KYUJITAI_SCORE`) なので、新字体の既定を押し下げない。
 pub fn append_kyujitai_variants(candidates: &mut CandidateList) {
     // iterate 中に push しないよう、先に (旧字体表層, 読み) を収集する。
     let variants: Vec<(String, String)> = candidates
