@@ -648,6 +648,39 @@ pub fn save_settings() {
     });
 }
 
+/// 設定ウィンドウの「辞書に登録」: 読み＋表層を稼働中エンジンへ追加＋保存する (即反映)。
+pub fn add_dict_entry_from_window() {
+    SETTINGS_WINDOW.with(|cell| {
+        let w = cell.borrow();
+        let Some(win) = w.as_ref() else {
+            return;
+        };
+        let reading = win.reading_value();
+        let surface = win.surface_value();
+        let reading = reading.trim();
+        let surface = surface.trim();
+        if reading.is_empty() || surface.is_empty() {
+            win.set_status("⚠️ 読みと表層の両方を入力してください");
+            return;
+        }
+        // 稼働中エンジンのユーザー辞書に追加＋保存 (user_dict.json)。CLI と違い即反映。
+        let result = with_engine_mut(|engine| {
+            let ud = engine.dictionary_mut().user_dictionary_mut();
+            ud.add(nuko_core::dictionary::UserEntry::new(surface, reading))?;
+            ud.save()
+        });
+        match result {
+            Ok(()) => {
+                win.clear_dict_fields();
+                win.set_status(&format!(
+                    "✅ 「{reading}」→「{surface}」を登録しました（即反映）"
+                ));
+            }
+            Err(e) => win.set_status(&format!("⚠️ 登録失敗: {e}")),
+        }
+    });
+}
+
 /// ai.toml から model を読む (簡易パース。無ければ None)。
 fn current_ai_model() -> Option<String> {
     let dir = nuko_app_support_dir()?;
