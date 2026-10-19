@@ -82,6 +82,31 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// ユーザー辞書 (単語登録) を編集する。IME の user_dict.json に直接書く。
+    Dict {
+        #[command(subcommand)]
+        action: DictAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum DictAction {
+    /// 単語を登録する (例: `nuko dict add わたし 和多志`)。多文字語も一発で登録可。
+    Add {
+        /// 読み (かな)
+        reading: String,
+        /// 表層 (変換後の語)
+        surface: String,
+    },
+    /// 登録語を削除する
+    Remove {
+        /// 読み (かな)
+        reading: String,
+        /// 表層 (変換後の語)
+        surface: String,
+    },
+    /// 登録語を一覧表示する
+    List,
 }
 
 #[derive(Subcommand)]
@@ -156,6 +181,7 @@ fn main() -> Result<()> {
             apply,
         } => cmd_dream(max_readings, provider.as_deref(), model.as_deref(), apply),
         Commands::Config { action } => cmd_config(action),
+        Commands::Dict { action } => cmd_dict(action),
     }
 }
 
@@ -382,6 +408,62 @@ fn mask_key(k: &str) -> String {
     let head: String = k.chars().take(4).collect();
     let tail: String = k.chars().skip(n - 4).collect();
     format!("{head}…{tail} ({n}文字)")
+}
+
+/// `nuko dict …`: IME の user_dict.json を直接編集する (単語登録)。
+///
+/// IME が読む `~/Library/Application Support/nuko-ime/user_dict.json` に書くので、
+/// `nuko-dict` (別パス user.dict) と違い IME に反映される。反映は NukoIME 再起動後。
+fn cmd_dict(action: DictAction) -> Result<()> {
+    use nuko_core::dictionary::{UserDictionary, UserEntry};
+    let path = nuko_data_dir()?.join("user_dict.json");
+    let mut dict = if path.exists() {
+        UserDictionary::load(&path)?
+    } else {
+        let mut d = UserDictionary::new();
+        d.set_path(&path);
+        d
+    };
+    match action {
+        DictAction::Add { reading, surface } => {
+            dict.add(UserEntry::new(&surface, &reading))?;
+            dict.save()?;
+            println!(
+                "{} 「{}」→「{}」を登録しました。{} NukoIME 再起動 (入力ソース切替) で反映。",
+                "✅".green(),
+                reading.yellow(),
+                surface.white().bold(),
+                "※".dimmed()
+            );
+        }
+        DictAction::Remove { reading, surface } => {
+            let removed = dict.remove(&reading, &surface)?;
+            dict.save()?;
+            if removed {
+                println!(
+                    "{} 「{}」→「{}」を削除しました。",
+                    "✅".green(),
+                    reading,
+                    surface
+                );
+            } else {
+                println!("{} 該当する登録がありません。", "—".dimmed());
+            }
+        }
+        DictAction::List => {
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|_| "[]".to_string());
+            let entries: Vec<UserEntry> = serde_json::from_str(&text).unwrap_or_default();
+            if entries.is_empty() {
+                println!("登録語はありません。");
+            } else {
+                println!("{} ({} 件):", "ユーザー辞書".cyan().bold(), entries.len());
+                for e in &entries {
+                    println!("  {} → {}", e.reading.yellow(), e.surface.white().bold());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `nuko config …`: BYOK の API キーを Keychain に保存/確認/削除する。
