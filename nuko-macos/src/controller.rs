@@ -319,6 +319,18 @@ define_class!(
             self._dream_ai_impl();
         }
 
+        /// メニュー項目「⚙️ BYOK 設定…」のアクション (設定ウィンドウを開く)。
+        #[unsafe(method(nukoOpenSettings:))]
+        fn nuko_open_settings(&self, _sender: Option<&AnyObject>) {
+            self._open_settings_impl();
+        }
+
+        /// 設定ウィンドウ「保存」ボタンのアクション。
+        #[unsafe(method(nukoSaveSettings:))]
+        fn nuko_save_settings(&self, _sender: Option<&AnyObject>) {
+            crate::state::save_settings();
+        }
+
         /// メニュー項目「学習状況を見る…」のアクション。
         #[unsafe(method(nukoShowLearning:))]
         fn nuko_show_learning(&self, _sender: Option<&AnyObject>) {
@@ -390,6 +402,7 @@ impl NukoInputController {
         let show = NSString::from_str("学習状況を見る…");
         let relearn = NSString::from_str("学習を今すぐ研ぎ直す");
         let dream_ai = NSString::from_str("🤖 AIで学習を研ぎ直す（BYOK）");
+        let settings = NSString::from_str("⚙️ BYOK 設定…（APIキー/モデル）");
         unsafe {
             let _ = menu.addItemWithTitle_action_keyEquivalent(
                 &reg_ns,
@@ -410,6 +423,12 @@ impl NukoInputController {
             let _ = menu.addItemWithTitle_action_keyEquivalent(
                 &dream_ai,
                 Some(sel!(nukoDreamAI:)),
+                &empty,
+            );
+            // BYOK 設定ウィンドウ (API キー → Keychain、model → ai.toml)。
+            let _ = menu.addItemWithTitle_action_keyEquivalent(
+                &settings,
+                Some(sel!(nukoOpenSettings:)),
                 &empty,
             );
         }
@@ -476,6 +495,18 @@ impl NukoInputController {
             }
         };
         self._present_learning(&text);
+    }
+
+    /// メニュー「⚙️ BYOK 設定…」: 設定ウィンドウを前面に出す。
+    ///
+    /// 「保存」ボタンの target は本 controller (`nukoSaveSettings:`)。
+    fn _open_settings_impl(&self) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        // self を &AnyObject として渡す (objc オブジェクトはレイアウト互換)。
+        let any: &AnyObject = unsafe { &*(self as *const Self as *const AnyObject) };
+        crate::state::show_settings(mtm, any);
     }
 
     /// メニュー「学習状況を見る…」: 現在の学習状況をパネル表示する。
