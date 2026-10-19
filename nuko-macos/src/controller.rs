@@ -337,6 +337,14 @@ define_class!(
             crate::state::add_dict_entry_from_window();
         }
 
+        /// 設定ウィンドウ「閉じる」ボタンのアクション (policy を戻して background へ)。
+        #[unsafe(method(nukoCloseSettings:))]
+        fn nuko_close_settings(&self, _sender: Option<&AnyObject>) {
+            if let Some(mtm) = MainThreadMarker::new() {
+                crate::state::close_settings(mtm);
+            }
+        }
+
         /// メニュー項目「学習状況を見る…」のアクション。
         #[unsafe(method(nukoShowLearning:))]
         fn nuko_show_learning(&self, _sender: Option<&AnyObject>) {
