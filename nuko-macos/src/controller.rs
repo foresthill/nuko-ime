@@ -325,10 +325,16 @@ define_class!(
             self._open_settings_impl();
         }
 
-        /// 設定ウィンドウ「保存」ボタンのアクション。
+        /// 設定ウィンドウ「BYOK を保存」ボタンのアクション。
         #[unsafe(method(nukoSaveSettings:))]
         fn nuko_save_settings(&self, _sender: Option<&AnyObject>) {
             crate::state::save_settings();
+        }
+
+        /// 設定ウィンドウ「辞書に登録」ボタンのアクション。
+        #[unsafe(method(nukoAddDictEntry:))]
+        fn nuko_add_dict_entry(&self, _sender: Option<&AnyObject>) {
+            crate::state::add_dict_entry_from_window();
         }
 
         /// メニュー項目「学習状況を見る…」のアクション。
