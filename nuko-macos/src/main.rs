@@ -7,6 +7,7 @@ mod candidate_panel;
 mod commit;
 mod controller;
 mod learning_panel;
+mod settings_window;
 mod state;
 
 use objc2::AnyThread;

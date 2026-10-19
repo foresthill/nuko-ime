@@ -1,12 +1,14 @@
 use nuko_core::conversion::{CandidateList, ConversionContext, SegmentedConversion};
 use nuko_core::learning::{extract_corrections, CorrectionStore, ObservationLog};
 use nuko_core::prelude::*;
+use objc2::runtime::AnyObject;
 use objc2::MainThreadMarker;
 use std::cell::RefCell;
 use std::time::Instant;
 
 use crate::candidate_panel::CustomCandidatePanel;
 use crate::learning_panel::LearningStatusPanel;
+use crate::settings_window::SettingsWindow;
 
 // 「かな」キー押下時刻を **全 controller インスタンス共有** で保持する。
 //
@@ -594,6 +596,117 @@ pub fn run_ai_dreaming() -> std::result::Result<String, String> {
             stderr.trim()
         ))
     }
+}
+
+// BYOK 設定ウィンドウ (アプリ全体で 1 つ)。
+thread_local! {
+    static SETTINGS_WINDOW: RefCell<Option<SettingsWindow>> = const { RefCell::new(None) };
+}
+
+/// 設定ウィンドウを前面に表示する (初回は生成)。`controller` が「保存」ボタンの target。
+pub fn show_settings(mtm: MainThreadMarker, controller: &AnyObject) {
+    SETTINGS_WINDOW.with(|cell| {
+        let mut w = cell.borrow_mut();
+        if w.is_none() {
+            *w = Some(SettingsWindow::new(mtm, controller));
+        }
+        let model = current_ai_model().unwrap_or_else(|| "claude-sonnet-5-5".to_string());
+        if let Some(win) = w.as_ref() {
+            win.show(mtm, &model);
+        }
+    });
+}
+
+/// 設定ウィンドウの「保存」: キーを Keychain、provider/model を ai.toml に保存する。
+pub fn save_settings() {
+    SETTINGS_WINDOW.with(|cell| {
+        let w = cell.borrow();
+        let Some(win) = w.as_ref() else {
+            return;
+        };
+        let key = win.key_value();
+        let model = win.model_value();
+        let key = key.trim();
+        let model = model.trim();
+
+        // キーが入力されていれば Keychain へ (同梱 nuko config set-key を stdin 経由)。
+        if !key.is_empty() {
+            if let Err(e) = save_key_via_cli(key) {
+                win.set_status(&format!("⚠️ キー保存失敗: {e}"));
+                return;
+            }
+            win.clear_key();
+        }
+
+        // provider/model を ai.toml に保存 (enabled=true)。
+        if let Err(e) = write_ai_toml("anthropic", model) {
+            win.set_status(&format!("⚠️ ai.toml 書込失敗: {e}"));
+            return;
+        }
+
+        win.set_status("✅ 保存しました（メニューの「🤖 AIで学習」が使えます）");
+    });
+}
+
+/// ai.toml から model を読む (簡易パース。無ければ None)。
+fn current_ai_model() -> Option<String> {
+    let dir = nuko_app_support_dir()?;
+    let text = std::fs::read_to_string(dir.join("ai.toml")).ok()?;
+    for line in text.lines() {
+        if let Some(rest) = line.trim().strip_prefix("model") {
+            if let Some(eq) = rest.find('=') {
+                let val = rest[eq + 1..].trim().trim_matches('"').trim();
+                if !val.is_empty() {
+                    return Some(val.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 同梱 `nuko config set-key anthropic` を stdin 経由で呼びキーを Keychain に保存する。
+fn save_key_via_cli(key: &str) -> std::result::Result<(), String> {
+    use std::io::Write;
+    let nuko = resolve_nuko_binary().ok_or_else(|| "nuko CLI が見つかりません".to_string())?;
+    let mut child = std::process::Command::new(&nuko)
+        .args(["config", "set-key", "anthropic"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("nuko 起動失敗: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(key.as_bytes())
+            .map_err(|e| format!("stdin 書込失敗: {e}"))?;
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("nuko 実行失敗: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// ai.toml を書き出す (enabled=true + provider + model)。
+fn write_ai_toml(provider: &str, model: &str) -> std::io::Result<()> {
+    let Some(dir) = nuko_app_support_dir() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "app support dir なし",
+        ));
+    };
+    std::fs::create_dir_all(&dir)?;
+    let model = if model.is_empty() {
+        "claude-sonnet-5-5"
+    } else {
+        model
+    };
+    let content = format!("enabled = true\nprovider = \"{provider}\"\nmodel = \"{model}\"\n");
+    std::fs::write(dir.join("ai.toml"), content)
 }
 
 /// 学習データの永続化パスを設定する
