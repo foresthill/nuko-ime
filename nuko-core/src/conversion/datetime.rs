@@ -1,7 +1,7 @@
 //! 「きょう」「いま」等の読みに、今日の日付 / 現在時刻を候補として生成する (①規則/生成器)。
 //!
 //! 動的 (現在時刻に依存) なので静的辞書でなく **変換時に注入** する。MS-IME/Google
-//! にもある定番機能。純粋関数 [`candidates_at`] に `now` を渡してテストできる。
+//! にもある定番機能。純粋関数 `candidates_at` に `now` を渡してテストできる。
 
 use chrono::{DateTime, Datelike, Duration, Local, Timelike};
 
