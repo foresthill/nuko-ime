@@ -624,6 +624,7 @@ pub fn save_settings() {
         let Some(win) = w.as_ref() else {
             return;
         };
+        let provider = win.selected_provider();
         let key = win.key_value();
         let model = win.model_value();
         let key = key.trim();
@@ -631,7 +632,7 @@ pub fn save_settings() {
 
         // キーが入力されていれば Keychain へ (同梱 nuko config set-key を stdin 経由)。
         if !key.is_empty() {
-            if let Err(e) = save_key_via_cli(key) {
+            if let Err(e) = save_key_via_cli(provider, key) {
                 win.set_status(&format!("⚠️ キー保存失敗: {e}"));
                 return;
             }
@@ -639,12 +640,23 @@ pub fn save_settings() {
         }
 
         // provider/model を ai.toml に保存 (enabled=true)。
-        if let Err(e) = write_ai_toml("anthropic", model) {
+        if let Err(e) = write_ai_toml(provider, model) {
             win.set_status(&format!("⚠️ ai.toml 書込失敗: {e}"));
             return;
         }
 
-        win.set_status("✅ 保存しました（メニューの「🤖 AIで学習」が使えます）");
+        win.set_status(&format!(
+            "✅ 保存しました（{provider}）。メニューの「🤖 AIで学習」が使えます"
+        ));
+    });
+}
+
+/// 設定ウィンドウを閉じる (activation policy を元に戻して IME を background へ)。
+pub fn close_settings(mtm: MainThreadMarker) {
+    SETTINGS_WINDOW.with(|cell| {
+        if let Some(win) = cell.borrow().as_ref() {
+            win.close(mtm);
+        }
     });
 }
 
@@ -698,12 +710,12 @@ fn current_ai_model() -> Option<String> {
     None
 }
 
-/// 同梱 `nuko config set-key anthropic` を stdin 経由で呼びキーを Keychain に保存する。
-fn save_key_via_cli(key: &str) -> std::result::Result<(), String> {
+/// 同梱 `nuko config set-key <provider>` を stdin 経由で呼びキーを Keychain に保存する。
+fn save_key_via_cli(provider: &str, key: &str) -> std::result::Result<(), String> {
     use std::io::Write;
     let nuko = resolve_nuko_binary().ok_or_else(|| "nuko CLI が見つかりません".to_string())?;
     let mut child = std::process::Command::new(&nuko)
-        .args(["config", "set-key", "anthropic"])
+        .args(["config", "set-key", provider])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
