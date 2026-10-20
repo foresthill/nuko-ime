@@ -93,8 +93,9 @@
 	<string>NukoInputController</string>
 	<key>InputMethodServerDelegateClass</key>
 	<string>NukoInputController</string>
-	<key>LSBackgroundOnly</key>
-	<true/>
+	<!-- LSBackgroundOnly は外す: true だと UI を一切持てず、設定ウィンドウが
+	     キーボード入力を受け取れない (setActivationPolicy でも前面化不可)。
+	     LSUIElement=true の agent は残す (Dock アイコンなし、候補パネルは従来どおり)。 -->
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSPrincipalClass</key>
