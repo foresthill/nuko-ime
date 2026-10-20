@@ -16,7 +16,7 @@ use objc2::runtime::AnyObject;
 use objc2::{msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSButtonType,
-    NSControlStateValueOn, NSSecureTextField, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSControlStateValueOn, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
@@ -29,7 +29,9 @@ const FIELD_W: f64 = W - PAD * 2.0;
 pub struct SettingsWindow {
     window: Retained<NSWindow>,
     provider_checkbox: Retained<NSButton>,
-    key_field: Retained<NSSecureTextField>,
+    // NSSecureTextField だと secure input mode が IME プロセスで効かず入力不能になる
+    // (2026-10 実機)。平文の NSTextField にして確実に打てるようにする (保存後にクリア)。
+    key_field: Retained<NSTextField>,
     model_field: Retained<NSTextField>,
     reading_field: Retained<NSTextField>,
     surface_field: Retained<NSTextField>,
@@ -85,8 +87,8 @@ impl SettingsWindow {
             "OpenRouter を使う（オフ = Anthropic 直）",
         ));
         provider_checkbox.setFrame(row(400.0, 20.0));
-        let key_label = make_label(mtm, "API キー:", row(374.0, 16.0));
-        let key_field = NSSecureTextField::new(mtm);
+        let key_label = make_label(mtm, "API キー（平文表示・保存後クリア）:", row(374.0, 16.0));
+        let key_field = NSTextField::new(mtm);
         key_field.setFrame(row(348.0, 24.0));
         let model_label = make_label(
             mtm,

@@ -22,8 +22,17 @@ fn candidates_at(reading: &str, now: DateTime<Local>) -> Vec<Candidate> {
         "きょう" => date_strings(now, 0),
         "あした" | "あす" => date_strings(now, 1),
         "きのう" => date_strings(now, -1),
-        "いま" | "じこく" => time_strings(now),
-        "にちじ" => datetime_strings(now),
+        "いま" | "じこく" => {
+            // 時刻だけでなく「日付＋時刻」版も出す (ユーザー要望)。
+            let mut v = time_strings(now);
+            v.extend(timestamp_strings(now));
+            v
+        }
+        "にちじ" => {
+            let mut v = timestamp_strings(now);
+            v.extend(date_strings(now, 0));
+            v
+        }
         _ => return Vec::new(),
     };
     surfaces
@@ -80,17 +89,16 @@ fn time_strings(now: DateTime<Local>) -> Vec<String> {
     ]
 }
 
-/// 日時 (日付 + 時刻) のタイムスタンプを返す。
-fn datetime_strings(now: DateTime<Local>) -> Vec<String> {
+/// 日付＋時刻のタイムスタンプを返す (秒まで。例: 2026年10月20日 18:55:28)。
+fn timestamp_strings(now: DateTime<Local>) -> Vec<String> {
     let (y, m, day) = (now.year(), now.month(), now.day());
-    let (h, mi) = (now.hour(), now.minute());
-    let mut v = vec![
+    let (h, mi, s) = (now.hour(), now.minute(), now.second());
+    vec![
+        format!("{y}年{m}月{day}日 {h:02}:{mi:02}:{s:02}"),
         format!("{y}年{m}月{day}日 {h:02}:{mi:02}"),
-        format!("{y}/{m:02}/{day:02} {h:02}:{mi:02}"),
-        format!("{y}-{m:02}-{day:02}T{h:02}:{mi:02}"),
-    ];
-    v.extend(date_strings(now, 0));
-    v
+        format!("{y}/{m:02}/{day:02} {h:02}:{mi:02}:{s:02}"),
+        format!("{y}-{m:02}-{day:02} {h:02}:{mi:02}:{s:02}"),
+    ]
 }
 
 #[cfg(test)]
@@ -131,12 +139,17 @@ mod tests {
     }
 
     #[test]
-    fn ima_generates_time() {
+    fn ima_generates_time_and_timestamp() {
         let c = candidates_at("いま", fixed());
         let surfaces: Vec<&str> = c.iter().map(|x| x.surface.as_str()).collect();
         assert!(surfaces.contains(&"10:30"), "HH:MM");
         assert!(surfaces.contains(&"10時30分"), "日本語時刻");
         assert!(surfaces.contains(&"10:30:45"), "秒まで");
+        // 日付＋時刻版も出る (ユーザー要望)。
+        assert!(
+            surfaces.contains(&"2026年10月20日 10:30:45"),
+            "いま に日付＋時刻版"
+        );
     }
 
     #[test]
