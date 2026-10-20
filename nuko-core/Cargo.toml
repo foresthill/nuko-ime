@@ -17,6 +17,9 @@ lindera = ["dep:lindera"]
 akaza = ["dep:libakaza"]
 
 [dependencies]
+# 日付/時刻候補の生成 (「きょう」→今日の日付 等)。clock feature で Local::now()。
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
 # 形態素解析（オプション）
 lindera = { workspace = true, optional = true }
 

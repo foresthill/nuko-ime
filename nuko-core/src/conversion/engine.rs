@@ -510,6 +510,14 @@ impl ConversionEngine {
             }
         }
 
+        // 「きょう」→今日の日付 / 「いま」→現在時刻 等を動的に候補生成する (①規則/生成器)。
+        // 該当読み以外は空なので無変化。
+        for c in super::datetime::datetime_candidates(reading) {
+            if !candidates.iter().any(|x| x.surface == c.surface) {
+                candidates.push(c);
+            }
+        }
+
         // 旧字体モード: 候補の旧字体版を末尾に追加 (ソート前。低スコアなので下位に出る)。
         // OFF (既定) なら完全に無変化。
         if self.kyujitai_mode {
