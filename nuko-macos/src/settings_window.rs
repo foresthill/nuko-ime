@@ -16,7 +16,7 @@ use objc2::runtime::AnyObject;
 use objc2::{msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSButtonType,
-    NSControlStateValueOn, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSControlStateValueOn, NSMenu, NSMenuItem, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
@@ -174,12 +174,45 @@ impl SettingsWindow {
         }
     }
 
+    /// Cmd+C/V/X/A (コピー/ペースト/切り取り/全選択) を有効にする Edit メニューを設定する。
+    ///
+    /// 設定窓にはメニューバーが無いため、これが無いと Cmd+V 等が first responder
+    /// (テキスト欄) に届かず **ペーストできない** (2026-10 実機)。target=nil で
+    /// 標準アクション (paste: 等) を responder chain に流す。
+    fn install_edit_menu(mtm: MainThreadMarker) {
+        let app = NSApplication::sharedApplication(mtm);
+        let main_menu = NSMenu::new(mtm);
+        let edit_item = NSMenuItem::new(mtm);
+        let edit_menu = NSMenu::new(mtm);
+        edit_menu.setTitle(&NSString::from_str("編集"));
+        unsafe {
+            let items: [(&str, objc2::runtime::Sel, &str); 4] = [
+                ("切り取り", sel!(cut:), "x"),
+                ("コピー", sel!(copy:), "c"),
+                ("ペースト", sel!(paste:), "v"),
+                ("すべて選択", sel!(selectAll:), "a"),
+            ];
+            for (title, action, keq) in items {
+                let _ = edit_menu.addItemWithTitle_action_keyEquivalent(
+                    &NSString::from_str(title),
+                    Some(action),
+                    &NSString::from_str(keq),
+                );
+            }
+            edit_item.setSubmenu(Some(&edit_menu));
+            main_menu.addItem(&edit_item);
+            app.setMainMenu(Some(&main_menu));
+        }
+    }
+
     /// 前面に出してキーボードフォーカスを取る (policy を Regular に切替)。
     pub fn show(&self, mtm: MainThreadMarker, model_prefill: &str) {
         self.model_field
             .setStringValue(&NSString::from_str(model_prefill));
         self.status.setStringValue(&NSString::from_str(""));
         self.window.center();
+        // Cmd+V 等を有効化 (設定窓にメニューバーが無いとペーストできないため)。
+        Self::install_edit_menu(mtm);
 
         let app = NSApplication::sharedApplication(mtm);
         // IME は background agent なので、設定中だけ通常アプリ化して active になる。
