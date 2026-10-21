@@ -22,6 +22,7 @@ name = "nuko-bench"
 path = "src/bin/bench.rs"
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 nuko-core = { workspace = true }
 nuko-platform = { workspace = true }
 

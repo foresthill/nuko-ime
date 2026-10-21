@@ -87,6 +87,15 @@ enum Commands {
         #[command(subcommand)]
         action: DictAction,
     },
+    /// AI 呼び出しログ (BYOK dreaming の送信/応答/トークン/コスト) を表示する
+    AiLog {
+        /// 直近 N 件だけ表示
+        #[arg(short = 'n', long, default_value = "10")]
+        count: usize,
+        /// prompt/response の全文も表示する
+        #[arg(long)]
+        full: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -182,6 +191,7 @@ fn main() -> Result<()> {
         } => cmd_dream(max_readings, provider.as_deref(), model.as_deref(), apply),
         Commands::Config { action } => cmd_config(action),
         Commands::Dict { action } => cmd_dict(action),
+        Commands::AiLog { count, full } => cmd_ai_log(count, full),
     }
 }
 
@@ -408,6 +418,46 @@ fn mask_key(k: &str) -> String {
     let head: String = k.chars().take(4).collect();
     let tail: String = k.chars().skip(n - 4).collect();
     format!("{head}…{tail} ({n}文字)")
+}
+
+/// `nuko ai-log`: AI 呼び出しログ (BYOK dreaming の送信/応答/トークン/コスト) を表示する。
+fn cmd_ai_log(count: usize, full: bool) -> Result<()> {
+    let all = nuko_core::ai_log::read_all();
+    if all.is_empty() {
+        println!("AI ログはまだありません（BYOK dreaming を実行すると記録されます）。");
+        return Ok(());
+    }
+    let total_cost: f64 = all.iter().map(|e| e.cost_usd).sum();
+    let total_in: u64 = all.iter().map(|e| e.input_tokens).sum();
+    let total_out: u64 = all.iter().map(|e| e.output_tokens).sum();
+    println!("{}", "ぬこIME AI ログ".cyan().bold());
+    println!(
+        "累計 {} 回 / 入力 {} tok / 出力 {} tok / 概算 ${:.4}",
+        all.len().to_string().yellow(),
+        total_in,
+        total_out,
+        total_cost
+    );
+    println!();
+    for e in all.iter().rev().take(count) {
+        let model = e.resolved_model.as_deref().unwrap_or(e.model.as_str());
+        println!(
+            "{} [{}] {} — in {} / out {} tok / ${:.4} / {}ms",
+            e.time.dimmed(),
+            e.provider.cyan(),
+            model.yellow(),
+            e.input_tokens,
+            e.output_tokens,
+            e.cost_usd,
+            e.ms
+        );
+        if full {
+            println!("  {}\n{}", "送信:".dimmed(), e.prompt);
+            println!("  {}\n{}", "応答:".dimmed(), e.response);
+            println!();
+        }
+    }
+    Ok(())
 }
 
 /// `nuko dict …`: IME の user_dict.json を直接編集する (単語登録)。

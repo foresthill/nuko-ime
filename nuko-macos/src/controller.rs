@@ -351,6 +351,12 @@ define_class!(
             self._show_learning_impl();
         }
 
+        /// メニュー項目「📊 AI ログを見る…」のアクション。
+        #[unsafe(method(nukoShowAiLog:))]
+        fn nuko_show_ai_log(&self, _sender: Option<&AnyObject>) {
+            self._present_learning(&crate::state::ai_log_text());
+        }
+
         /// メニュー項目「単語登録:…」のアクション。
         #[unsafe(method(nukoRegisterWord:))]
         fn nuko_register_word(&self, _sender: Option<&AnyObject>) {
@@ -417,6 +423,7 @@ impl NukoInputController {
         let relearn = NSString::from_str("学習を今すぐ研ぎ直す");
         let dream_ai = NSString::from_str("🤖 AIで学習を研ぎ直す（BYOK）");
         let settings = NSString::from_str("⚙️ BYOK 設定…（APIキー/モデル）");
+        let ai_log = NSString::from_str("📊 AI ログを見る…（コスト/送受信）");
         unsafe {
             let _ = menu.addItemWithTitle_action_keyEquivalent(
                 &reg_ns,
@@ -443,6 +450,12 @@ impl NukoInputController {
             let _ = menu.addItemWithTitle_action_keyEquivalent(
                 &settings,
                 Some(sel!(nukoOpenSettings:)),
+                &empty,
+            );
+            // AI ログ (BYOK 呼び出しの送受信/トークン/コスト)。
+            let _ = menu.addItemWithTitle_action_keyEquivalent(
+                &ai_log,
+                Some(sel!(nukoShowAiLog:)),
                 &empty,
             );
         }

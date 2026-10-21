@@ -66,6 +66,8 @@ pub fn build_request_body(model: &str, prompt: &str) -> serde_json::Value {
     serde_json::json!({
         "model": model,
         "messages": [{ "role": "user", "content": prompt }],
+        // 応答にコスト (usage.cost) とトークン数を含めてもらう (AI ログ用)。
+        "usage": { "include": true },
     })
 }
 
@@ -122,6 +124,7 @@ impl DreamProvider for OpenRouterProvider {
     }
 
     fn complete(&self, prompt: &str) -> Result<String> {
+        let started = std::time::Instant::now();
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let body = build_request_body(&self.model, prompt);
         let resp = ureq::post(&url)
@@ -144,7 +147,34 @@ impl DreamProvider for OpenRouterProvider {
                 return Err(NukoError::Conversion(format!("OpenRouter 通信失敗: {e}")));
             }
         };
-        parse_completion(&json)
+        let text = parse_completion(&json)?;
+        // AI ログ記録 (透明性: 送信/応答/トークン/コスト)。resolved_model は実際に選ばれたモデル。
+        let u = |p: &str| {
+            json.pointer(p)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+        };
+        let cost = json
+            .pointer("/usage/cost")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+        let resolved = json
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        nuko_core::ai_log::record(&nuko_core::ai_log::AiLogEntry {
+            time: nuko_core::ai_log::now_iso(),
+            provider: "openrouter".to_string(),
+            model: self.model.clone(),
+            resolved_model: resolved,
+            prompt: prompt.to_string(),
+            response: text.clone(),
+            input_tokens: u("/usage/prompt_tokens"),
+            output_tokens: u("/usage/completion_tokens"),
+            cost_usd: cost,
+            ms: started.elapsed().as_millis() as u64,
+        });
+        Ok(text)
     }
 }
 
