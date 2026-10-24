@@ -12,13 +12,53 @@
 use std::cell::Cell;
 
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
-use objc2::{msg_send, sel, MainThreadMarker, MainThreadOnly};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
+use objc2::{define_class, msg_send, sel, AllocAnyThread, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSButtonType,
     NSControlStateValueOn, NSMenu, NSMenuItem, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+
+// 設定窓ボタンの **安定した** target。
+//
+// なぜ必要か: ボタンの target を IME controller にすると、設定窓にフォーカスが移った
+// 際に IMK がその controller を破棄し、target が nil になってボタン (保存/閉じる) が
+// 効かなくなる (2026-10 実機で「閉じるできない」)。そこで controller でなく、
+// アプリ全体で 1 つだけ生成して保持し続ける本オブジェクトを target にする。
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "NukoSettingsTarget"]
+    struct SettingsTarget;
+
+    unsafe impl NSObjectProtocol for SettingsTarget {}
+
+    impl SettingsTarget {
+        /// 「BYOK を保存」。
+        #[unsafe(method(nukoSaveSettings:))]
+        fn save(&self, _s: Option<&AnyObject>) {
+            crate::state::save_settings();
+        }
+        /// 「辞書に登録」。
+        #[unsafe(method(nukoAddDictEntry:))]
+        fn add_dict(&self, _s: Option<&AnyObject>) {
+            crate::state::add_dict_entry_from_window();
+        }
+        /// 「閉じる」(窓を隠して activation policy を戻す)。
+        #[unsafe(method(nukoCloseSettings:))]
+        fn close_action(&self, _s: Option<&AnyObject>) {
+            if let Some(mtm) = MainThreadMarker::new() {
+                crate::state::close_settings(mtm);
+            }
+        }
+    }
+);
+
+impl SettingsTarget {
+    fn new() -> Retained<Self> {
+        unsafe { msg_send![Self::alloc(), init] }
+    }
+}
 
 const W: f64 = 560.0;
 const H: f64 = 480.0;
@@ -38,6 +78,8 @@ pub struct SettingsWindow {
     status: Retained<NSTextField>,
     /// 表示前の activation policy (閉じたら戻す)。
     prev_policy: Cell<Option<NSApplicationActivationPolicy>>,
+    /// ボタンの安定した target (controller 破棄に影響されないよう保持し続ける)。
+    _target: Retained<SettingsTarget>,
 }
 
 /// ラベル (非編集・枠なし・背景なしの NSTextField) を作る。
@@ -66,11 +108,14 @@ fn editable_field(mtm: MainThreadMarker, frame: NSRect) -> Retained<NSTextField>
 }
 
 impl SettingsWindow {
-    /// ウィンドウとフィールドを生成する (非表示)。`save_target` = controller。
-    pub fn new(mtm: MainThreadMarker, save_target: &AnyObject) -> Self {
+    /// ウィンドウとフィールドを生成する (非表示)。ボタンの target は内部で生成する
+    /// 安定オブジェクト ([`SettingsTarget`])。controller には依存しない。
+    pub fn new(mtm: MainThreadMarker) -> Self {
+        let target = SettingsTarget::new();
+        let save_target: &AnyObject = &target;
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(W, H));
-        // Closable を付けない = 赤ボタンで閉じない → 必ず「閉じる」経由で policy を戻せる。
-        let style = NSWindowStyleMask::Titled;
+        // Closable (赤ボタン) を付ける = 緊急の閉じ手段。通常は「閉じる」ボタンで policy も戻す。
+        let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable;
         let window: Retained<NSWindow> = unsafe {
             let a = NSWindow::alloc(mtm);
             msg_send![
@@ -81,6 +126,8 @@ impl SettingsWindow {
                 defer: false,
             ]
         };
+        // 赤ボタンで閉じても window オブジェクトを破棄しない (singleton 保持のため)。
+        unsafe { window.setReleasedWhenClosed(false) };
         window.setTitle(&NSString::from_str("ぬこIME 設定"));
 
         let content: Retained<NSView> = NSView::initWithFrame(NSView::alloc(mtm), frame);
@@ -175,6 +222,7 @@ impl SettingsWindow {
             surface_field,
             status,
             prev_policy: Cell::new(None),
+            _target: target,
         }
     }
 

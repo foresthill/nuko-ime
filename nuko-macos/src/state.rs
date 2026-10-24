@@ -1,7 +1,6 @@
 use nuko_core::conversion::{CandidateList, ConversionContext, SegmentedConversion};
 use nuko_core::learning::{extract_corrections, CorrectionStore, ObservationLog};
 use nuko_core::prelude::*;
-use objc2::runtime::AnyObject;
 use objc2::MainThreadMarker;
 use std::cell::RefCell;
 use std::time::Instant;
@@ -629,12 +628,13 @@ thread_local! {
     static SETTINGS_WINDOW: RefCell<Option<SettingsWindow>> = const { RefCell::new(None) };
 }
 
-/// 設定ウィンドウを前面に表示する (初回は生成)。`controller` が「保存」ボタンの target。
-pub fn show_settings(mtm: MainThreadMarker, controller: &AnyObject) {
+/// 設定ウィンドウを前面に表示する (初回は生成)。ボタンの target は窓が内部で保持する
+/// 安定オブジェクトなので controller は不要。
+pub fn show_settings(mtm: MainThreadMarker) {
     SETTINGS_WINDOW.with(|cell| {
         let mut w = cell.borrow_mut();
         if w.is_none() {
-            *w = Some(SettingsWindow::new(mtm, controller));
+            *w = Some(SettingsWindow::new(mtm));
         }
         let model = current_ai_model().unwrap_or_else(|| "claude-sonnet-5-5".to_string());
         if let Some(win) = w.as_ref() {
