@@ -40,6 +40,7 @@
     clippy::assert_is_empty             // clippy 1.99+ の新 lint。テスト assert!(x.is_empty()) の可読性優先
 )]
 
+pub mod ai_log;
 pub mod conversion;
 pub mod dictionary;
 pub mod error;

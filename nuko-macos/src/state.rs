@@ -102,6 +102,32 @@ where
 
 /// 学習状況を人間可読なテキストにまとめる (パネル表示用)。
 ///
+/// メニュー「AI ログを見る」用: BYOK 呼び出しの累計コスト＋直近の記録をテキストで返す。
+pub fn ai_log_text() -> String {
+    let all = nuko_core::ai_log::read_all();
+    if all.is_empty() {
+        return "📊 AI ログ\n\nまだありません。\n「🤖 AIで学習を研ぎ直す（BYOK）」を実行すると、\n送信内容・応答・トークン・コストが記録されます。\n（全文は ~/Library/Application Support/nuko-ime/ai_log.jsonl / `nuko ai-log --full`）".to_string();
+    }
+    let total_cost: f64 = all.iter().map(|e| e.cost_usd).sum();
+    let total_in: u64 = all.iter().map(|e| e.input_tokens).sum();
+    let total_out: u64 = all.iter().map(|e| e.output_tokens).sum();
+    let mut s = String::from("📊 AI ログ（BYOK 呼び出し）\n");
+    s.push_str(&format!(
+        "累計 {} 回 ／ 入力 {total_in} tok ／ 出力 {total_out} tok ／ 概算 ${total_cost:.4}\n",
+        all.len()
+    ));
+    s.push_str("──────────\n");
+    for e in all.iter().rev().take(20) {
+        let model = e.resolved_model.as_deref().unwrap_or(e.model.as_str());
+        s.push_str(&format!(
+            "{} [{}] {}\n　in {} / out {} tok ／ ${:.4} ／ {}ms\n",
+            e.time, e.provider, model, e.input_tokens, e.output_tokens, e.cost_usd, e.ms
+        ));
+    }
+    s.push_str("──────────\n全文は `nuko ai-log --full` / ai_log.jsonl を参照。");
+    s
+}
+
 /// メニューのヘッダに出す 1 行サマリ (例: "ぬこIME ・ 学習 42 選好 ・ 観察 1200 件（ON）")。
 ///
 /// `learning_status_text` と同じデータ源を参照するが、メニュー項目タイトル用に 1 行へ圧縮する。

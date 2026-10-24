@@ -92,6 +92,7 @@ impl DreamProvider for AnthropicProvider {
     }
 
     fn complete(&self, prompt: &str) -> Result<String> {
+        let started = std::time::Instant::now();
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         let body = build_request_body(&self.model, prompt, self.max_tokens);
         let resp = ureq::post(&url)
@@ -114,7 +115,27 @@ impl DreamProvider for AnthropicProvider {
                 return Err(NukoError::Conversion(format!("Anthropic 通信失敗: {e}")));
             }
         };
-        parse_completion(&json)
+        let text = parse_completion(&json)?;
+        // AI ログ記録 (透明性: 送信/応答/トークン/コスト)。
+        let u = |p: &str| {
+            json.pointer(p)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+        };
+        let (it, ot) = (u("/usage/input_tokens"), u("/usage/output_tokens"));
+        nuko_core::ai_log::record(&nuko_core::ai_log::AiLogEntry {
+            time: nuko_core::ai_log::now_iso(),
+            provider: "anthropic".to_string(),
+            model: self.model.clone(),
+            resolved_model: None,
+            prompt: prompt.to_string(),
+            response: text.clone(),
+            input_tokens: it,
+            output_tokens: ot,
+            cost_usd: nuko_core::ai_log::estimate_anthropic_cost(&self.model, it, ot),
+            ms: started.elapsed().as_millis() as u64,
+        });
+        Ok(text)
     }
 }
 
