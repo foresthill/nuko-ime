@@ -528,12 +528,9 @@ impl NukoInputController {
     ///
     /// 「保存」ボタンの target は本 controller (`nukoSaveSettings:`)。
     fn _open_settings_impl(&self) {
-        let Some(mtm) = MainThreadMarker::new() else {
-            return;
-        };
-        // self を &AnyObject として渡す (objc オブジェクトはレイアウト互換)。
-        let any: &AnyObject = unsafe { &*(self as *const Self as *const AnyObject) };
-        crate::state::show_settings(mtm, any);
+        if let Some(mtm) = MainThreadMarker::new() {
+            crate::state::show_settings(mtm);
+        }
     }
 
     /// メニュー「学習状況を見る…」: 現在の学習状況をパネル表示する。

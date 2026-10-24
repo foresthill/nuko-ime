@@ -1,7 +1,6 @@
 use nuko_core::conversion::{CandidateList, ConversionContext, SegmentedConversion};
 use nuko_core::learning::{extract_corrections, CorrectionStore, ObservationLog};
 use nuko_core::prelude::*;
-use objc2::runtime::AnyObject;
 use objc2::MainThreadMarker;
 use std::cell::RefCell;
 use std::time::Instant;
@@ -629,12 +628,13 @@ thread_local! {
     static SETTINGS_WINDOW: RefCell<Option<SettingsWindow>> = const { RefCell::new(None) };
 }
 
-/// 設定ウィンドウを前面に表示する (初回は生成)。`controller` が「保存」ボタンの target。
-pub fn show_settings(mtm: MainThreadMarker, controller: &AnyObject) {
+/// 設定ウィンドウを前面に表示する (初回は生成)。ボタンの target は窓が内部で保持する
+/// 安定オブジェクトなので controller は不要。
+pub fn show_settings(mtm: MainThreadMarker) {
     SETTINGS_WINDOW.with(|cell| {
         let mut w = cell.borrow_mut();
         if w.is_none() {
-            *w = Some(SettingsWindow::new(mtm, controller));
+            *w = Some(SettingsWindow::new(mtm));
         }
         let model = current_ai_model().unwrap_or_else(|| "claude-sonnet-5-5".to_string());
         if let Some(win) = w.as_ref() {
@@ -651,14 +651,18 @@ pub fn save_settings() {
             return;
         };
         let provider = win.selected_provider();
-        let key = win.key_value();
+        // API キーは貼り付け時の空白・改行を完全除去する (フィールドで折り返して見えても確実に保存)。
+        let key: String = win
+            .key_value()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
         let model = win.model_value();
-        let key = key.trim();
         let model = model.trim();
 
         // キーが入力されていれば Keychain へ (同梱 nuko config set-key を stdin 経由)。
         if !key.is_empty() {
-            if let Err(e) = save_key_via_cli(provider, key) {
+            if let Err(e) = save_key_via_cli(provider, &key) {
                 win.set_status(&format!("⚠️ キー保存失敗: {e}"));
                 return;
             }
