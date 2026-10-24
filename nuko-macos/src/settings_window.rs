@@ -20,7 +20,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
-const W: f64 = 440.0;
+const W: f64 = 560.0;
 const H: f64 = 480.0;
 const PAD: f64 = 20.0;
 const FIELD_W: f64 = W - PAD * 2.0;
@@ -57,6 +57,14 @@ fn row(y: f64, h: f64) -> NSRect {
     NSRect::new(NSPoint::new(PAD, y), NSSize::new(FIELD_W, h))
 }
 
+/// 単一行の編集可能テキスト欄を作る (折り返さず横スクロール。長い API キーが見やすい)。
+fn editable_field(mtm: MainThreadMarker, frame: NSRect) -> Retained<NSTextField> {
+    let f = NSTextField::new(mtm);
+    f.setFrame(frame);
+    f.setUsesSingleLineMode(true);
+    f
+}
+
 impl SettingsWindow {
     /// ウィンドウとフィールドを生成する (非表示)。`save_target` = controller。
     pub fn new(mtm: MainThreadMarker, save_target: &AnyObject) -> Self {
@@ -88,15 +96,13 @@ impl SettingsWindow {
         ));
         provider_checkbox.setFrame(row(400.0, 20.0));
         let key_label = make_label(mtm, "API キー（平文表示・保存後クリア）:", row(374.0, 16.0));
-        let key_field = NSTextField::new(mtm);
-        key_field.setFrame(row(348.0, 24.0));
+        let key_field = editable_field(mtm, row(348.0, 24.0));
         let model_label = make_label(
             mtm,
             "モデル (Anthropic: claude-sonnet-5-5 / OpenRouter: anthropic/claude-...):",
             row(320.0, 16.0),
         );
-        let model_field = NSTextField::new(mtm);
-        model_field.setFrame(row(294.0, 24.0));
+        let model_field = editable_field(mtm, row(294.0, 24.0));
         let byok_save = NSButton::new(mtm);
         byok_save.setTitle(&NSString::from_str("BYOK を保存"));
         byok_save.setFrame(NSRect::new(
@@ -111,11 +117,9 @@ impl SettingsWindow {
         // ── 単語登録 セクション ──
         let dict_h = make_label(mtm, "【 単語登録（読み → 表層）】", row(222.0, 18.0));
         let reading_label = make_label(mtm, "読み（かな）:", row(198.0, 16.0));
-        let reading_field = NSTextField::new(mtm);
-        reading_field.setFrame(row(172.0, 24.0));
+        let reading_field = editable_field(mtm, row(172.0, 24.0));
         let surface_label = make_label(mtm, "表層（変換後の語）:", row(144.0, 16.0));
-        let surface_field = NSTextField::new(mtm);
-        surface_field.setFrame(row(118.0, 24.0));
+        let surface_field = editable_field(mtm, row(118.0, 24.0));
         let dict_add = NSButton::new(mtm);
         dict_add.setTitle(&NSString::from_str("辞書に登録"));
         dict_add.setFrame(NSRect::new(

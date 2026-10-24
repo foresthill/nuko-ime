@@ -651,14 +651,18 @@ pub fn save_settings() {
             return;
         };
         let provider = win.selected_provider();
-        let key = win.key_value();
+        // API キーは貼り付け時の空白・改行を完全除去する (フィールドで折り返して見えても確実に保存)。
+        let key: String = win
+            .key_value()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
         let model = win.model_value();
-        let key = key.trim();
         let model = model.trim();
 
         // キーが入力されていれば Keychain へ (同梱 nuko config set-key を stdin 経由)。
         if !key.is_empty() {
-            if let Err(e) = save_key_via_cli(provider, key) {
+            if let Err(e) = save_key_via_cli(provider, &key) {
                 win.set_status(&format!("⚠️ キー保存失敗: {e}"));
                 return;
             }
