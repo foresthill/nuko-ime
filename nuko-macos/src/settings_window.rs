@@ -60,7 +60,9 @@ impl SettingsTarget {
     }
 }
 
-const W: f64 = 560.0;
+// OpenRouter の API キー (sk-or-v1-… 約73文字) が 1 行で全部見える幅にする
+// (狭いとスクロールして一部しか見えず「気持ち悪い」とユーザー報告 2026-10)。
+const W: f64 = 720.0;
 const H: f64 = 480.0;
 const PAD: f64 = 20.0;
 const FIELD_W: f64 = W - PAD * 2.0;
