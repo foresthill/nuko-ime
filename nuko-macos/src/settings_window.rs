@@ -230,7 +230,10 @@ impl SettingsWindow {
             close.setAction(Some(sel!(performClose:)));
         }
 
-        let status = make_label(mtm, "", row(48.0, 18.0));
+        // ステータスは長文 (不一致警告など) が入るので 2 行まで折り返して全文見せる
+        // (単一行だと右端で見切れると報告 2026-10)。
+        let status = make_label(mtm, "", NSRect::new(NSPoint::new(PAD, 30.0), NSSize::new(FIELD_W, 40.0)));
+        status.setUsesSingleLineMode(false);
 
         for v in [
             &*hint,

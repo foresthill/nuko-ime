@@ -672,7 +672,7 @@ pub fn save_settings() {
             if let Some(d) = detect_provider(&key) {
                 if d != provider {
                     win.set_status(&format!(
-                        "⚠️ 保存しません: 選択は「{provider}」ですが鍵は「{d}」形式です。プロバイダを {d} に切替えるか、鍵を見直してください"
+                        "⚠️ 未保存: 選択「{provider}」と鍵「{d}」形式が不一致。プロバイダを {d} に切替えるか鍵を確認してください"
                     ));
                     return;
                 }
