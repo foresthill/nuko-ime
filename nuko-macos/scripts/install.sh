@@ -78,6 +78,12 @@ sleep 1
 rm -rf "$INSTALL_DIR/$APP_BUNDLE"
 cp -R "$PROJECT_ROOT/target/$APP_BUNDLE" "$INSTALL_DIR/"
 
+# 置換後にアプリを起動して macOS に再登録させる。
+# これをしないと、rm→cp の間に入力ソースが一時的に消えて TIS が有効ソース一覧
+# (AppleEnabledInputSources) から外し、「ぬこIMEが選べない」状態になることがある
+# (2026-10 実機で発生)。open で registerIMKServer が走り、登録を保つ。
+open "$INSTALL_DIR/$APP_BUNDLE" 2>/dev/null || true
+
 echo "[4/4] 完了！"
 echo ""
 echo "=== セットアップ手順 ==="
