@@ -99,6 +99,46 @@ pub fn decide_commit(state: &InputState) -> CommitDecision {
     }
 }
 
+/// 変換済みの状態で記号・数字を打ったときの振る舞い (テスト基盤)。
+///
+/// 第 1 要素が既定 (全角)。`?`/`!` のような変種は controller 側で seed する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolInputAction {
+    /// **変換済み** (候補 or 文節選択あり): いまの選択を確定・学習してから記号を新規入力。
+    ///
+    /// これをせず読みに足して再変換すると、ユーザーが選んだ候補 (例: いき→行き) が
+    /// 既定候補 (生き) に**巻き戻る** (2026-10 ユーザー報告の不具合)。通常文字の打鍵が
+    /// [`decide_commit`] で選択を確定・学習するのと同じ扱いに揃える。
+    CommitThenSeed,
+    /// **生かな入力中** (未変換だが読みあり): 読みに足して未確定のまま表示。
+    ///
+    /// 記号・数字で勝手に確定しない (2026-09 ユーザー要望)。Space 変換前の編集を続けられる。
+    AppendRaw,
+    /// **読みが空** (先頭): 記号・数字を新規に seed する。
+    SeedFresh,
+}
+
+/// 記号・数字キーを打ったときの振る舞いを決める (純粋関数)。
+///
+/// - `converted`: 候補 or 文節選択が存在する (= Space 変換済み・ユーザー選択を含みうる)。
+/// - `has_reading`: composition か romaji buffer に読みが残っている。
+///
+/// ## 守りたい不変条件 (過去のバグから抽出)
+///
+/// 1. **変換済みなら必ず確定してから記号を入れる** — 再変換でユーザーの訂正を
+///    巻き戻さない (2026-10)。句読点・顔文字の `(` ・数字すべてに適用。
+/// 2. **未変換の生かなは確定しない** — 読みに足して未確定のまま (2026-09)。
+#[must_use]
+pub fn decide_symbol_input(converted: bool, has_reading: bool) -> SymbolInputAction {
+    if converted {
+        SymbolInputAction::CommitThenSeed
+    } else if has_reading {
+        SymbolInputAction::AppendRaw
+    } else {
+        SymbolInputAction::SeedFresh
+    }
+}
+
 /// 候補パネル 1 ページに表示する候補数 (数字キー 1-9 に対応)。
 ///
 /// 候補が多いとき、パネルは selected を含む 1 ページ分 (この件数) だけ表示し、
@@ -1414,5 +1454,46 @@ mod tests {
         assert_eq!(f, 0, "★ 単一文節は wrap して自分に戻る");
         let (f, _) = apply_segment_focus_shift(&mut sc, None, false);
         assert_eq!(f, 0);
+    }
+
+    // ── decide_symbol_input: 記号・数字打鍵時の確定/再変換の分岐 ──
+    //
+    // 2026-10 の不具合「いき→行き に訂正後、『、』や『(』を足すと生き、に巻き戻る」
+    // の再発防止。変換済みなら必ず確定してから記号を入れる (再変換で訂正を捨てない)。
+
+    /// ★ 核心: **変換済み** (候補あり) で記号/数字を打ったら、まず確定する
+    ///    (= 再変換せず選択を保持)。句読点・顔文字の `(`・数字すべてに適用。
+    #[test]
+    fn symbol_after_conversion_commits_first() {
+        // 候補ありの状態で「、」「(」「1」どれを打っても CommitThenSeed。
+        assert_eq!(
+            decide_symbol_input(true, true),
+            SymbolInputAction::CommitThenSeed,
+            "★ 変換済み+読みあり → 確定してから記号 (訂正を巻き戻さない)",
+        );
+        // 変換済みなら読み有無に関わらず確定優先 (理論上 reading 空でも)。
+        assert_eq!(
+            decide_symbol_input(true, false),
+            SymbolInputAction::CommitThenSeed,
+        );
+    }
+
+    /// 生かな入力中 (未変換) に記号を打っても確定しない (2026-09 要望)。
+    #[test]
+    fn symbol_during_raw_kana_appends() {
+        assert_eq!(
+            decide_symbol_input(false, true),
+            SymbolInputAction::AppendRaw,
+            "★ 未変換の生かなは確定せず読みに足す (Space 変換前の編集を続けられる)",
+        );
+    }
+
+    /// 読みが空 (先頭) なら記号/数字を新規 seed。
+    #[test]
+    fn symbol_at_head_seeds_fresh() {
+        assert_eq!(
+            decide_symbol_input(false, false),
+            SymbolInputAction::SeedFresh,
+        );
     }
 }

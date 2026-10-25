@@ -663,6 +663,69 @@ impl NukoInputController {
     }
 
     /// 文字入力の処理 (方式3 handleEvent の PassThrough 経路から呼ぶ)。
+    /// 記号・数字を「読みが空」の状態から新規に composition へ seed する。
+    ///
+    /// 先頭入力、または 変換済みをいったん確定した直後に使う共通処理。
+    /// 呼び出し時 state は borrow していないこと (ここで borrow する)。
+    /// `is_digit || punct_fw.is_some()` が成り立つ前提。
+    fn seed_symbol_at_head(
+        &self,
+        client: &AnyObject,
+        ch: char,
+        is_digit: bool,
+        punct_fw: Option<&'static str>,
+    ) -> Bool {
+        let mut state = self.ivars().state.borrow_mut();
+        if is_digit {
+            // 数字を composition に入れて未確定にする (Space で 全角０/漢数字 に変換可)。
+            state.composition.push(ch);
+            state.is_composing = true;
+            let display = state.display_text();
+            drop(state);
+            debug_log(&format!("digit-compose(先頭): '{ch}' → '{display}'"));
+            Self::set_marked_text_on_client(client, &display);
+            return Bool::YES;
+        }
+        if let Some(variants) = punctuation_variants(ch) {
+            // ? ! → 候補メニューを seed (Space で ？/?/⁇/❓ を選べる)。
+            let mut list = CandidateList::new();
+            for (i, v) in variants.iter().enumerate() {
+                list.push(
+                    Candidate::new(*v, "")
+                        .with_score(-(i as i32))
+                        .with_source(CandidateSource::System),
+                );
+            }
+            list.select(0);
+            state.composition = variants[0].to_string();
+            state.candidates = Some(list);
+            state.segmented = None;
+            state.is_composing = true;
+            drop(state);
+            Self::set_marked_text_on_client(client, variants[0]);
+            self.show_candidate_panel(client);
+            debug_log(&format!("punct-seed: '{ch}' → {variants:?}"));
+            return Bool::YES;
+        }
+        // その他 (、。・~ 等、候補1つ) は composition に seed する。
+        // **即挿入 (insertText) は marked text を経由しないため Claude Code 等
+        // (Chromium/Electron) では何も入らない** (2026-09 ユーザー報告、落とし穴 #10)。
+        // composition に入れて marked text 経由にすると、続けて打った/Enter した
+        // ときの確定 (marked を insertText で置換) が効く。パネルは出さない (候補1つ)。
+        let fw = punct_fw.unwrap();
+        let mut list = CandidateList::new();
+        list.push(Candidate::new(fw, "").with_source(CandidateSource::System));
+        list.select(0);
+        state.composition = fw.to_string();
+        state.candidates = Some(list);
+        state.segmented = None;
+        state.is_composing = true;
+        drop(state);
+        Self::set_marked_text_on_client(client, fw);
+        debug_log(&format!("punct-seed1: '{ch}' → '{fw}'"));
+        Bool::YES
+    }
+
     fn _input_text_impl(&self, string: Option<&NSString>, sender: Option<&AnyObject>) -> Bool {
         // 学習状況パネルが出ていれば、打鍵で閉じる (邪魔にならないように)。
         crate::state::with_learning_panel(|p| {
@@ -792,85 +855,60 @@ impl NukoInputController {
                         !state.composition.is_empty() || !state.romaji.buffer().is_empty();
                     let converted = state.candidates.is_some() || state.segmented.is_some();
 
-                    if has_reading {
-                        // 記号/数字を読みに足す (確定しない)。数字は半角のまま足す
-                        // (libakaza が [読み][1] と割る。全角/漢数字は変換で選べる)。
-                        let remaining = state.romaji.flush();
-                        if !remaining.is_empty() {
-                            state.composition.push_str(&remaining);
-                        }
-                        match punct_fw {
-                            Some(fw) => state.composition.push_str(fw),
-                            None => state.composition.push(ch),
-                        }
-                        state.is_composing = true;
-                        if converted {
-                            // 変換済みなら再変換して [変換結果][記号/数字] を表示。
+                    match crate::commit::decide_symbol_input(converted, has_reading) {
+                        // 変換済み: いまの選択を確定・学習してから記号/数字を新規 seed する。
+                        //
+                        // これを「読みに足して再変換」でやると、ユーザーの訂正 (いき→行き) が
+                        // 既定候補 (生き) に**巻き戻る** (2026-10 不具合)。句読点だけでなく
+                        // 顔文字の '(' や数字も同じ経路なので全部に効く。通常文字の打鍵
+                        // (下の decide_commit 経路) と同じ「確定してから新規入力」に揃える。
+                        crate::commit::SymbolInputAction::CommitThenSeed => {
+                            let decision = crate::commit::decide_commit(&state);
+                            let ctx_snapshot = state.context.clone();
+                            for c in &decision.learn_targets {
+                                with_engine_mut(|engine| {
+                                    let _ = engine.commit(c, &ctx_snapshot);
+                                });
+                            }
+                            if !decision.commit_text.is_empty() {
+                                state.context.push_prev_word(&decision.commit_text);
+                            }
+                            state.reset();
                             drop(state);
-                            debug_log(&format!("append-reconvert: '{ch}'"));
-                            self.do_convert(client);
-                        } else {
-                            // 生かな入力中は生のまま表示 (Space 変換前)。
+                            Self::hide_candidate_panel();
+                            if !decision.commit_text.is_empty() {
+                                Self::insert_text_on_client(client, &decision.commit_text);
+                            }
+                            debug_log(&format!(
+                                "symbol-commit-then-seed: '{}' を確定 → '{ch}' を seed",
+                                decision.commit_text
+                            ));
+                            // 確定後は読みが空なので、記号/数字を新規 seed する。
+                            return self.seed_symbol_at_head(client, ch, is_digit, punct_fw);
+                        }
+                        // 生かな入力中 (未変換): 読みに足して未確定のまま表示 (確定しない)。
+                        crate::commit::SymbolInputAction::AppendRaw => {
+                            let remaining = state.romaji.flush();
+                            if !remaining.is_empty() {
+                                state.composition.push_str(&remaining);
+                            }
+                            match punct_fw {
+                                Some(fw) => state.composition.push_str(fw),
+                                None => state.composition.push(ch),
+                            }
+                            state.is_composing = true;
                             let display = state.display_text();
                             drop(state);
                             debug_log(&format!("append-raw: '{ch}' → '{display}'"));
                             Self::set_marked_text_on_client(client, &display);
+                            return Bool::YES;
                         }
-                        return Bool::YES;
-                    }
-
-                    // 先頭 (読みが空)。
-                    if is_digit {
-                        // 数字を composition に入れて未確定にする → Space で 全角０/漢数字
-                        // に変換できる (B: ユーザー要望 2026-09「全角数字に変えたいことも
-                        // ある」)。続けて打てば半角のまま、Enter で確定。
-                        state.composition.push(ch);
-                        state.is_composing = true;
-                        let display = state.display_text();
-                        drop(state);
-                        debug_log(&format!("digit-compose(先頭): '{ch}' → '{display}'"));
-                        Self::set_marked_text_on_client(client, &display);
-                        return Bool::YES;
-                    }
-                    if let Some(variants) = punctuation_variants(ch) {
-                        // ? ! → 候補メニューを seed (Space で ？/?/⁇/❓ を選べる)。
-                        let mut list = CandidateList::new();
-                        for (i, v) in variants.iter().enumerate() {
-                            list.push(
-                                Candidate::new(*v, "")
-                                    .with_score(-(i as i32))
-                                    .with_source(CandidateSource::System),
-                            );
+                        // 読みが空 (先頭): そのまま新規 seed する。
+                        crate::commit::SymbolInputAction::SeedFresh => {
+                            drop(state);
+                            return self.seed_symbol_at_head(client, ch, is_digit, punct_fw);
                         }
-                        list.select(0);
-                        state.composition = variants[0].to_string();
-                        state.candidates = Some(list);
-                        state.segmented = None;
-                        state.is_composing = true;
-                        drop(state);
-                        Self::set_marked_text_on_client(client, variants[0]);
-                        self.show_candidate_panel(client);
-                        debug_log(&format!("punct-seed: '{ch}' → {variants:?}"));
-                        return Bool::YES;
                     }
-                    // その他 (、。・~ 等、候補1つ) は composition に seed する。
-                    // **即挿入 (insertText) は marked text を経由しないため Claude Code 等
-                    // (Chromium/Electron) では何も入らない** (2026-09 ユーザー報告、落とし穴 #10)。
-                    // composition に入れて marked text 経由にすると、続けて打った/Enter した
-                    // ときの確定 (marked を insertText で置換) が効く。パネルは出さない
-                    // (候補1つなので)。実質「打てばすぐ入る」ままで、全アプリで動く。
-                    let fw = punct_fw.unwrap();
-                    let mut list = CandidateList::new();
-                    list.push(Candidate::new(fw, "").with_source(CandidateSource::System));
-                    list.select(0);
-                    state.composition = fw.to_string();
-                    state.candidates = Some(list);
-                    state.segmented = None;
-                    state.is_composing = true;
-                    drop(state);
-                    Self::set_marked_text_on_client(client, fw);
-                    debug_log(&format!("punct-seed1: '{ch}' → '{fw}'"));
-                    return Bool::YES;
                 }
             }
         }
