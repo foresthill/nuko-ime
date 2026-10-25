@@ -639,6 +639,11 @@ pub fn show_settings(mtm: MainThreadMarker) {
         let model = current_ai_model().unwrap_or_else(|| "claude-sonnet-5-5".to_string());
         if let Some(win) = w.as_ref() {
             win.show(mtm, &model);
+            // 開いた時点の保存済み状態を表示（borrow_mut 保持中なので win を直接使い、
+            // refresh_key_display() の再 borrow を避ける）。
+            let provider = win.selected_provider();
+            win.set_current_key(&current_key_line(provider));
+            win.set_status(&format!("保存状態 {}", stored_key_status()));
         }
     });
 }
@@ -662,6 +667,16 @@ pub fn save_settings() {
 
         // キーが入力されていれば Keychain へ (同梱 nuko config set-key を stdin 経由)。
         if !key.is_empty() {
+            // 鍵の接頭辞から判る形式が、選択プロバイダと食い違う場合は保存せず警告する
+            // (openrouter 鍵を anthropic に入れると dreaming 実行時に失敗するため)。
+            if let Some(d) = detect_provider(&key) {
+                if d != provider {
+                    win.set_status(&format!(
+                        "⚠️ 未保存: 選択「{provider}」と鍵「{d}」形式が不一致。プロバイダを {d} に切替えるか鍵を確認してください"
+                    ));
+                    return;
+                }
+            }
             if let Err(e) = save_key_via_cli(provider, &key) {
                 win.set_status(&format!("⚠️ キー保存失敗: {e}"));
                 return;
@@ -675,10 +690,255 @@ pub fn save_settings() {
             return;
         }
 
-        win.set_status(&format!(
-            "✅ 保存しました（{provider}）。メニューの「🤖 AIで学習」が使えます"
-        ));
+        // 「保存できたこと」を分かりやすく: ステータスに結果、「現在のキー」行に
+        // 保存済みキーの伏せ字を残す (保存後に入力欄をクリアしても空に見えない)。
+        if key.is_empty() {
+            win.set_status(&format!("✅ 設定を保存しました（{provider}）"));
+        } else {
+            win.set_status(&format!("✅ {provider} に保存しました ← {}", mask_key_rich(&key)));
+        }
+        win.set_current_key(&current_key_line(provider));
     });
+}
+
+/// 「現在のキー」行の文字列を作る (選択プロバイダの保存済みキーを伏せ字で、無ければ未登録)。
+fn current_key_line(provider: &str) -> String {
+    match query_key_masked(provider) {
+        Some(m) => format!("現在のキー（{provider}）: {m}"),
+        None => format!("現在のキー（{provider}）: 未登録"),
+    }
+}
+
+/// メニュー「🔄 アップデートを確認…」: `nuko update` でチェックし、結果をダイアログで表示。
+///
+/// 更新があれば「今すぐ更新」でダウンロード→置換→再起動（反映には入力ソース切替が要る）。
+pub fn check_update_from_menu(mtm: MainThreadMarker) {
+    use objc2_app_kit::{NSAlert, NSApplication, NSApplicationActivationPolicy};
+    use objc2_foundation::NSString;
+
+    // NSAlertFirstButtonReturn = 1000, Second = 1001, Third = 1002。
+    const FIRST: isize = 1000;
+    const SECOND: isize = 1001;
+
+    let (stdout, code) = run_update_check();
+
+    // IME は background agent なので、ダイアログ表示中だけ通常アプリ化して前面に出す。
+    let app = NSApplication::sharedApplication(mtm);
+    let prev = app.activationPolicy();
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    #[allow(deprecated)]
+    app.activateIgnoringOtherApps(true);
+
+    let alert = NSAlert::new(mtm);
+    match code {
+        Some(10) => {
+            alert.setMessageText(&NSString::from_str("アップデートがあります"));
+            alert.setInformativeText(&NSString::from_str(&format!(
+                "{stdout}\n\n「今すぐ更新」でダウンロードして置換・再起動します。\n\
+                 反映には更新後に【入力ソースを一度切替えて戻す】か再ログインが必要です。"
+            )));
+            let _ = alert.addButtonWithTitle(&NSString::from_str("今すぐ更新"));
+            let _ = alert.addButtonWithTitle(&NSString::from_str("リリースページ"));
+            let _ = alert.addButtonWithTitle(&NSString::from_str("キャンセル"));
+            let resp = alert.runModal();
+            if resp == FIRST {
+                run_update_apply();
+            } else if resp == SECOND {
+                if let Some(url) = extract_release_url(&stdout) {
+                    let _ = std::process::Command::new("/usr/bin/open")
+                        .arg(url)
+                        .status();
+                }
+            }
+        }
+        Some(0) => {
+            alert.setMessageText(&NSString::from_str("最新です"));
+            alert.setInformativeText(&NSString::from_str(&stdout));
+            let _ = alert.addButtonWithTitle(&NSString::from_str("OK"));
+            let _ = alert.runModal();
+        }
+        _ => {
+            alert.setMessageText(&NSString::from_str("アップデート確認に失敗しました"));
+            alert.setInformativeText(&NSString::from_str(&stdout));
+            let _ = alert.addButtonWithTitle(&NSString::from_str("OK"));
+            let _ = alert.runModal();
+        }
+    }
+    app.setActivationPolicy(prev);
+}
+
+/// `nuko update` (チェックのみ) を実行して (stdout, 終了コード) を返す。
+fn run_update_check() -> (String, Option<i32>) {
+    let Some(nuko) = resolve_nuko_binary() else {
+        return ("nuko CLI が見つかりません".to_string(), None);
+    };
+    match std::process::Command::new(&nuko).arg("update").output() {
+        Ok(out) => {
+            let mut s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let err = String::from_utf8_lossy(&out.stderr);
+            if !err.trim().is_empty() {
+                if !s.is_empty() {
+                    s.push('\n');
+                }
+                s.push_str(err.trim());
+            }
+            (s, out.status.code())
+        }
+        Err(e) => (format!("nuko 実行失敗: {e}"), None),
+    }
+}
+
+/// `nuko update --apply` を実行 (DL→置換ヘルパー起動)。数秒後に NukoIME が再起動する。
+fn run_update_apply() {
+    if let Some(nuko) = resolve_nuko_binary() {
+        let _ = std::process::Command::new(&nuko)
+            .args(["update", "--apply"])
+            .status();
+    }
+}
+
+/// `nuko update` の stdout から「リリース: <url>」の URL を取り出す。
+fn extract_release_url(s: &str) -> Option<String> {
+    s.lines()
+        .find_map(|l| l.strip_prefix("リリース: ").map(|u| u.trim().to_string()))
+}
+
+/// 「モデル取得」: 実 API からモデル一覧を取ってコンボボックスに流し込む。
+///
+/// 取得は同梱 `nuko models <provider>`（ネットワークは CLI 側）。設定窓が前面なので
+/// ブロッキングでも他アプリの入力は阻害しない。
+pub fn fetch_models() {
+    // provider だけ先に取り出して borrow を解放してから取得（ネットワーク中は borrow を持たない）。
+    let provider = SETTINGS_WINDOW.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(SettingsWindow::selected_provider)
+    });
+    let Some(provider) = provider else {
+        return;
+    };
+    let result = query_models(provider);
+    SETTINGS_WINDOW.with(|cell| {
+        let w = cell.borrow();
+        let Some(win) = w.as_ref() else {
+            return;
+        };
+        match result {
+            Ok(ids) if !ids.is_empty() => {
+                let n = ids.len();
+                win.set_model_items(&ids);
+                win.set_status(&format!(
+                    "✅ {provider} のモデル {n} 件（上位＝おすすめ Claude系。欄に入力して絞り込み可）"
+                ));
+            }
+            Ok(_) => win.set_status(&format!("⚠️ {provider} のモデルが0件でした")),
+            Err(e) => win.set_status(&format!("⚠️ モデル取得失敗: {e}")),
+        }
+    });
+}
+
+/// `nuko models <provider>` を叩いてモデル id のリストを得る。
+fn query_models(provider: &str) -> std::result::Result<Vec<String>, String> {
+    let nuko = resolve_nuko_binary().ok_or_else(|| "nuko CLI が見つかりません".to_string())?;
+    let out = std::process::Command::new(&nuko)
+        .args(["models", provider])
+        .output()
+        .map_err(|e| format!("nuko 実行失敗: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
+/// プロバイダ選択が変わった時に「現在のキー」行を更新する (ドロップダウンの action)。
+pub fn refresh_key_display() {
+    SETTINGS_WINDOW.with(|cell| {
+        if let Some(win) = cell.borrow().as_ref() {
+            let p = win.selected_provider();
+            win.set_current_key(&current_key_line(p));
+        }
+    });
+}
+
+/// API キーを伏せ字にする（先頭 12 + … + 末尾 4 + 文字数）。
+///
+/// 先頭 12 文字で `sk-ant-api03` / `sk-or-v1-...` の違いが読めるので、
+/// どのプロバイダの鍵かを人が目視で判別できる。
+fn mask_key_rich(k: &str) -> String {
+    let n = k.chars().count();
+    if n <= 16 {
+        return format!("{} ({n}文字)", "•".repeat(n.min(12)));
+    }
+    let head: String = k.chars().take(12).collect();
+    let tail: String = k.chars().skip(n - 4).collect();
+    format!("{head}…{tail} ({n}文字)")
+}
+
+/// 鍵の接頭辞からプロバイダを推定する（Anthropic=`sk-ant-` / OpenRouter=`sk-or-`）。
+fn detect_provider(k: &str) -> Option<&'static str> {
+    if k.starts_with("sk-ant-") {
+        Some("anthropic")
+    } else if k.starts_with("sk-or-") {
+        Some("openrouter")
+    } else {
+        None
+    }
+}
+
+/// 両プロバイダの Keychain 保存状態を 1 行にまとめる（設定窓を開いた時に表示）。
+///
+/// 値は `nuko config show-key`（同梱 CLI）に問い合わせる。nuko-macos は
+/// nuko-platform（Keychain アクセス）に依存しないので、CLI 経由で確認する。
+fn stored_key_status() -> String {
+    let a = query_key_state("anthropic");
+    let o = query_key_state("openrouter");
+    format!("［anthropic: {a}／openrouter: {o}］")
+}
+
+/// `nuko config show-key <provider>` の伏せ字キーを取り出す（未登録なら `None`）。
+///
+/// CLI 出力 `🔑 anthropic: 保存済み (sk-o…xxxx (29文字))` から
+/// `sk-o…xxxx (29文字)` を抜き出す。パイプ出力なので色コードは付かない。
+fn query_key_masked(provider: &str) -> Option<String> {
+    let nuko = resolve_nuko_binary()?;
+    let out = std::process::Command::new(&nuko)
+        .args(["config", "show-key", provider])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let idx = s.find("保存済み")?;
+    let rest = s[idx + "保存済み".len()..].trim();
+    let rest = rest.strip_prefix('(').unwrap_or(rest);
+    let rest = rest.strip_suffix(')').unwrap_or(rest);
+    Some(rest.trim().to_string())
+}
+
+/// `nuko config show-key <provider>` を叩いて「保存済み」か「未登録」かを返す。
+fn query_key_state(provider: &str) -> String {
+    let Some(nuko) = resolve_nuko_binary() else {
+        return "?".to_string();
+    };
+    match std::process::Command::new(&nuko)
+        .args(["config", "show-key", provider])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            let s = String::from_utf8_lossy(&out.stdout);
+            if s.contains("保存済み") {
+                "保存済み".to_string()
+            } else {
+                "未登録".to_string()
+            }
+        }
+        _ => "?".to_string(),
+    }
 }
 
 /// 設定ウィンドウを閉じる (activation policy を元に戻して IME を background へ)。

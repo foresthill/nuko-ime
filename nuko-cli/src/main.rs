@@ -1,7 +1,9 @@
 //! ぬこIME CLI
 
 mod anthropic;
+mod models;
 mod openrouter;
+mod update;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -86,6 +88,19 @@ enum Commands {
     Dict {
         #[command(subcommand)]
         action: DictAction,
+    },
+    /// プロバイダのモデル一覧を実 API から取得して表示する (設定画面のモデル選択用)。
+    Models {
+        /// プロバイダ ("anthropic" / "openrouter")
+        provider: String,
+    },
+    /// アップデート確認 (GitHub Releases)。--apply で .app を置換・再起動 (macOS)。
+    ///
+    /// 終了コード: 0=最新 / 10=更新あり / それ以外=エラー (GUI が分岐に使う)。
+    Update {
+        /// 更新がある場合、.app をダウンロードして置換・再起動する (macOS のみ)。
+        #[arg(long)]
+        apply: bool,
     },
     /// AI 呼び出しログ (BYOK dreaming の送信/応答/トークン/コスト) を表示する
     AiLog {
@@ -190,6 +205,8 @@ fn main() -> Result<()> {
             apply,
         } => cmd_dream(max_readings, provider.as_deref(), model.as_deref(), apply),
         Commands::Config { action } => cmd_config(action),
+        Commands::Models { provider } => cmd_models(&provider),
+        Commands::Update { apply } => cmd_update(apply),
         Commands::Dict { action } => cmd_dict(action),
         Commands::AiLog { count, full } => cmd_ai_log(count, full),
     }
@@ -409,13 +426,15 @@ fn resolve_key(env_var: &str, provider: &str) -> Option<String> {
     nuko_platform::secret::get_api_key(provider).ok().flatten()
 }
 
-/// キーを伏せ字にする (先頭4 + 末尾4 のみ表示)。
+/// キーを伏せ字にする (先頭8 + 末尾4 のみ表示)。
+///
+/// 先頭 8 文字で `sk-ant-a` / `sk-or-v1` の違いが読め、どのプロバイダの鍵か判別しやすい。
 fn mask_key(k: &str) -> String {
     let n = k.chars().count();
-    if n <= 8 {
+    if n <= 12 {
         return "*".repeat(n);
     }
-    let head: String = k.chars().take(4).collect();
+    let head: String = k.chars().take(8).collect();
     let tail: String = k.chars().skip(n - 4).collect();
     format!("{head}…{tail} ({n}文字)")
 }
@@ -517,6 +536,85 @@ fn cmd_dict(action: DictAction) -> Result<()> {
 }
 
 /// `nuko config …`: BYOK の API キーを Keychain に保存/確認/削除する。
+/// `nuko update [--apply]`: GitHub Releases の最新 tag と比較し、更新を確認/適用する。
+///
+/// 終了コード: 0=最新 / 10=更新あり / 1=エラー (GUI がこのコードで分岐する)。
+/// stdout には人間向けの現在/最新/リリース URL を出す。
+fn cmd_update(apply: bool) -> Result<()> {
+    let current = nuko_core::VERSION;
+    let info = update::fetch_latest()?;
+    let newer = nuko_core::update::is_newer(current, &info.tag);
+    println!(
+        "現在: v{current}　最新: {}　{}",
+        info.tag,
+        if newer {
+            "→ 更新があります"
+        } else {
+            "(最新です)"
+        }
+    );
+    if !info.html_url.is_empty() {
+        println!("リリース: {}", info.html_url);
+    }
+    if !newer {
+        return Ok(()); // exit 0 = 最新
+    }
+    let Some(zip) = info.app_zip_url.as_ref() else {
+        println!("自動更新用の .zip が見つかりません。リリースページから手動で更新してください。");
+        std::process::exit(10);
+    };
+    if !apply {
+        println!("（メニューの「今すぐ更新」または `nuko update --apply` で自動更新できます）");
+        std::process::exit(10); // 10 = 更新あり (未適用)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        update::apply_macos(zip)?;
+        println!("更新を適用中です。数秒後に NukoIME が再起動します。");
+        println!("反映には【入力ソースを一度切替えて戻す】か再ログインが必要です。");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = zip;
+        println!("自動置換は現在 macOS のみ対応です。リリースページから手動で更新してください。");
+    }
+    Ok(())
+}
+
+/// `nuko models <provider>`: 実 API からモデル一覧を取得し id を 1 行ずつ出力する。
+fn cmd_models(provider: &str) -> Result<()> {
+    let provider = normalize_provider(provider)?;
+    let ids = match provider.as_str() {
+        "openrouter" => {
+            // base_url は ai.toml があればそれ、無ければ既定。公開 API なのでキー不要。
+            let base = nuko_data_dir()
+                .ok()
+                .map(|d| {
+                    crate::openrouter::DreamConfig::load(d.join("ai.toml")).unwrap_or_default()
+                })
+                .map_or_else(
+                    || "https://openrouter.ai/api/v1".to_string(),
+                    |c| c.base_url,
+                );
+            models::fetch_openrouter(&base)?
+        }
+        "anthropic" => {
+            let key = resolve_key("ANTHROPIC_API_KEY", "anthropic").ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Anthropic のモデル取得にはキーが必要です (先に鍵を保存してください)"
+                )
+            })?;
+            models::fetch_anthropic(&key)?
+        }
+        _ => unreachable!("normalize_provider が検証済み"),
+    };
+    // おすすめ (Claude 系・特に Sonnet) を上位に (400件超から選びやすく)。
+    for id in models::recommended_first(ids) {
+        println!("{id}");
+    }
+    Ok(())
+}
+
 fn cmd_config(action: ConfigAction) -> Result<()> {
     match action {
         ConfigAction::SetKey { provider } => {

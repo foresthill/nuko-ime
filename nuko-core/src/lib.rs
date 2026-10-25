@@ -46,6 +46,7 @@ pub mod dictionary;
 pub mod error;
 pub mod input;
 pub mod learning;
+pub mod update;
 
 /// よく使う型をまとめてインポートするためのプレリュード
 pub mod prelude {

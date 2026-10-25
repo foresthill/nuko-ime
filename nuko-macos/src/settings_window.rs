@@ -12,11 +12,11 @@
 use std::cell::Cell;
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
-use objc2::{define_class, msg_send, sel, AllocAnyThread, MainThreadMarker, MainThreadOnly};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
+use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSButtonType,
-    NSControlStateValueOn, NSMenu, NSMenuItem, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSComboBox, NSMenu,
+    NSMenuItem, NSPopUpButton, NSTextField, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
@@ -29,9 +29,22 @@ use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 define_class!(
     #[unsafe(super(NSObject))]
     #[name = "NukoSettingsTarget"]
+    #[thread_kind = MainThreadOnly]
     struct SettingsTarget;
 
     unsafe impl NSObjectProtocol for SettingsTarget {}
+
+    // 窓が閉じたら (✕ / 閉じる どちらでも) IME を background agent (.Accessory) に戻す
+    // = dock アイコンを消す。
+    unsafe impl NSWindowDelegate for SettingsTarget {
+        #[unsafe(method(windowWillClose:))]
+        fn window_will_close(&self, _n: Option<&AnyObject>) {
+            if let Some(mtm) = MainThreadMarker::new() {
+                NSApplication::sharedApplication(mtm)
+                    .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+            }
+        }
+    }
 
     impl SettingsTarget {
         /// 「BYOK を保存」。
@@ -44,6 +57,16 @@ define_class!(
         fn add_dict(&self, _s: Option<&AnyObject>) {
             crate::state::add_dict_entry_from_window();
         }
+        /// プロバイダ選択が変わったら「現在のキー」表示をそのプロバイダのものに更新。
+        #[unsafe(method(nukoProviderChanged:))]
+        fn provider_changed(&self, _s: Option<&AnyObject>) {
+            crate::state::refresh_key_display();
+        }
+        /// 「モデル取得」。実 API からモデル一覧を取ってコンボボックスに流し込む。
+        #[unsafe(method(nukoFetchModels:))]
+        fn fetch_models(&self, _s: Option<&AnyObject>) {
+            crate::state::fetch_models();
+        }
         /// 「閉じる」(窓を隠して activation policy を戻す)。
         #[unsafe(method(nukoCloseSettings:))]
         fn close_action(&self, _s: Option<&AnyObject>) {
@@ -55,12 +78,14 @@ define_class!(
 );
 
 impl SettingsTarget {
-    fn new() -> Retained<Self> {
-        unsafe { msg_send![Self::alloc(), init] }
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        unsafe { msg_send![Self::alloc(mtm), init] }
     }
 }
 
-const W: f64 = 560.0;
+// OpenRouter の API キー (sk-or-v1-… 約73文字) が 1 行で全部見える幅
+// (狭いとスクロールして一部しか見えず「気持ち悪い」とユーザー報告 2026-10)。
+const W: f64 = 720.0;
 const H: f64 = 480.0;
 const PAD: f64 = 20.0;
 const FIELD_W: f64 = W - PAD * 2.0;
@@ -68,11 +93,15 @@ const FIELD_W: f64 = W - PAD * 2.0;
 /// ぬこIME 設定ウィンドウ (アプリ全体で 1 つ、[`crate::state`] が保持)。
 pub struct SettingsWindow {
     window: Retained<NSWindow>,
-    provider_checkbox: Retained<NSButton>,
+    /// プロバイダ選択 (ドロップダウン)。0=Anthropic / 1=OpenRouter。
+    provider_popup: Retained<NSPopUpButton>,
     // NSSecureTextField だと secure input mode が IME プロセスで効かず入力不能になる
     // (2026-10 実機)。平文の NSTextField にして確実に打てるようにする (保存後にクリア)。
     key_field: Retained<NSTextField>,
-    model_field: Retained<NSTextField>,
+    /// 選択プロバイダに保存済みのキーを伏せ字で示す読み取り専用ラベル。
+    current_key_label: Retained<NSTextField>,
+    /// モデル選択 (実 API から取得した一覧 + 自由入力可の NSComboBox)。
+    model_combo: Retained<NSComboBox>,
     reading_field: Retained<NSTextField>,
     surface_field: Retained<NSTextField>,
     status: Retained<NSTextField>,
@@ -111,7 +140,7 @@ impl SettingsWindow {
     /// ウィンドウとフィールドを生成する (非表示)。ボタンの target は内部で生成する
     /// 安定オブジェクト ([`SettingsTarget`])。controller には依存しない。
     pub fn new(mtm: MainThreadMarker) -> Self {
-        let target = SettingsTarget::new();
+        let target = SettingsTarget::new(mtm);
         let save_target: &AnyObject = &target;
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(W, H));
         // Closable (赤ボタン) を付ける = 緊急の閉じ手段。通常は「閉じる」ボタンで policy も戻す。
@@ -128,6 +157,8 @@ impl SettingsWindow {
         };
         // 赤ボタンで閉じても window オブジェクトを破棄しない (singleton 保持のため)。
         unsafe { window.setReleasedWhenClosed(false) };
+        // 閉じたら policy を戻す delegate を設定 (✕ / 閉じる / performClose どれでも効く)。
+        window.setDelegate(Some(ProtocolObject::from_ref(&*target)));
         window.setTitle(&NSString::from_str("ぬこIME 設定"));
 
         let content: Retained<NSView> = NSView::initWithFrame(NSView::alloc(mtm), frame);
@@ -136,24 +167,54 @@ impl SettingsWindow {
 
         // ── BYOK セクション ──
         let byok_h = make_label(mtm, "【 BYOK（AI学習の鍵）】", row(426.0, 18.0));
-        let provider_checkbox = NSButton::new(mtm);
-        provider_checkbox.setButtonType(NSButtonType::Switch);
-        provider_checkbox.setTitle(&NSString::from_str(
-            "OpenRouter を使う（オフ = Anthropic 直）",
-        ));
-        provider_checkbox.setFrame(row(400.0, 20.0));
-        let key_label = make_label(mtm, "API キー（平文表示・保存後クリア）:", row(374.0, 16.0));
-        let key_field = editable_field(mtm, row(348.0, 24.0));
+        // プロバイダ選択ドロップダウン (0=Anthropic / 1=OpenRouter)。
+        // チェックボックスより「それぞれに鍵を持てる」ことが直感的 (ユーザー要望 2026-10)。
+        let provider_label = make_label(mtm, "プロバイダ:", row(404.0, 16.0));
+        let provider_popup = {
+            let p = NSPopUpButton::initWithFrame_pullsDown(
+                NSPopUpButton::alloc(mtm),
+                NSRect::new(NSPoint::new(PAD + 90.0, 400.0), NSSize::new(280.0, 26.0)),
+                false,
+            );
+            p.addItemWithTitle(&NSString::from_str("Anthropic（claude 直）"));
+            p.addItemWithTitle(&NSString::from_str("OpenRouter"));
+            unsafe {
+                p.setTarget(Some(save_target));
+                p.setAction(Some(sel!(nukoProviderChanged:)));
+            }
+            p
+        };
+        let key_label = make_label(mtm, "API キー（平文入力・保存後クリア）:", row(374.0, 16.0));
+        let key_field = editable_field(mtm, row(350.0, 24.0));
+        // 選択プロバイダに保存済みのキーを伏せ字で常時表示 (保存後も残るので「空に見える」を解消)。
+        let current_key_label = make_label(mtm, "現在のキー: —", row(324.0, 16.0));
         let model_label = make_label(
             mtm,
-            "モデル (Anthropic: claude-sonnet-5-5 / OpenRouter: anthropic/claude-...):",
-            row(320.0, 16.0),
+            "モデル（「モデル取得」で最新一覧を取得。入力して絞り込み可）:",
+            row(300.0, 16.0),
         );
-        let model_field = editable_field(mtm, row(294.0, 24.0));
+        // モデルは実 API から取得した一覧 + 自由入力の NSComboBox (ID 推測を避ける)。
+        let model_combo = NSComboBox::new(mtm);
+        model_combo.setFrame(NSRect::new(
+            NSPoint::new(PAD, 276.0),
+            NSSize::new(FIELD_W - 140.0, 26.0),
+        ));
+        model_combo.setUsesSingleLineMode(true);
+        model_combo.setCompletes(true); // 入力途中で候補補完
+        let fetch_models = NSButton::new(mtm);
+        fetch_models.setTitle(&NSString::from_str("モデル取得"));
+        fetch_models.setFrame(NSRect::new(
+            NSPoint::new(PAD + FIELD_W - 130.0, 275.0),
+            NSSize::new(130.0, 28.0),
+        ));
+        unsafe {
+            fetch_models.setTarget(Some(save_target));
+            fetch_models.setAction(Some(sel!(nukoFetchModels:)));
+        }
         let byok_save = NSButton::new(mtm);
         byok_save.setTitle(&NSString::from_str("BYOK を保存"));
         byok_save.setFrame(NSRect::new(
-            NSPoint::new(PAD, 258.0),
+            NSPoint::new(PAD, 244.0),
             NSSize::new(150.0, 30.0),
         ));
         unsafe {
@@ -185,16 +246,28 @@ impl SettingsWindow {
             NSSize::new(100.0, 30.0),
         ));
         unsafe {
-            close.setTarget(Some(save_target));
-            close.setAction(Some(sel!(nukoCloseSettings:)));
+            // window 自身の performClose: を呼ぶ = target 破棄やアクティブ状態に依存しない
+            // 確実な閉じ (custom action target が効かなくなる問題の回避 2026-10)。
+            let win_any: &AnyObject = &window;
+            close.setTarget(Some(win_any));
+            close.setAction(Some(sel!(performClose:)));
         }
 
-        let status = make_label(mtm, "", row(48.0, 18.0));
+        // ステータスは長文 (不一致警告など) が入るので 2 行まで折り返して全文見せる
+        // (単一行だと右端で見切れると報告 2026-10)。
+        let status = make_label(
+            mtm,
+            "",
+            NSRect::new(NSPoint::new(PAD, 30.0), NSSize::new(FIELD_W, 40.0)),
+        );
+        status.setUsesSingleLineMode(false);
 
         for v in [
             &*hint,
             &*byok_h,
+            &*provider_label,
             &*key_label,
+            &*current_key_label,
             &*model_label,
             &*dict_h,
             &*reading_label,
@@ -203,9 +276,10 @@ impl SettingsWindow {
         ] {
             content.addSubview(v);
         }
-        content.addSubview(&provider_checkbox);
+        content.addSubview(&provider_popup);
         content.addSubview(&key_field);
-        content.addSubview(&model_field);
+        content.addSubview(&model_combo);
+        content.addSubview(&fetch_models);
         content.addSubview(&reading_field);
         content.addSubview(&surface_field);
         content.addSubview(&byok_save);
@@ -215,9 +289,10 @@ impl SettingsWindow {
 
         Self {
             window,
-            provider_checkbox,
+            provider_popup,
             key_field,
-            model_field,
+            current_key_label,
+            model_combo,
             reading_field,
             surface_field,
             status,
@@ -259,7 +334,7 @@ impl SettingsWindow {
 
     /// 前面に出してキーボードフォーカスを取る (policy を Regular に切替)。
     pub fn show(&self, mtm: MainThreadMarker, model_prefill: &str) {
-        self.model_field
+        self.model_combo
             .setStringValue(&NSString::from_str(model_prefill));
         self.status.setStringValue(&NSString::from_str(""));
         self.window.center();
@@ -284,13 +359,19 @@ impl SettingsWindow {
         }
     }
 
-    /// 選択中プロバイダ ("anthropic" / "openrouter")。
+    /// 選択中プロバイダ ("anthropic" / "openrouter")。ドロップダウンの index で判定。
     pub fn selected_provider(&self) -> &'static str {
-        if self.provider_checkbox.state() == NSControlStateValueOn {
+        if self.provider_popup.indexOfSelectedItem() == 1 {
             "openrouter"
         } else {
             "anthropic"
         }
+    }
+
+    /// 「現在のキー」行を更新する (選択プロバイダの保存済みキーを伏せ字で表示)。
+    pub fn set_current_key(&self, s: &str) {
+        self.current_key_label
+            .setStringValue(&NSString::from_str(s));
     }
 
     /// キー欄の現在値。
@@ -298,9 +379,19 @@ impl SettingsWindow {
         self.key_field.stringValue().to_string()
     }
 
-    /// モデル欄の現在値。
+    /// モデル欄の現在値 (コンボボックスで選択または入力された文字列)。
     pub fn model_value(&self) -> String {
-        self.model_field.stringValue().to_string()
+        self.model_combo.stringValue().to_string()
+    }
+
+    /// モデル一覧をコンボボックスに流し込む (実 API から取得した id 群)。
+    pub fn set_model_items(&self, items: &[String]) {
+        self.model_combo.removeAllItems();
+        for it in items {
+            let s = NSString::from_str(it);
+            let obj: &AnyObject = s.as_ref();
+            unsafe { self.model_combo.addItemWithObjectValue(obj) };
+        }
     }
 
     /// 読み欄の現在値。
