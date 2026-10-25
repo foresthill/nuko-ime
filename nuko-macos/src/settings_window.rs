@@ -15,9 +15,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSButtonType,
-    NSControlStateValueOn, NSMenu, NSMenuItem, NSTextField, NSView, NSWindow, NSWindowDelegate,
-    NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSMenu, NSMenuItem,
+    NSPopUpButton, NSTextField, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
@@ -58,6 +57,11 @@ define_class!(
         fn add_dict(&self, _s: Option<&AnyObject>) {
             crate::state::add_dict_entry_from_window();
         }
+        /// プロバイダ選択が変わったら「現在のキー」表示をそのプロバイダのものに更新。
+        #[unsafe(method(nukoProviderChanged:))]
+        fn provider_changed(&self, _s: Option<&AnyObject>) {
+            crate::state::refresh_key_display();
+        }
         /// 「閉じる」(窓を隠して activation policy を戻す)。
         #[unsafe(method(nukoCloseSettings:))]
         fn close_action(&self, _s: Option<&AnyObject>) {
@@ -84,10 +88,13 @@ const FIELD_W: f64 = W - PAD * 2.0;
 /// ぬこIME 設定ウィンドウ (アプリ全体で 1 つ、[`crate::state`] が保持)。
 pub struct SettingsWindow {
     window: Retained<NSWindow>,
-    provider_checkbox: Retained<NSButton>,
+    /// プロバイダ選択 (ドロップダウン)。0=Anthropic / 1=OpenRouter。
+    provider_popup: Retained<NSPopUpButton>,
     // NSSecureTextField だと secure input mode が IME プロセスで効かず入力不能になる
     // (2026-10 実機)。平文の NSTextField にして確実に打てるようにする (保存後にクリア)。
     key_field: Retained<NSTextField>,
+    /// 選択プロバイダに保存済みのキーを伏せ字で示す読み取り専用ラベル。
+    current_key_label: Retained<NSTextField>,
     model_field: Retained<NSTextField>,
     reading_field: Retained<NSTextField>,
     surface_field: Retained<NSTextField>,
@@ -154,24 +161,37 @@ impl SettingsWindow {
 
         // ── BYOK セクション ──
         let byok_h = make_label(mtm, "【 BYOK（AI学習の鍵）】", row(426.0, 18.0));
-        let provider_checkbox = NSButton::new(mtm);
-        provider_checkbox.setButtonType(NSButtonType::Switch);
-        provider_checkbox.setTitle(&NSString::from_str(
-            "OpenRouter を使う（オフ = Anthropic 直）",
-        ));
-        provider_checkbox.setFrame(row(400.0, 20.0));
-        let key_label = make_label(mtm, "API キー（平文表示・保存後クリア）:", row(374.0, 16.0));
-        let key_field = editable_field(mtm, row(348.0, 24.0));
+        // プロバイダ選択ドロップダウン (0=Anthropic / 1=OpenRouter)。
+        // チェックボックスより「それぞれに鍵を持てる」ことが直感的 (ユーザー要望 2026-10)。
+        let provider_label = make_label(mtm, "プロバイダ:", row(404.0, 16.0));
+        let provider_popup = {
+            let p = NSPopUpButton::initWithFrame_pullsDown(
+                NSPopUpButton::alloc(mtm),
+                NSRect::new(NSPoint::new(PAD + 90.0, 400.0), NSSize::new(280.0, 26.0)),
+                false,
+            );
+            p.addItemWithTitle(&NSString::from_str("Anthropic（claude 直）"));
+            p.addItemWithTitle(&NSString::from_str("OpenRouter"));
+            unsafe {
+                p.setTarget(Some(save_target));
+                p.setAction(Some(sel!(nukoProviderChanged:)));
+            }
+            p
+        };
+        let key_label = make_label(mtm, "API キー（平文入力・保存後クリア）:", row(374.0, 16.0));
+        let key_field = editable_field(mtm, row(350.0, 24.0));
+        // 選択プロバイダに保存済みのキーを伏せ字で常時表示 (保存後も残るので「空に見える」を解消)。
+        let current_key_label = make_label(mtm, "現在のキー: —", row(324.0, 16.0));
         let model_label = make_label(
             mtm,
             "モデル (Anthropic: claude-sonnet-5-5 / OpenRouter: anthropic/claude-...):",
-            row(320.0, 16.0),
+            row(300.0, 16.0),
         );
-        let model_field = editable_field(mtm, row(294.0, 24.0));
+        let model_field = editable_field(mtm, row(276.0, 24.0));
         let byok_save = NSButton::new(mtm);
         byok_save.setTitle(&NSString::from_str("BYOK を保存"));
         byok_save.setFrame(NSRect::new(
-            NSPoint::new(PAD, 258.0),
+            NSPoint::new(PAD, 244.0),
             NSSize::new(150.0, 30.0),
         ));
         unsafe {
@@ -215,7 +235,9 @@ impl SettingsWindow {
         for v in [
             &*hint,
             &*byok_h,
+            &*provider_label,
             &*key_label,
+            &*current_key_label,
             &*model_label,
             &*dict_h,
             &*reading_label,
@@ -224,7 +246,7 @@ impl SettingsWindow {
         ] {
             content.addSubview(v);
         }
-        content.addSubview(&provider_checkbox);
+        content.addSubview(&provider_popup);
         content.addSubview(&key_field);
         content.addSubview(&model_field);
         content.addSubview(&reading_field);
@@ -236,8 +258,9 @@ impl SettingsWindow {
 
         Self {
             window,
-            provider_checkbox,
+            provider_popup,
             key_field,
+            current_key_label,
             model_field,
             reading_field,
             surface_field,
@@ -305,13 +328,19 @@ impl SettingsWindow {
         }
     }
 
-    /// 選択中プロバイダ ("anthropic" / "openrouter")。
+    /// 選択中プロバイダ ("anthropic" / "openrouter")。ドロップダウンの index で判定。
     pub fn selected_provider(&self) -> &'static str {
-        if self.provider_checkbox.state() == NSControlStateValueOn {
+        if self.provider_popup.indexOfSelectedItem() == 1 {
             "openrouter"
         } else {
             "anthropic"
         }
+    }
+
+    /// 「現在のキー」行を更新する (選択プロバイダの保存済みキーを伏せ字で表示)。
+    pub fn set_current_key(&self, s: &str) {
+        self.current_key_label
+            .setStringValue(&NSString::from_str(s));
     }
 
     /// キー欄の現在値。

@@ -409,13 +409,15 @@ fn resolve_key(env_var: &str, provider: &str) -> Option<String> {
     nuko_platform::secret::get_api_key(provider).ok().flatten()
 }
 
-/// キーを伏せ字にする (先頭4 + 末尾4 のみ表示)。
+/// キーを伏せ字にする (先頭8 + 末尾4 のみ表示)。
+///
+/// 先頭 8 文字で `sk-ant-a` / `sk-or-v1` の違いが読め、どのプロバイダの鍵か判別しやすい。
 fn mask_key(k: &str) -> String {
     let n = k.chars().count();
-    if n <= 8 {
+    if n <= 12 {
         return "*".repeat(n);
     }
-    let head: String = k.chars().take(4).collect();
+    let head: String = k.chars().take(8).collect();
     let tail: String = k.chars().skip(n - 4).collect();
     format!("{head}…{tail} ({n}文字)")
 }

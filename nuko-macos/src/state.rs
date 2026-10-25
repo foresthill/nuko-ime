@@ -639,8 +639,11 @@ pub fn show_settings(mtm: MainThreadMarker) {
         let model = current_ai_model().unwrap_or_else(|| "claude-sonnet-5-5".to_string());
         if let Some(win) = w.as_ref() {
             win.show(mtm, &model);
-            // 開いた時点の保存済み状態を表示（どちらのプロバイダに鍵があるか一目で分かる）。
-            win.set_status(&format!("現在の保存状態 {}", stored_key_status()));
+            // 開いた時点の保存済み状態を表示（borrow_mut 保持中なので win を直接使い、
+            // refresh_key_display() の再 borrow を避ける）。
+            let provider = win.selected_provider();
+            win.set_current_key(&current_key_line(provider));
+            win.set_status(&format!("保存状態 {}", stored_key_status()));
         }
     });
 }
@@ -664,6 +667,16 @@ pub fn save_settings() {
 
         // キーが入力されていれば Keychain へ (同梱 nuko config set-key を stdin 経由)。
         if !key.is_empty() {
+            // 鍵の接頭辞から判る形式が、選択プロバイダと食い違う場合は保存せず警告する
+            // (openrouter 鍵を anthropic に入れると dreaming 実行時に失敗するため)。
+            if let Some(d) = detect_provider(&key) {
+                if d != provider {
+                    win.set_status(&format!(
+                        "⚠️ 保存しません: 選択は「{provider}」ですが鍵は「{d}」形式です。プロバイダを {d} に切替えるか、鍵を見直してください"
+                    ));
+                    return;
+                }
+            }
             if let Err(e) = save_key_via_cli(provider, &key) {
                 win.set_status(&format!("⚠️ キー保存失敗: {e}"));
                 return;
@@ -677,21 +690,32 @@ pub fn save_settings() {
             return;
         }
 
-        // 「保存できたこと」を分かりやすく: どのプロバイダに・どんな鍵が入ったかを
-        // 伏せ字で示す。鍵の先頭から provider を自動判定し、選択と食い違えば警告する。
-        let status = if key.is_empty() {
-            // 鍵は変更せず model/provider だけ更新したケース。保存済み状態を併記。
-            format!("✅ 設定を保存（{provider}）　{}", stored_key_status())
+        // 「保存できたこと」を分かりやすく: ステータスに結果、「現在のキー」行に
+        // 保存済みキーの伏せ字を残す (保存後に入力欄をクリアしても空に見えない)。
+        if key.is_empty() {
+            win.set_status(&format!("✅ 設定を保存しました（{provider}）"));
         } else {
-            let masked = mask_key_rich(&key);
-            let mark = match detect_provider(&key) {
-                Some(d) if d == provider => "（形式一致 ✓）".to_string(),
-                Some(d) => format!("（⚠️ 鍵は {d} 形式に見えます）"),
-                None => String::new(),
-            };
-            format!("✅ {provider} に保存 ← {masked}{mark}")
-        };
-        win.set_status(&status);
+            win.set_status(&format!("✅ {provider} に保存しました ← {}", mask_key_rich(&key)));
+        }
+        win.set_current_key(&current_key_line(provider));
+    });
+}
+
+/// 「現在のキー」行の文字列を作る (選択プロバイダの保存済みキーを伏せ字で、無ければ未登録)。
+fn current_key_line(provider: &str) -> String {
+    match query_key_masked(provider) {
+        Some(m) => format!("現在のキー（{provider}）: {m}"),
+        None => format!("現在のキー（{provider}）: 未登録"),
+    }
+}
+
+/// プロバイダ選択が変わった時に「現在のキー」行を更新する (ドロップダウンの action)。
+pub fn refresh_key_display() {
+    SETTINGS_WINDOW.with(|cell| {
+        if let Some(win) = cell.borrow().as_ref() {
+            let p = win.selected_provider();
+            win.set_current_key(&current_key_line(p));
+        }
     });
 }
 
@@ -728,6 +752,27 @@ fn stored_key_status() -> String {
     let a = query_key_state("anthropic");
     let o = query_key_state("openrouter");
     format!("［anthropic: {a}／openrouter: {o}］")
+}
+
+/// `nuko config show-key <provider>` の伏せ字キーを取り出す（未登録なら `None`）。
+///
+/// CLI 出力 `🔑 anthropic: 保存済み (sk-o…xxxx (29文字))` から
+/// `sk-o…xxxx (29文字)` を抜き出す。パイプ出力なので色コードは付かない。
+fn query_key_masked(provider: &str) -> Option<String> {
+    let nuko = resolve_nuko_binary()?;
+    let out = std::process::Command::new(&nuko)
+        .args(["config", "show-key", provider])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let idx = s.find("保存済み")?;
+    let rest = s[idx + "保存済み".len()..].trim();
+    let rest = rest.strip_prefix('(').unwrap_or(rest);
+    let rest = rest.strip_suffix(')').unwrap_or(rest);
+    Some(rest.trim().to_string())
 }
 
 /// `nuko config show-key <provider>` を叩いて「保存済み」か「未登録」かを返す。
