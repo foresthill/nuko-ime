@@ -709,13 +709,111 @@ fn current_key_line(provider: &str) -> String {
     }
 }
 
+/// メニュー「🔄 アップデートを確認…」: `nuko update` でチェックし、結果をダイアログで表示。
+///
+/// 更新があれば「今すぐ更新」でダウンロード→置換→再起動（反映には入力ソース切替が要る）。
+pub fn check_update_from_menu(mtm: MainThreadMarker) {
+    use objc2_app_kit::{NSAlert, NSApplication, NSApplicationActivationPolicy};
+    use objc2_foundation::NSString;
+
+    // NSAlertFirstButtonReturn = 1000, Second = 1001, Third = 1002。
+    const FIRST: isize = 1000;
+    const SECOND: isize = 1001;
+
+    let (stdout, code) = run_update_check();
+
+    // IME は background agent なので、ダイアログ表示中だけ通常アプリ化して前面に出す。
+    let app = NSApplication::sharedApplication(mtm);
+    let prev = app.activationPolicy();
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    #[allow(deprecated)]
+    app.activateIgnoringOtherApps(true);
+
+    let alert = NSAlert::new(mtm);
+    match code {
+        Some(10) => {
+            alert.setMessageText(&NSString::from_str("アップデートがあります"));
+            alert.setInformativeText(&NSString::from_str(&format!(
+                "{stdout}\n\n「今すぐ更新」でダウンロードして置換・再起動します。\n\
+                 反映には更新後に【入力ソースを一度切替えて戻す】か再ログインが必要です。"
+            )));
+            let _ = alert.addButtonWithTitle(&NSString::from_str("今すぐ更新"));
+            let _ = alert.addButtonWithTitle(&NSString::from_str("リリースページ"));
+            let _ = alert.addButtonWithTitle(&NSString::from_str("キャンセル"));
+            let resp = alert.runModal();
+            if resp == FIRST {
+                run_update_apply();
+            } else if resp == SECOND {
+                if let Some(url) = extract_release_url(&stdout) {
+                    let _ = std::process::Command::new("/usr/bin/open")
+                        .arg(url)
+                        .status();
+                }
+            }
+        }
+        Some(0) => {
+            alert.setMessageText(&NSString::from_str("最新です"));
+            alert.setInformativeText(&NSString::from_str(&stdout));
+            let _ = alert.addButtonWithTitle(&NSString::from_str("OK"));
+            let _ = alert.runModal();
+        }
+        _ => {
+            alert.setMessageText(&NSString::from_str("アップデート確認に失敗しました"));
+            alert.setInformativeText(&NSString::from_str(&stdout));
+            let _ = alert.addButtonWithTitle(&NSString::from_str("OK"));
+            let _ = alert.runModal();
+        }
+    }
+    app.setActivationPolicy(prev);
+}
+
+/// `nuko update` (チェックのみ) を実行して (stdout, 終了コード) を返す。
+fn run_update_check() -> (String, Option<i32>) {
+    let Some(nuko) = resolve_nuko_binary() else {
+        return ("nuko CLI が見つかりません".to_string(), None);
+    };
+    match std::process::Command::new(&nuko).arg("update").output() {
+        Ok(out) => {
+            let mut s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let err = String::from_utf8_lossy(&out.stderr);
+            if !err.trim().is_empty() {
+                if !s.is_empty() {
+                    s.push('\n');
+                }
+                s.push_str(err.trim());
+            }
+            (s, out.status.code())
+        }
+        Err(e) => (format!("nuko 実行失敗: {e}"), None),
+    }
+}
+
+/// `nuko update --apply` を実行 (DL→置換ヘルパー起動)。数秒後に NukoIME が再起動する。
+fn run_update_apply() {
+    if let Some(nuko) = resolve_nuko_binary() {
+        let _ = std::process::Command::new(&nuko)
+            .args(["update", "--apply"])
+            .status();
+    }
+}
+
+/// `nuko update` の stdout から「リリース: <url>」の URL を取り出す。
+fn extract_release_url(s: &str) -> Option<String> {
+    s.lines()
+        .find_map(|l| l.strip_prefix("リリース: ").map(|u| u.trim().to_string()))
+}
+
 /// 「モデル取得」: 実 API からモデル一覧を取ってコンボボックスに流し込む。
 ///
 /// 取得は同梱 `nuko models <provider>`（ネットワークは CLI 側）。設定窓が前面なので
 /// ブロッキングでも他アプリの入力は阻害しない。
 pub fn fetch_models() {
     // provider だけ先に取り出して borrow を解放してから取得（ネットワーク中は borrow を持たない）。
-    let provider = SETTINGS_WINDOW.with(|cell| cell.borrow().as_ref().map(SettingsWindow::selected_provider));
+    let provider = SETTINGS_WINDOW.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(SettingsWindow::selected_provider)
+    });
     let Some(provider) = provider else {
         return;
     };
@@ -730,7 +828,7 @@ pub fn fetch_models() {
                 let n = ids.len();
                 win.set_model_items(&ids);
                 win.set_status(&format!(
-                    "✅ {provider} のモデル {n} 件を取得（欄に入力すると絞り込めます）"
+                    "✅ {provider} のモデル {n} 件（上位＝おすすめ Claude系。欄に入力して絞り込み可）"
                 ));
             }
             Ok(_) => win.set_status(&format!("⚠️ {provider} のモデルが0件でした")),

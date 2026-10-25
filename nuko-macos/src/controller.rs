@@ -369,6 +369,14 @@ define_class!(
             self._about_impl();
         }
 
+        /// メニュー項目「🔄 アップデートを確認…」のアクション。
+        #[unsafe(method(nukoCheckUpdate:))]
+        fn nuko_check_update(&self, _sender: Option<&AnyObject>) {
+            if let Some(mtm) = MainThreadMarker::new() {
+                crate::state::check_update_from_menu(mtm);
+            }
+        }
+
         /// メニュー項目「旧字体モード」のアクション (ON/OFF トグル)。
         #[unsafe(method(nukoToggleKyujitai:))]
         fn nuko_toggle_kyujitai(&self, _sender: Option<&AnyObject>) {
@@ -479,6 +487,12 @@ impl NukoInputController {
         // ── ④ 情報セクション ──
         unsafe {
             menu.addItem(&NSMenuItem::separatorItem(mtm));
+            let update_item = NSString::from_str("🔄 アップデートを確認…");
+            let _ = menu.addItemWithTitle_action_keyEquivalent(
+                &update_item,
+                Some(sel!(nukoCheckUpdate:)),
+                &empty,
+            );
             let about = NSString::from_str("ぬこIME について…");
             let _ =
                 menu.addItemWithTitle_action_keyEquivalent(&about, Some(sel!(nukoAbout:)), &empty);
