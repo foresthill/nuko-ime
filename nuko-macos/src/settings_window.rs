@@ -15,8 +15,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSMenu, NSMenuItem,
-    NSPopUpButton, NSTextField, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSComboBox, NSMenu,
+    NSMenuItem, NSPopUpButton, NSTextField, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
@@ -62,6 +62,11 @@ define_class!(
         fn provider_changed(&self, _s: Option<&AnyObject>) {
             crate::state::refresh_key_display();
         }
+        /// 「モデル取得」。実 API からモデル一覧を取ってコンボボックスに流し込む。
+        #[unsafe(method(nukoFetchModels:))]
+        fn fetch_models(&self, _s: Option<&AnyObject>) {
+            crate::state::fetch_models();
+        }
         /// 「閉じる」(窓を隠して activation policy を戻す)。
         #[unsafe(method(nukoCloseSettings:))]
         fn close_action(&self, _s: Option<&AnyObject>) {
@@ -95,7 +100,8 @@ pub struct SettingsWindow {
     key_field: Retained<NSTextField>,
     /// 選択プロバイダに保存済みのキーを伏せ字で示す読み取り専用ラベル。
     current_key_label: Retained<NSTextField>,
-    model_field: Retained<NSTextField>,
+    /// モデル選択 (実 API から取得した一覧 + 自由入力可の NSComboBox)。
+    model_combo: Retained<NSComboBox>,
     reading_field: Retained<NSTextField>,
     surface_field: Retained<NSTextField>,
     status: Retained<NSTextField>,
@@ -184,10 +190,27 @@ impl SettingsWindow {
         let current_key_label = make_label(mtm, "現在のキー: —", row(324.0, 16.0));
         let model_label = make_label(
             mtm,
-            "モデル (Anthropic: claude-sonnet-5-5 / OpenRouter: anthropic/claude-...):",
+            "モデル（「モデル取得」で最新一覧を取得。入力して絞り込み可）:",
             row(300.0, 16.0),
         );
-        let model_field = editable_field(mtm, row(276.0, 24.0));
+        // モデルは実 API から取得した一覧 + 自由入力の NSComboBox (ID 推測を避ける)。
+        let model_combo = NSComboBox::new(mtm);
+        model_combo.setFrame(NSRect::new(
+            NSPoint::new(PAD, 276.0),
+            NSSize::new(FIELD_W - 140.0, 26.0),
+        ));
+        model_combo.setUsesSingleLineMode(true);
+        model_combo.setCompletes(true); // 入力途中で候補補完
+        let fetch_models = NSButton::new(mtm);
+        fetch_models.setTitle(&NSString::from_str("モデル取得"));
+        fetch_models.setFrame(NSRect::new(
+            NSPoint::new(PAD + FIELD_W - 130.0, 275.0),
+            NSSize::new(130.0, 28.0),
+        ));
+        unsafe {
+            fetch_models.setTarget(Some(save_target));
+            fetch_models.setAction(Some(sel!(nukoFetchModels:)));
+        }
         let byok_save = NSButton::new(mtm);
         byok_save.setTitle(&NSString::from_str("BYOK を保存"));
         byok_save.setFrame(NSRect::new(
@@ -251,7 +274,8 @@ impl SettingsWindow {
         }
         content.addSubview(&provider_popup);
         content.addSubview(&key_field);
-        content.addSubview(&model_field);
+        content.addSubview(&model_combo);
+        content.addSubview(&fetch_models);
         content.addSubview(&reading_field);
         content.addSubview(&surface_field);
         content.addSubview(&byok_save);
@@ -264,7 +288,7 @@ impl SettingsWindow {
             provider_popup,
             key_field,
             current_key_label,
-            model_field,
+            model_combo,
             reading_field,
             surface_field,
             status,
@@ -306,7 +330,7 @@ impl SettingsWindow {
 
     /// 前面に出してキーボードフォーカスを取る (policy を Regular に切替)。
     pub fn show(&self, mtm: MainThreadMarker, model_prefill: &str) {
-        self.model_field
+        self.model_combo
             .setStringValue(&NSString::from_str(model_prefill));
         self.status.setStringValue(&NSString::from_str(""));
         self.window.center();
@@ -351,9 +375,19 @@ impl SettingsWindow {
         self.key_field.stringValue().to_string()
     }
 
-    /// モデル欄の現在値。
+    /// モデル欄の現在値 (コンボボックスで選択または入力された文字列)。
     pub fn model_value(&self) -> String {
-        self.model_field.stringValue().to_string()
+        self.model_combo.stringValue().to_string()
+    }
+
+    /// モデル一覧をコンボボックスに流し込む (実 API から取得した id 群)。
+    pub fn set_model_items(&self, items: &[String]) {
+        self.model_combo.removeAllItems();
+        for it in items {
+            let s = NSString::from_str(it);
+            let obj: &AnyObject = s.as_ref();
+            unsafe { self.model_combo.addItemWithObjectValue(obj) };
+        }
     }
 
     /// 読み欄の現在値。

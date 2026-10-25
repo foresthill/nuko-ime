@@ -1,6 +1,7 @@
 //! ぬこIME CLI
 
 mod anthropic;
+mod models;
 mod openrouter;
 
 use anyhow::Result;
@@ -86,6 +87,11 @@ enum Commands {
     Dict {
         #[command(subcommand)]
         action: DictAction,
+    },
+    /// プロバイダのモデル一覧を実 API から取得して表示する (設定画面のモデル選択用)。
+    Models {
+        /// プロバイダ ("anthropic" / "openrouter")
+        provider: String,
     },
     /// AI 呼び出しログ (BYOK dreaming の送信/応答/トークン/コスト) を表示する
     AiLog {
@@ -190,6 +196,7 @@ fn main() -> Result<()> {
             apply,
         } => cmd_dream(max_readings, provider.as_deref(), model.as_deref(), apply),
         Commands::Config { action } => cmd_config(action),
+        Commands::Models { provider } => cmd_models(&provider),
         Commands::Dict { action } => cmd_dict(action),
         Commands::AiLog { count, full } => cmd_ai_log(count, full),
     }
@@ -519,6 +526,32 @@ fn cmd_dict(action: DictAction) -> Result<()> {
 }
 
 /// `nuko config …`: BYOK の API キーを Keychain に保存/確認/削除する。
+/// `nuko models <provider>`: 実 API からモデル一覧を取得し id を 1 行ずつ出力する。
+fn cmd_models(provider: &str) -> Result<()> {
+    let provider = normalize_provider(provider)?;
+    let ids = match provider.as_str() {
+        "openrouter" => {
+            // base_url は ai.toml があればそれ、無ければ既定。公開 API なのでキー不要。
+            let base = nuko_data_dir()
+                .ok()
+                .map(|d| crate::openrouter::DreamConfig::load(d.join("ai.toml")).unwrap_or_default())
+                .map_or_else(|| "https://openrouter.ai/api/v1".to_string(), |c| c.base_url);
+            models::fetch_openrouter(&base)?
+        }
+        "anthropic" => {
+            let key = resolve_key("ANTHROPIC_API_KEY", "anthropic").ok_or_else(|| {
+                anyhow::anyhow!("Anthropic のモデル取得にはキーが必要です (先に鍵を保存してください)")
+            })?;
+            models::fetch_anthropic(&key)?
+        }
+        _ => unreachable!("normalize_provider が検証済み"),
+    };
+    for id in ids {
+        println!("{id}");
+    }
+    Ok(())
+}
+
 fn cmd_config(action: ConfigAction) -> Result<()> {
     match action {
         ConfigAction::SetKey { provider } => {

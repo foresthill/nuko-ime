@@ -709,6 +709,53 @@ fn current_key_line(provider: &str) -> String {
     }
 }
 
+/// 「モデル取得」: 実 API からモデル一覧を取ってコンボボックスに流し込む。
+///
+/// 取得は同梱 `nuko models <provider>`（ネットワークは CLI 側）。設定窓が前面なので
+/// ブロッキングでも他アプリの入力は阻害しない。
+pub fn fetch_models() {
+    // provider だけ先に取り出して borrow を解放してから取得（ネットワーク中は borrow を持たない）。
+    let provider = SETTINGS_WINDOW.with(|cell| cell.borrow().as_ref().map(SettingsWindow::selected_provider));
+    let Some(provider) = provider else {
+        return;
+    };
+    let result = query_models(provider);
+    SETTINGS_WINDOW.with(|cell| {
+        let w = cell.borrow();
+        let Some(win) = w.as_ref() else {
+            return;
+        };
+        match result {
+            Ok(ids) if !ids.is_empty() => {
+                let n = ids.len();
+                win.set_model_items(&ids);
+                win.set_status(&format!(
+                    "✅ {provider} のモデル {n} 件を取得（欄に入力すると絞り込めます）"
+                ));
+            }
+            Ok(_) => win.set_status(&format!("⚠️ {provider} のモデルが0件でした")),
+            Err(e) => win.set_status(&format!("⚠️ モデル取得失敗: {e}")),
+        }
+    });
+}
+
+/// `nuko models <provider>` を叩いてモデル id のリストを得る。
+fn query_models(provider: &str) -> std::result::Result<Vec<String>, String> {
+    let nuko = resolve_nuko_binary().ok_or_else(|| "nuko CLI が見つかりません".to_string())?;
+    let out = std::process::Command::new(&nuko)
+        .args(["models", provider])
+        .output()
+        .map_err(|e| format!("nuko 実行失敗: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
 /// プロバイダ選択が変わった時に「現在のキー」行を更新する (ドロップダウンの action)。
 pub fn refresh_key_display() {
     SETTINGS_WINDOW.with(|cell| {
