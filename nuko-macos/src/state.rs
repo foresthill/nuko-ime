@@ -639,6 +639,8 @@ pub fn show_settings(mtm: MainThreadMarker) {
         let model = current_ai_model().unwrap_or_else(|| "claude-sonnet-5-5".to_string());
         if let Some(win) = w.as_ref() {
             win.show(mtm, &model);
+            // 開いた時点の保存済み状態を表示（どちらのプロバイダに鍵があるか一目で分かる）。
+            win.set_status(&format!("現在の保存状態 {}", stored_key_status()));
         }
     });
 }
@@ -675,10 +677,78 @@ pub fn save_settings() {
             return;
         }
 
-        win.set_status(&format!(
-            "✅ 保存しました（{provider}）。メニューの「🤖 AIで学習」が使えます"
-        ));
+        // 「保存できたこと」を分かりやすく: どのプロバイダに・どんな鍵が入ったかを
+        // 伏せ字で示す。鍵の先頭から provider を自動判定し、選択と食い違えば警告する。
+        let status = if key.is_empty() {
+            // 鍵は変更せず model/provider だけ更新したケース。保存済み状態を併記。
+            format!("✅ 設定を保存（{provider}）　{}", stored_key_status())
+        } else {
+            let masked = mask_key_rich(&key);
+            let mark = match detect_provider(&key) {
+                Some(d) if d == provider => "（形式一致 ✓）".to_string(),
+                Some(d) => format!("（⚠️ 鍵は {d} 形式に見えます）"),
+                None => String::new(),
+            };
+            format!("✅ {provider} に保存 ← {masked}{mark}")
+        };
+        win.set_status(&status);
     });
+}
+
+/// API キーを伏せ字にする（先頭 12 + … + 末尾 4 + 文字数）。
+///
+/// 先頭 12 文字で `sk-ant-api03` / `sk-or-v1-...` の違いが読めるので、
+/// どのプロバイダの鍵かを人が目視で判別できる。
+fn mask_key_rich(k: &str) -> String {
+    let n = k.chars().count();
+    if n <= 16 {
+        return format!("{} ({n}文字)", "•".repeat(n.min(12)));
+    }
+    let head: String = k.chars().take(12).collect();
+    let tail: String = k.chars().skip(n - 4).collect();
+    format!("{head}…{tail} ({n}文字)")
+}
+
+/// 鍵の接頭辞からプロバイダを推定する（Anthropic=`sk-ant-` / OpenRouter=`sk-or-`）。
+fn detect_provider(k: &str) -> Option<&'static str> {
+    if k.starts_with("sk-ant-") {
+        Some("anthropic")
+    } else if k.starts_with("sk-or-") {
+        Some("openrouter")
+    } else {
+        None
+    }
+}
+
+/// 両プロバイダの Keychain 保存状態を 1 行にまとめる（設定窓を開いた時に表示）。
+///
+/// 値は `nuko config show-key`（同梱 CLI）に問い合わせる。nuko-macos は
+/// nuko-platform（Keychain アクセス）に依存しないので、CLI 経由で確認する。
+fn stored_key_status() -> String {
+    let a = query_key_state("anthropic");
+    let o = query_key_state("openrouter");
+    format!("［anthropic: {a}／openrouter: {o}］")
+}
+
+/// `nuko config show-key <provider>` を叩いて「保存済み」か「未登録」かを返す。
+fn query_key_state(provider: &str) -> String {
+    let Some(nuko) = resolve_nuko_binary() else {
+        return "?".to_string();
+    };
+    match std::process::Command::new(&nuko)
+        .args(["config", "show-key", provider])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            let s = String::from_utf8_lossy(&out.stdout);
+            if s.contains("保存済み") {
+                "保存済み".to_string()
+            } else {
+                "未登録".to_string()
+            }
+        }
+        _ => "?".to_string(),
+    }
 }
 
 /// 設定ウィンドウを閉じる (activation policy を元に戻して IME を background へ)。
