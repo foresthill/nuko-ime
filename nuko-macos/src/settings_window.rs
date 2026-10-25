@@ -12,11 +12,12 @@
 use std::cell::Cell;
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
-use objc2::{define_class, msg_send, sel, AllocAnyThread, MainThreadMarker, MainThreadOnly};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
+use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSButtonType,
-    NSControlStateValueOn, NSMenu, NSMenuItem, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSControlStateValueOn, NSMenu, NSMenuItem, NSTextField, NSView, NSWindow, NSWindowDelegate,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
@@ -29,9 +30,22 @@ use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 define_class!(
     #[unsafe(super(NSObject))]
     #[name = "NukoSettingsTarget"]
+    #[thread_kind = MainThreadOnly]
     struct SettingsTarget;
 
     unsafe impl NSObjectProtocol for SettingsTarget {}
+
+    // 窓が閉じたら (✕ / 閉じる どちらでも) IME を background agent (.Accessory) に戻す
+    // = dock アイコンを消す。
+    unsafe impl NSWindowDelegate for SettingsTarget {
+        #[unsafe(method(windowWillClose:))]
+        fn window_will_close(&self, _n: Option<&AnyObject>) {
+            if let Some(mtm) = MainThreadMarker::new() {
+                NSApplication::sharedApplication(mtm)
+                    .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+            }
+        }
+    }
 
     impl SettingsTarget {
         /// 「BYOK を保存」。
@@ -55,8 +69,8 @@ define_class!(
 );
 
 impl SettingsTarget {
-    fn new() -> Retained<Self> {
-        unsafe { msg_send![Self::alloc(), init] }
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        unsafe { msg_send![Self::alloc(mtm), init] }
     }
 }
 
@@ -111,7 +125,7 @@ impl SettingsWindow {
     /// ウィンドウとフィールドを生成する (非表示)。ボタンの target は内部で生成する
     /// 安定オブジェクト ([`SettingsTarget`])。controller には依存しない。
     pub fn new(mtm: MainThreadMarker) -> Self {
-        let target = SettingsTarget::new();
+        let target = SettingsTarget::new(mtm);
         let save_target: &AnyObject = &target;
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(W, H));
         // Closable (赤ボタン) を付ける = 緊急の閉じ手段。通常は「閉じる」ボタンで policy も戻す。
@@ -128,6 +142,8 @@ impl SettingsWindow {
         };
         // 赤ボタンで閉じても window オブジェクトを破棄しない (singleton 保持のため)。
         unsafe { window.setReleasedWhenClosed(false) };
+        // 閉じたら policy を戻す delegate を設定 (✕ / 閉じる / performClose どれでも効く)。
+        window.setDelegate(Some(ProtocolObject::from_ref(&*target)));
         window.setTitle(&NSString::from_str("ぬこIME 設定"));
 
         let content: Retained<NSView> = NSView::initWithFrame(NSView::alloc(mtm), frame);
@@ -185,8 +201,11 @@ impl SettingsWindow {
             NSSize::new(100.0, 30.0),
         ));
         unsafe {
-            close.setTarget(Some(save_target));
-            close.setAction(Some(sel!(nukoCloseSettings:)));
+            // window 自身の performClose: を呼ぶ = target 破棄やアクティブ状態に依存しない
+            // 確実な閉じ (custom action target が効かなくなる問題の回避 2026-10)。
+            let win_any: &AnyObject = &window;
+            close.setTarget(Some(win_any));
+            close.setAction(Some(sel!(performClose:)));
         }
 
         let status = make_label(mtm, "", row(48.0, 18.0));
