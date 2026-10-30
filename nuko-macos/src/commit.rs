@@ -326,7 +326,11 @@ pub const ACTIVATION_GUARD_MS: u128 = 150;
 
 /// kana guard 閾値 (ms)。「かな」キー押下直後のこの時間内に来た Space は、
 /// かなキー由来の「漏れ」と判定して握り潰す (2026-06-10 報告)。
-pub const KANA_GUARD_MS: u128 = 300;
+///
+/// 300ms では遅いアプリや setValue:forTag: 到着の遅延で漏れが握り潰せず「たまに
+/// 半角スペースが入る」(2026-10 報告)。かなガードを idle 限定にした (下記 invariant 2)
+/// ことで「変換を食う」副作用が消えたため、窓を広げても安全になり 500ms に拡大。
+pub const KANA_GUARD_MS: u128 = 500;
 
 /// Space キーが日本語モードで押されたときに実行すべきアクション (テスト基盤 #5)。
 ///
@@ -360,8 +364,10 @@ pub enum SpaceAction {
 ///
 /// 1. **活性化ガードは「候補も未確定も無い」ときだけ発火** — 変換中や候補表示中の
 ///    Space を握り潰すと、変換・巡回ができなくなる (= 致命的)。
-/// 2. **かなガードは候補/未確定に関わらず発火** — かなキー漏れは状態を問わず
-///    握り潰す (既存挙動。PR 履歴の意図を保存)。
+/// 2. **かなガードも「候補も未確定も無い」ときだけ発火** — かなキー漏れは「かな切替
+///    直後・まだ何も打っていない (composition 空)」状況で起きる。候補/未確定がある
+///    ときに握り潰すと変換・巡回を食う (= 2026-10 に判明した潜在バグ)。idle 限定に
+///    することで、窓を広げても変換を食わなくなる。
 /// 3. **優先順は 活性化ガード → かなガード → 候補巡回 → 変換 → パススルー**。
 /// 4. **タイムスタンプ未設定 (`None`) ならそのガードはスキップ**。
 ///
@@ -379,9 +385,11 @@ pub fn decide_space_action(
             return SpaceAction::DiscardActivationGuard;
         }
     }
-    // 不変条件 2: かなガードは状態を問わず発火
+    // 不変条件 2: かなガードも idle (候補も未確定も無い) のときだけ発火。
+    // かなキー漏れは「切替直後・composition 空」で起きるので idle 限定で十分で、
+    // 変換中/候補中の Space を食わない (変換・巡回を守る)。
     if let Some(ms) = kana_elapsed_ms {
-        if ms < KANA_GUARD_MS {
+        if ms < KANA_GUARD_MS && !has_candidates && !is_composing {
             return SpaceAction::DiscardKanaGuard;
         }
     }
@@ -1203,23 +1211,26 @@ mod tests {
         );
     }
 
-    /// 不変条件 2: かなガードは候補/未確定に関わらず発火 (既存挙動の保存)
+    /// 不変条件 2: かなガードは idle (候補も未確定も無い) のときだけ発火。
+    /// 候補中/変換中の Space は食わない (= 変換・巡回を守る、2026-10 の潜在バグ修正)。
     #[test]
-    fn kana_guard_fires_regardless_of_state() {
+    fn kana_guard_fires_only_when_idle() {
+        // idle + かな直後 → 漏れとして握り潰す (報告の「かな後の半角スペース」対策)
         assert_eq!(
             decide_space_action(false, false, None, Some(0)),
             SpaceAction::DiscardKanaGuard,
         );
-        // 候補表示中でもかなガードが優先 (= かなキー漏れの握り潰し)
+        // 候補表示中は握り潰さず巡回 (★ かなガードを食わせない)
         assert_eq!(
             decide_space_action(true, false, None, Some(0)),
-            SpaceAction::DiscardKanaGuard,
-            "★ かなガードは候補表示中でも発火 (既存挙動)",
+            SpaceAction::CycleNextCandidate,
+            "★ 候補中はかなガードより巡回を優先 (変換操作を食わない)",
         );
-        // 変換中でもかなガードが優先
+        // 変換中は握り潰さず変換 (★ かな直後でも Space で変換できる)
         assert_eq!(
             decide_space_action(false, true, None, Some(KANA_GUARD_MS - 1)),
-            SpaceAction::DiscardKanaGuard,
+            SpaceAction::Convert,
+            "★ 未確定中はかなガードより変換を優先",
         );
     }
 
