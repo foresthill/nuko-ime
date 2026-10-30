@@ -95,6 +95,8 @@ pub struct SettingsWindow {
     window: Retained<NSWindow>,
     /// プロバイダ選択 (ドロップダウン)。0=Anthropic / 1=OpenRouter。
     provider_popup: Retained<NSPopUpButton>,
+    /// 最上部の「いま AI学習で使っている provider/model」行 (開くたびに ai.toml から更新)。
+    active_label: Retained<NSTextField>,
     // NSSecureTextField だと secure input mode が IME プロセスで効かず入力不能になる
     // (2026-10 実機)。平文の NSTextField にして確実に打てるようにする (保存後にクリア)。
     key_field: Retained<NSTextField>,
@@ -163,7 +165,9 @@ impl SettingsWindow {
 
         let content: Retained<NSView> = NSView::initWithFrame(NSView::alloc(mtm), frame);
 
-        let hint = make_label(mtm, "ぬこIME 設定 — BYOK と 単語登録", row(452.0, 18.0));
+        // 最上部: いま AI学習(dreaming)で使っている provider/model を示す行。
+        // 開くたびに ai.toml から [`SettingsWindow::set_active_line`] で更新する。
+        let active_label = make_label(mtm, "AI学習: —", row(452.0, 18.0));
 
         // ── BYOK セクション ──
         let byok_h = make_label(mtm, "【 BYOK（AI学習の鍵）】", row(426.0, 18.0));
@@ -263,7 +267,7 @@ impl SettingsWindow {
         status.setUsesSingleLineMode(false);
 
         for v in [
-            &*hint,
+            &*active_label,
             &*byok_h,
             &*provider_label,
             &*key_label,
@@ -290,6 +294,7 @@ impl SettingsWindow {
         Self {
             window,
             provider_popup,
+            active_label,
             key_field,
             current_key_label,
             model_combo,
@@ -366,6 +371,18 @@ impl SettingsWindow {
         } else {
             "anthropic"
         }
+    }
+
+    /// プロバイダのドロップダウンを指定プロバイダに合わせる (開いた時に ai.toml の値へ)。
+    /// "openrouter"=1、それ以外 (anthropic)=0。
+    pub fn set_provider(&self, provider: &str) {
+        let idx: isize = if provider == "openrouter" { 1 } else { 0 };
+        self.provider_popup.selectItemAtIndex(idx);
+    }
+
+    /// 最上部の「AI学習で使用中」行を更新する。
+    pub fn set_active_line(&self, s: &str) {
+        self.active_label.setStringValue(&NSString::from_str(s));
     }
 
     /// 「現在のキー」行を更新する (選択プロバイダの保存済みキーを伏せ字で表示)。
