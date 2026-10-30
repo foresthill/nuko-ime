@@ -10,12 +10,20 @@
 //!
 //! 詳細設計: [`docs/LEARNING_ARCHITECTURE.md`](../../../docs/LEARNING_ARCHITECTURE.md)。
 
+use std::collections::BTreeSet;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{NukoError, Result};
+
+/// 観察ログを縮める判断をする上限 (行数)。これを超えたら [`prune_for_cap`] で間引く。
+pub const OBS_CAP_HIGH_WATERMARK: usize = 20_000;
+
+/// 間引き後に残す「非 preference 読み」の commit の直近件数。
+/// correction と preference 読みの commit は別途全件残すので、ここは recency 用。
+pub const OBS_CAP_KEEP_RECENT_COMMITS: usize = 5_000;
 
 /// 現在時刻を unix エポック秒で返す(既存 controller の debug_log と同じ方式、依存追加なし)。
 fn now_unix() -> u64 {
@@ -245,6 +253,59 @@ impl ObservationLog {
     }
 }
 
+/// 観察ログを「学習を壊さずに」縮めるための候補イベント列を返す (純粋関数)。
+///
+/// 残すもの:
+/// - **`Correction` 全件** (明示訂正=高価値・件数も少ない)。
+/// - **`keep_readings` に含まれる読みの `Commit` 全件** (= 現在学習済みの選好の根拠。
+///   これを全部残せば、その読みの tally は不変 → 選好も不変)。
+/// - 上記以外 (非 preference 読み) の `Commit` のうち **直近 `keep_recent_commits` 件**。
+///
+/// 元の順序を保つ。呼び出し側は「この結果で再抽出した corrections が元と一致する時だけ
+/// 書き戻す」ことで、間引きが学習を一切変えないことを保証する
+/// ([`crate::learning::extract_corrections`] の冪等性 + `CorrectionStore: Eq`)。
+#[must_use]
+pub fn prune_for_cap(
+    events: &[ObservationEvent],
+    keep_readings: &BTreeSet<String>,
+    keep_recent_commits: usize,
+) -> Vec<ObservationEvent> {
+    // 非 preference 読みの commit の「直近 keep_recent_commits 件」を残すための閾値
+    // (イベント位置 index で判定)。preference 読みの commit は無条件で残すので対象外。
+    let nonpref_commit_positions: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| match e {
+            ObservationEvent::Commit { reading, .. } => !keep_readings.contains(reading),
+            ObservationEvent::Correction { .. } => false,
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let recent_cutoff = if keep_recent_commits == 0 {
+        // 直近0件 = recency では一切残さない (preference 読みと correction のみ残る)。
+        usize::MAX
+    } else if nonpref_commit_positions.len() > keep_recent_commits {
+        nonpref_commit_positions[nonpref_commit_positions.len() - keep_recent_commits]
+    } else {
+        // 非 preference commit が閾値以下なら全部 recency で残す。
+        0
+    };
+
+    events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| {
+            let keep = match e {
+                ObservationEvent::Correction { .. } => true,
+                ObservationEvent::Commit { reading, .. } => {
+                    keep_readings.contains(reading) || i >= recent_cutoff
+                }
+            };
+            keep.then(|| e.clone())
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +433,69 @@ mod tests {
         log.clear().unwrap();
         assert_eq!(log.count().unwrap(), 0);
         assert!(!path.exists());
+    }
+
+    /// prune は correction を全件・preference 読みの commit を全件残す。
+    #[test]
+    fn prune_keeps_corrections_and_preference_commits() {
+        let mut keep = BTreeSet::new();
+        keep.insert("きしゃ".to_string());
+        let events = vec![
+            ObservationEvent::commit("きしゃ", "記者"), // preference 読み → 残す
+            ObservationEvent::commit("。", "。"),       // 非pref 恒等 (古い) → 落ちうる
+            ObservationEvent::correction("いって", "言って", "行って"), // correction → 残す
+            ObservationEvent::commit("きしゃ", "記者"), // preference 読み → 残す
+        ];
+        // 直近0件だけ残す = 非pref commit は全部落とす。
+        let pruned = prune_for_cap(&events, &keep, 0);
+        assert!(
+            pruned
+                .iter()
+                .all(|e| e.reading() != "。" || matches!(e, ObservationEvent::Correction { .. })),
+            "非preferenceの恒等commitは落ちる",
+        );
+        assert_eq!(
+            pruned.iter().filter(|e| e.reading() == "きしゃ").count(),
+            2,
+            "★ preference読みのcommitは全件残る",
+        );
+        assert_eq!(
+            pruned
+                .iter()
+                .filter(|e| matches!(e, ObservationEvent::Correction { .. }))
+                .count(),
+            1,
+            "★ correctionは全件残る",
+        );
+    }
+
+    /// ★ 核心の安全性: prune 後に再抽出した corrections が元と完全一致する
+    /// (= 学習は一切変わらない)。呼び出し側はこの一致を実行時にも検証する。
+    #[test]
+    fn prune_preserves_extracted_corrections() {
+        use crate::learning::extract_corrections;
+        let mut events = Vec::new();
+        // 「きしゃ→記者」を 3 回 (preference 成立)。
+        for _ in 0..3 {
+            events.push(ObservationEvent::commit("きしゃ", "記者"));
+        }
+        // 大量の非preference 恒等ノイズ (句読点)。
+        for _ in 0..50 {
+            events.push(ObservationEvent::commit("。", "。"));
+        }
+        let full = extract_corrections(&events, 2);
+        assert_eq!(full.len(), 1, "きしゃ→記者 のみ学習");
+
+        // preference 読みを残し、非pref は直近5件だけ → 大幅に縮む。
+        let mut keep = BTreeSet::new();
+        keep.insert("きしゃ".to_string());
+        let pruned = prune_for_cap(&events, &keep, 5);
+        assert!(pruned.len() < events.len(), "縮んでいる");
+        assert_eq!(
+            extract_corrections(&pruned, 2),
+            full,
+            "★ prune しても抽出結果は不変 (学習を壊さない)",
+        );
     }
 
     /// JSONL は 1 行 1 イベントで人間可読(透明性)。
