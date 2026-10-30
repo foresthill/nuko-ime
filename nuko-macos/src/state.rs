@@ -1,5 +1,8 @@
 use nuko_core::conversion::{CandidateList, ConversionContext, SegmentedConversion};
-use nuko_core::learning::{extract_corrections, CorrectionStore, ObservationLog};
+use nuko_core::learning::{
+    extract_corrections, prune_for_cap, CorrectionStore, ObservationLog, OBS_CAP_HIGH_WATERMARK,
+    OBS_CAP_KEEP_RECENT_COMMITS,
+};
 use nuko_core::prelude::*;
 use objc2::MainThreadMarker;
 use std::cell::RefCell;
@@ -376,6 +379,26 @@ pub fn auto_relearn_after_commit() {
     };
     let store = extract_corrections(&events, MIN_SEEN);
     let _ = store.save(dir.join("corrections.toml"));
+
+    // 観察ログが肥大化したら「学習を壊さない範囲で」間引く (毎確定で全件読むコストと
+    // ディスク増加を抑える)。correction 全件 + 現在の選好読みの commit 全件 + 直近の
+    // 非選好 commit を残す。間引き後に再抽出した corrections が元と完全一致する時だけ
+    // 書き戻す = 学習は絶対に変わらない。縮みが小さい時は書き直さない (thrash 防止)。
+    if events.len() > OBS_CAP_HIGH_WATERMARK {
+        const MIN_SHRINK: usize = 2_000;
+        let keep_readings: std::collections::BTreeSet<String> = store
+            .preferences
+            .iter()
+            .map(|p| p.reading.clone())
+            .collect();
+        let pruned = prune_for_cap(&events, &keep_readings, OBS_CAP_KEEP_RECENT_COMMITS);
+        if pruned.len() + MIN_SHRINK <= events.len()
+            && extract_corrections(&pruned, MIN_SEEN) == store
+        {
+            let _ = log.rewrite(&pruned);
+        }
+    }
+
     with_engine_mut(|engine| engine.set_corrections(store));
 }
 
