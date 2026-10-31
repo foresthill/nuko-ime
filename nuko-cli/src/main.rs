@@ -351,28 +351,14 @@ fn cmd_learn(action: Option<LearnAction>) -> Result<()> {
 /// 特定の読みの学習を忘れる。観察ログから該当イベントを除去して書き直し、
 /// 訂正選好を再抽出する (= 再学習しても戻らない、durable な忘却)。
 fn learn_forget(dir: &Path, reading: &str, surface: Option<&str>) -> Result<()> {
-    use nuko_core::learning::ObservationEvent;
+    use nuko_core::learning::filter_out_reading;
 
     let obs = ObservationLog::new(true, dir.join("observations.jsonl"));
     let events = obs.read_all()?;
     let before = events.len();
 
-    // 読み一致 (surface 指定時はさらに表層/訂正後一致) を除去。
-    let kept: Vec<ObservationEvent> = events
-        .into_iter()
-        .filter(|ev| {
-            if ev.reading() != reading {
-                return true; // 別の読みは残す
-            }
-            match surface {
-                None => false, // 読み一致は全部忘れる
-                Some(s) => match ev {
-                    ObservationEvent::Commit { surface, .. } => surface != s,
-                    ObservationEvent::Correction { corrected, .. } => corrected != s,
-                },
-            }
-        })
-        .collect();
+    // 読み一致 (surface 指定時はさらに表層/訂正後一致) を除去 (GUI と共用の純粋関数)。
+    let kept = filter_out_reading(&events, reading, surface);
 
     let removed = before - kept.len();
     if removed == 0 {

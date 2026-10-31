@@ -15,5 +15,5 @@ pub use dreaming::{
     DreamProvider, MockProvider, ObservationDigest, ProposedPreference,
 };
 pub use manager::LearningManager;
-pub use observation::{ObservationEvent, ObservationLog};
+pub use observation::{filter_out_reading, ObservationEvent, ObservationLog};
 pub use segmentation::{ranges_from_segment_readings, SegmentationEntry, SegmentationStore};

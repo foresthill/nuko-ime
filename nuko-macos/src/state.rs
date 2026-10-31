@@ -983,6 +983,70 @@ pub fn add_dict_entry_from_window() {
     });
 }
 
+/// 設定ウィンドウの「この学習を忘れる」: 誤学習を観察ログから除去して即反映する。
+///
+/// 読み欄は必須、表層欄は任意 (空なら「その読みの学習を全部忘れる」/ 入れると
+/// 「その読み→その表層」だけ忘れる)。観察ログを書き直し → 訂正選好を再抽出して保存 →
+/// 稼働エンジンへ再読込するので、CLI `learn forget` と違い **再起動不要で即反映**。
+/// 決定論的な除去なので再学習でも戻らない (durable)。
+pub fn forget_learning_from_window() {
+    SETTINGS_WINDOW.with(|cell| {
+        let w = cell.borrow();
+        let Some(win) = w.as_ref() else {
+            return;
+        };
+        let reading = win.reading_value();
+        let surface = win.surface_value();
+        let reading = reading.trim();
+        let surface = surface.trim();
+        if reading.is_empty() {
+            win.set_status(
+                "⚠️ 忘れたい『読み』を入力してください（表層は空ならその読みを全部忘れます）",
+            );
+            return;
+        }
+        let Some(dir) = nuko_app_support_dir() else {
+            win.set_status("⚠️ 学習データの場所を取得できませんでした");
+            return;
+        };
+        let surface_opt = if surface.is_empty() {
+            None
+        } else {
+            Some(surface)
+        };
+
+        let log = ObservationLog::new(true, dir.join("observations.jsonl"));
+        let Ok(events) = log.read_all() else {
+            win.set_status("⚠️ 観察ログの読み込みに失敗しました");
+            return;
+        };
+        let before = events.len();
+        let kept = nuko_core::learning::filter_out_reading(&events, reading, surface_opt);
+        let removed = before - kept.len();
+        if removed == 0 {
+            win.set_status(&format!(
+                "… 読み「{reading}」{}の学習は見つかりませんでした",
+                surface_opt.map(|s| format!("→「{s}」")).unwrap_or_default()
+            ));
+            return;
+        }
+        // 観察ログ書き直し → 訂正選好を再抽出して保存 → 稼働エンジンへ即反映。
+        if let Err(e) = log.rewrite(&kept) {
+            win.set_status(&format!("⚠️ 観察ログの書き直しに失敗: {e}"));
+            return;
+        }
+        let store = extract_corrections(&kept, MIN_SEEN);
+        let _ = store.save(dir.join("corrections.toml"));
+        with_engine_mut(|engine| engine.set_corrections(store));
+
+        win.clear_dict_fields();
+        win.set_status(&format!(
+            "✅ 読み「{reading}」{}の学習を忘れました（観察 {removed} 件除去・即反映）",
+            surface_opt.map(|s| format!("→「{s}」")).unwrap_or_default()
+        ));
+    });
+}
+
 /// ai.toml から model を読む (簡易パース。無ければ None)。
 fn current_ai_model() -> Option<String> {
     let dir = nuko_app_support_dir()?;
