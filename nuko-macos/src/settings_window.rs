@@ -57,6 +57,11 @@ define_class!(
         fn add_dict(&self, _s: Option<&AnyObject>) {
             crate::state::add_dict_entry_from_window();
         }
+        /// 「この学習を忘れる」(誤学習を観察ログから除去して即反映)。
+        #[unsafe(method(nukoForgetLearning:))]
+        fn forget_learning(&self, _s: Option<&AnyObject>) {
+            crate::state::forget_learning_from_window();
+        }
         /// プロバイダ選択が変わったら「現在のキー」表示をそのプロバイダのものに更新。
         #[unsafe(method(nukoProviderChanged:))]
         fn provider_changed(&self, _s: Option<&AnyObject>) {
@@ -222,11 +227,19 @@ impl SettingsWindow {
             byok_save.setAction(Some(sel!(nukoSaveSettings:)));
         }
 
-        // ── 単語登録 セクション ──
-        let dict_h = make_label(mtm, "【 単語登録（読み → 表層）】", row(222.0, 18.0));
+        // ── 単語登録 / 学習の編集 セクション ──
+        let dict_h = make_label(
+            mtm,
+            "【 単語登録 / 学習の編集（読み → 表層）】",
+            row(222.0, 18.0),
+        );
         let reading_label = make_label(mtm, "読み（かな）:", row(198.0, 16.0));
         let reading_field = editable_field(mtm, row(172.0, 24.0));
-        let surface_label = make_label(mtm, "表層（変換後の語）:", row(144.0, 16.0));
+        let surface_label = make_label(
+            mtm,
+            "表層（変換後の語。「忘れる」では空＝その読みを全部忘れる）:",
+            row(144.0, 16.0),
+        );
         let surface_field = editable_field(mtm, row(118.0, 24.0));
         let dict_add = NSButton::new(mtm);
         dict_add.setTitle(&NSString::from_str("辞書に登録"));
@@ -237,6 +250,17 @@ impl SettingsWindow {
         unsafe {
             dict_add.setTarget(Some(save_target));
             dict_add.setAction(Some(sel!(nukoAddDictEntry:)));
+        }
+        // 誤学習を忘れる (読み必須・表層任意)。辞書登録の右隣に置く。
+        let forget = NSButton::new(mtm);
+        forget.setTitle(&NSString::from_str("この学習を忘れる"));
+        forget.setFrame(NSRect::new(
+            NSPoint::new(PAD + 160.0, 82.0),
+            NSSize::new(200.0, 30.0),
+        ));
+        unsafe {
+            forget.setTarget(Some(save_target));
+            forget.setAction(Some(sel!(nukoForgetLearning:)));
         }
 
         let close = NSButton::new(mtm);
@@ -284,6 +308,7 @@ impl SettingsWindow {
         content.addSubview(&surface_field);
         content.addSubview(&byok_save);
         content.addSubview(&dict_add);
+        content.addSubview(&forget);
         content.addSubview(&close);
         window.setContentView(Some(&content));
 

@@ -245,6 +245,37 @@ impl ObservationLog {
     }
 }
 
+/// 指定した読み (と任意で表層) に一致する観察イベントを **除いた** 列を返す (純粋関数)。
+///
+/// `surface = None` ならその読みのイベントを全て除去。`Some(s)` なら、その読みのうち
+/// `Commit.surface == s` または `Correction.corrected == s` のものだけ除去する。
+/// 誤学習を「忘れる」土台 (CLI `learn forget` / 設定窓の「この学習を忘れる」で共用)。
+/// 呼び出し側はこの結果で `rewrite` + `extract_corrections` し直すことで、再学習でも
+/// 戻らない durable な忘却になる。
+#[must_use]
+pub fn filter_out_reading(
+    events: &[ObservationEvent],
+    reading: &str,
+    surface: Option<&str>,
+) -> Vec<ObservationEvent> {
+    events
+        .iter()
+        .filter(|ev| {
+            if ev.reading() != reading {
+                return true; // 別の読みは残す
+            }
+            match surface {
+                None => false, // 読み一致は全部忘れる
+                Some(s) => match ev {
+                    ObservationEvent::Commit { surface, .. } => surface != s,
+                    ObservationEvent::Correction { corrected, .. } => corrected != s,
+                },
+            }
+        })
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +403,32 @@ mod tests {
         log.clear().unwrap();
         assert_eq!(log.count().unwrap(), 0);
         assert!(!path.exists());
+    }
+
+    /// forget の土台: 読み指定で全除去 / 読み+表層で該当表層だけ除去。
+    #[test]
+    fn filter_out_reading_removes_matches() {
+        let events = vec![
+            ObservationEvent::commit("ようです", "用です"), // 誤学習
+            ObservationEvent::commit("ようです", "ようです"),
+            ObservationEvent::commit("あす", "明日"),
+            ObservationEvent::correction("ようです", "用です", "ようです"),
+        ];
+        // 読みだけ指定 → 「ようです」の commit/correction を全除去。
+        let all = filter_out_reading(&events, "ようです", None);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].reading(), "あす");
+
+        // 読み+表層「用です」指定 → その表層の commit だけ除去 (correction の corrected は
+        // 「ようです」なので残る、恒等 commit も残る)。
+        let only = filter_out_reading(&events, "ようです", Some("用です"));
+        assert_eq!(only.len(), 3, "用です の commit だけ消える");
+        assert!(
+            !only.iter().any(
+                |e| matches!(e, ObservationEvent::Commit { surface, .. } if surface == "用です")
+            ),
+            "用です の commit は消えた",
+        );
     }
 
     /// JSONL は 1 行 1 イベントで人間可読(透明性)。
