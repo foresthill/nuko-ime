@@ -24,6 +24,9 @@ objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSObje
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSEvent", "NSRunningApplication", "NSResponder", "NSWindow", "NSPanel", "NSView", "NSTextField", "NSText", "NSTextView", "NSScrollView", "NSControl", "NSColor", "NSScreen", "NSGraphics", "NSGraphicsContext", "NSFont", "NSAttributedString", "NSCell", "NSMenu", "NSMenuItem", "NSButton", "NSSecureTextField", "NSPopUpButton", "NSComboBox", "NSAlert"] }
 objc2-input-method-kit = { version = "0.3" }
 objc2-core-foundation = { version = "0.3", features = ["CFCGTypes"] }
+# AI dreaming の非同期化: バックグラウンド実行後にメインキューへ戻して UI 更新する
+# (AppKit はメインスレッド限定)。objc2-app-kit が既に推移的に使っている。
+dispatch2 = "0.3"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 parking_lot = { workspace = true }
