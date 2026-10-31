@@ -520,22 +520,15 @@ impl NukoInputController {
         self._present_learning(&text);
     }
 
-    /// メニュー「🤖 AIで学習を研ぎ直す（BYOK）」: 同梱 `nuko dream --apply` を実行する。
+    /// メニュー「🤖 AIで学習を研ぎ直す（BYOK）」: 同梱 `nuko dream --apply` を **非同期** 実行する。
     ///
-    /// 注: 同期実行のため API 呼び出し中は数秒ブロックする (将来 非同期化)。
+    /// 即「実行中」をパネルに出し、subprocess はバックグラウンドで走る (入力を止めない)。
+    /// 完了後にメインスレッドへ戻ってパネルを結果で更新する ([`crate::state::start_ai_dreaming_async`])。
     fn _dream_ai_impl(&self) {
-        info!("メニューから AI dreaming を実行");
-        let text = match crate::state::run_ai_dreaming() {
-            Ok(t) => {
-                debug_log("menu: AI dreaming 完了");
-                t
-            }
-            Err(e) => {
-                warn!(error = %e, "メニューからの AI dreaming に失敗");
-                format!("⚠️ {e}")
-            }
-        };
-        self._present_learning(&text);
+        info!("メニューから AI dreaming を実行 (非同期)");
+        if let Some(mtm) = MainThreadMarker::new() {
+            crate::state::start_ai_dreaming_async(mtm);
+        }
     }
 
     /// メニュー「⚙️ BYOK 設定…」: 設定ウィンドウを前面に出す。

@@ -2,7 +2,7 @@ use nuko_core::conversion::{CandidateList, ConversionContext, SegmentedConversio
 use nuko_core::learning::{extract_corrections, CorrectionStore, ObservationLog};
 use nuko_core::prelude::*;
 use objc2::MainThreadMarker;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::time::Instant;
 
 use crate::candidate_panel::CustomCandidatePanel;
@@ -586,13 +586,17 @@ fn reload_corrections() {
     }
 }
 
-/// メニュー「AIで学習を研ぎ直す」: 同梱 `nuko dream --apply` を実行し結果テキストを返す。
+// AI dreaming の多重起動ガード (メインスレッドの start/finish でのみ触る)。
+thread_local! {
+    static DREAM_IN_PROGRESS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// 同梱 `nuko dream --apply` を実行して結果テキストを返す **純粋な subprocess 呼び出し**。
 ///
-/// 設定 (provider/model) は `ai.toml`、API キーは Keychain を `nuko` 側が読む。
-/// 成功時は corrections.toml を再読込して稼働エンジンへ即反映する。
-///
-/// 注: 同期実行のため API 呼び出し中は数秒ブロックする (将来 非同期化)。
-pub fn run_ai_dreaming() -> std::result::Result<String, String> {
+/// UI にもエンジン (thread_local) にも一切触れないので **任意スレッドから安全**。
+/// 成功/失敗の整形済みテキストを返すだけ。corrections 再読込・パネル更新は
+/// 呼び出し側 (メインスレッド) の責務 ([`finish_ai_dreaming`])。
+fn dream_subprocess() -> std::result::Result<String, String> {
     let Some(nuko) = resolve_nuko_binary() else {
         return Err(
             "nuko CLI が見つかりません。NukoIME.app に同梱されていない可能性があります\n\
@@ -607,7 +611,6 @@ pub fn run_ai_dreaming() -> std::result::Result<String, String> {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     if out.status.success() {
-        reload_corrections();
         Ok(format!(
             "🤖 AIで学習を研ぎ直しました\n\n{}\n\n✅ 学習に反映しました (再起動不要)。",
             stdout.trim()
@@ -621,6 +624,62 @@ pub fn run_ai_dreaming() -> std::result::Result<String, String> {
             stderr.trim()
         ))
     }
+}
+
+/// メニュー「🤖 AIで学習を研ぎ直す」を **非同期** で実行する。
+///
+/// 即座に「実行中」をパネルに出し、subprocess はバックグラウンドスレッドで走らせる
+/// (API 呼び出し中に IME のメインスレッドをブロックしない)。完了したら
+/// `dispatch2` でメインキューへ戻り [`finish_ai_dreaming`] が corrections を再読込して
+/// パネルを更新する。多重クリックは [`DREAM_IN_PROGRESS`] ガードで 1 本に抑える。
+pub fn start_ai_dreaming_async(mtm: MainThreadMarker) {
+    if DREAM_IN_PROGRESS.with(Cell::get) {
+        ensure_learning_panel(mtm);
+        with_learning_panel(|p| {
+            if let Some(p) = p {
+                p.show_text(
+                    "🤖 AI学習をすでに実行中です…\n\n完了するとこのパネルが自動で更新されます。少しお待ちください。",
+                );
+            }
+        });
+        return;
+    }
+    DREAM_IN_PROGRESS.with(|f| f.set(true));
+    ensure_learning_panel(mtm);
+    with_learning_panel(|p| {
+        if let Some(p) = p {
+            p.show_text(
+                "🤖 AIで学習を研ぎ直しています…（数秒かかります）\n\n完了するとこのパネルが自動で更新されます。このあとも入力はそのまま続けられます。",
+            );
+        }
+    });
+    std::thread::spawn(|| {
+        let result = dream_subprocess();
+        // UI/エンジン更新はメインスレッドで (AppKit・ENGINE thread_local の制約)。
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            if let Some(mtm) = MainThreadMarker::new() {
+                finish_ai_dreaming(mtm, result);
+            }
+        });
+    });
+}
+
+/// バックグラウンドの dreaming 完了後、**メインスレッドで** 反映とパネル更新を行う。
+fn finish_ai_dreaming(mtm: MainThreadMarker, result: std::result::Result<String, String>) {
+    DREAM_IN_PROGRESS.with(|f| f.set(false));
+    let text = match result {
+        Ok(t) => {
+            reload_corrections(); // 成功時のみ corrections.toml を稼働エンジンへ再読込
+            t
+        }
+        Err(e) => format!("⚠️ {e}"),
+    };
+    ensure_learning_panel(mtm);
+    with_learning_panel(|p| {
+        if let Some(p) = p {
+            p.show_text(&text);
+        }
+    });
 }
 
 // BYOK 設定ウィンドウ (アプリ全体で 1 つ)。
