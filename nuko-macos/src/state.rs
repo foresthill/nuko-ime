@@ -636,13 +636,31 @@ pub fn show_settings(mtm: MainThreadMarker) {
         if w.is_none() {
             *w = Some(SettingsWindow::new(mtm));
         }
-        let model = current_ai_model().unwrap_or_else(|| "claude-sonnet-5-5".to_string());
+        // ai.toml の実際の設定を読み、ドロップダウン・モデル欄・「使用中」行をそれに合わせる
+        // (従来は常に Anthropic を指していて「いま何を使っているか分からない」とユーザー報告 2026-10)。
+        let (enabled, cfg_provider, cfg_model) = read_ai_config();
+        let model = if cfg_model.is_empty() {
+            "claude-sonnet-5-5".to_string()
+        } else {
+            cfg_model.clone()
+        };
+        // 有効な provider を優先。未設定なら anthropic を既定に。
+        let active_provider = if cfg_provider == "openrouter" {
+            "openrouter"
+        } else {
+            "anthropic"
+        };
         if let Some(win) = w.as_ref() {
             win.show(mtm, &model);
-            // 開いた時点の保存済み状態を表示（borrow_mut 保持中なので win を直接使い、
-            // refresh_key_display() の再 borrow を避ける）。
-            let provider = win.selected_provider();
-            win.set_current_key(&current_key_line(provider));
+            // ドロップダウンを実際の provider に合わせてから「現在のキー」をその provider で表示。
+            win.set_provider(active_provider);
+            // 最上部: いま AI学習(dreaming)で使っている provider/model。
+            if enabled && !cfg_provider.is_empty() {
+                win.set_active_line(&format!("AI学習: {active_provider} / {model} を使用中"));
+            } else {
+                win.set_active_line("AI学習: 未設定（鍵とモデルを保存すると有効化されます）");
+            }
+            win.set_current_key(&current_key_line(active_provider));
             win.set_status(&format!("保存状態 {}", stored_key_status()));
         }
     });
@@ -983,21 +1001,34 @@ pub fn add_dict_entry_from_window() {
     });
 }
 
-/// ai.toml から model を読む (簡易パース。無ければ None)。
-fn current_ai_model() -> Option<String> {
-    let dir = nuko_app_support_dir()?;
-    let text = std::fs::read_to_string(dir.join("ai.toml")).ok()?;
+/// ai.toml から (enabled, provider, model) を読む (簡易パース)。
+///
+/// 無い／読めない時は `(false, "", "")`。設定ウィンドウを開いた時に
+/// 「いま AI学習で使っている provider/model」とドロップダウン初期選択に使う。
+fn read_ai_config() -> (bool, String, String) {
+    let mut enabled = false;
+    let mut provider = String::new();
+    let mut model = String::new();
+    let Some(dir) = nuko_app_support_dir() else {
+        return (enabled, provider, model);
+    };
+    let Ok(text) = std::fs::read_to_string(dir.join("ai.toml")) else {
+        return (enabled, provider, model);
+    };
     for line in text.lines() {
-        if let Some(rest) = line.trim().strip_prefix("model") {
-            if let Some(eq) = rest.find('=') {
-                let val = rest[eq + 1..].trim().trim_matches('"').trim();
-                if !val.is_empty() {
-                    return Some(val.to_string());
-                }
-            }
+        let t = line.trim();
+        let Some((key, val)) = t.split_once('=') else {
+            continue;
+        };
+        let val = val.trim().trim_matches('"').trim();
+        match key.trim() {
+            "enabled" => enabled = val == "true",
+            "provider" => provider = val.to_string(),
+            "model" => model = val.to_string(),
+            _ => {}
         }
     }
-    None
+    (enabled, provider, model)
 }
 
 /// 同梱 `nuko config set-key <provider>` を stdin 経由で呼びキーを Keychain に保存する。
