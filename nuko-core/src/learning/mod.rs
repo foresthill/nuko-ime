@@ -16,7 +16,7 @@ pub use dreaming::{
 };
 pub use manager::LearningManager;
 pub use observation::{
-    prune_for_cap, ObservationEvent, ObservationLog, OBS_CAP_HIGH_WATERMARK,
+    filter_out_reading, prune_for_cap, ObservationEvent, ObservationLog, OBS_CAP_HIGH_WATERMARK,
     OBS_CAP_KEEP_RECENT_COMMITS,
 };
 pub use segmentation::{ranges_from_segment_readings, SegmentationEntry, SegmentationStore};
