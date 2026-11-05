@@ -278,6 +278,9 @@ pub enum KeyAction {
     Command(CommandAction),
     /// F6/F7/F8 → 文字種変換。
     Fkey(FKeyConversion),
+    /// モードキー (かな/英数) 等 → **握り潰す** (Bool::YES、副作用なし)。
+    /// `characters()` を一切読まないので stray な空白文字が漏れない。
+    Consume,
     /// 特殊キーでない（文字として処理）/ 非 composing で素通し。
     PassThrough,
 }
@@ -289,6 +292,20 @@ pub enum KeyAction {
 /// 非 composing 時は特殊キーを横取りしない（未変換状態で特殊キーを奪わない）。
 #[must_use]
 pub fn command_for_keycode(key_code: u16, shift: bool, is_composing: bool) -> KeyAction {
+    // モードキー (JIS かな=0x68 / 英数=0x66) は **文字ではない** → composing の有無に
+    // 関わらず握り潰す。`!is_composing` の早期リターンより前に判定するのが肝。
+    //
+    // 2026-11 実機ログで確定した根本原因: かなキー(0x68) の KeyDown は stray な
+    // 空白文字 (characters()==" ") を伴って handleEvent に届く。**既に かな モードで**
+    // 押すと macOS は `setValue:forTag:` (モード変更通知) を出さないため `note_kana_press()`
+    // が走らず、activation/kana ガードの時刻が古いまま → Space 分岐が PassThrough して
+    // **半角スペースが入る** (「たまに半角スペース」の正体)。文字経路に流さず消費すれば
+    // タイミングに依存せず根治する。実際のモード切替は system が setValue:forTag: 経由で
+    // 別途行う (ログで setValue が handleEvent(0x68) より先に来るのを確認済み) ので、
+    // この KeyDown を消費してもモード切替は保たれる。
+    if key_code == 0x68 || key_code == 0x66 {
+        return KeyAction::Consume;
+    }
     // 不変条件: 未変換状態では特殊キーを奪わない（F キー含む）。
     if !is_composing {
         return KeyAction::PassThrough;
@@ -587,6 +604,29 @@ mod keycode_tests {
         assert_eq!(c(0x62), KeyAction::Fkey(FKeyConversion::Katakana)); // F7
         assert_eq!(c(0x64), KeyAction::Fkey(FKeyConversion::HalfwidthKatakana));
         // F8
+    }
+
+    /// ★ モードキー (JIS かな=0x68 / 英数=0x66) は composing の有無に関わらず Consume。
+    ///
+    /// 2026-11 実機ログで確定した「たまに半角スペースが入る」の根治。かなキーは stray な
+    /// 空白文字を伴って handleEvent に届くので、文字経路 (PassThrough→characters()) に
+    /// 流さず **必ず消費** する。`!is_composing` の素通し規則より優先されることを固定する。
+    #[test]
+    fn mode_keys_are_consumed_regardless_of_composing() {
+        for &composing in &[false, true] {
+            assert_eq!(
+                command_for_keycode(0x68, false, composing),
+                KeyAction::Consume,
+                "かなキー(0x68) は composing={composing} でも Consume"
+            );
+            assert_eq!(
+                command_for_keycode(0x66, false, composing),
+                KeyAction::Consume,
+                "英数キー(0x66) は composing={composing} でも Consume"
+            );
+        }
+        // Shift 併用でもモードキーは Consume (念のため)。
+        assert_eq!(command_for_keycode(0x68, true, false), KeyAction::Consume);
     }
 
     /// ★ 文字キー・Space・未対応 F キーは PassThrough（文字として処理）。

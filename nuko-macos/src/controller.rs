@@ -112,7 +112,19 @@ fn punctuation_variants(c: char) -> Option<&'static [&'static str]> {
 fn debug_log_enabled() -> bool {
     use std::sync::OnceLock;
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| cfg!(debug_assertions) || std::env::var_os("NUKO_DEBUG_LOG").is_some())
+    // マーカーファイル `/tmp/nuko-ime-debug.on` があれば release ビルドでもログを
+    // 有効化する。IME は macOS が起動する (= シェルの env も NUKO_DEBUG_LOG も届かない)
+    // ため、「たまに」系のタイミングバグを **実挙動のままの release+akaza ビルド** で
+    // 採取する唯一の手段 (2026-11 の「たまに半角スペース」はこれで根本原因を特定した)。
+    // 既定では marker が無いので日常使用では無効 (ディスク肥大化しない)。
+    //
+    // OnceLock で 1 度だけ評価する (毎 keystroke の stat を避ける) ため、採取時は
+    // **marker を IME プロセス起動より前に** 作ること (入力ソース切替で新プロセスが評価)。
+    *ENABLED.get_or_init(|| {
+        cfg!(debug_assertions)
+            || std::env::var_os("NUKO_DEBUG_LOG").is_some()
+            || std::path::Path::new("/tmp/nuko-ime-debug.on").exists()
+    })
 }
 
 /// デバッグログをファイルに書き出し（IMEプロセスのstdoutは見えないため）。
@@ -657,6 +669,12 @@ impl NukoInputController {
                 self.apply_fkey_conversion(client, kind);
                 Bool::YES
             }
+            crate::commit::KeyAction::Consume => {
+                // モードキー (かな/英数): 文字を一切読まずに消費する。
+                // これで stray な空白文字が Space 分岐へ漏れない (半角スペース根治)。
+                debug_log("handleEvent: consume mode key (kana/eisu), no char emitted");
+                Bool::YES
+            }
             crate::commit::KeyAction::PassThrough => {
                 // 文字キー: characters() が印字文字列。無ければ (ファンクション等) 素通し。
                 match event.characters() {
@@ -783,12 +801,21 @@ impl NukoInputController {
             let activation_elapsed_ms = state.activated_at.map(|t| t.elapsed().as_millis());
             // かな押下時刻は controller 横断 (thread_local) で参照する (落とし穴 #4 対策)。
             let kana_elapsed_ms = crate::state::kana_press_elapsed_ms();
+            let has_cand = state.candidates.is_some();
+            let is_comp = state.is_composing;
             let action = crate::commit::decide_space_action(
-                state.candidates.is_some(),
-                state.is_composing,
+                has_cand,
+                is_comp,
                 activation_elapsed_ms,
                 kana_elapsed_ms,
             );
+            // 到着順レース診断 (2026-11): 「かな切替直後の 1 回目 Space が半角で入る」
+            // を採取する。setValue:forTag: のログ行との **前後関係** と kana_ms の値で、
+            // 「Space が setValue より先に来てガードが張れていない (kana_ms=None)」のか
+            // 「窓 (500ms) を超えている」のかを切り分ける。
+            debug_log(&format!(
+                "space: has_cand={has_cand} is_composing={is_comp} activation_ms={activation_elapsed_ms:?} kana_ms={kana_elapsed_ms:?} -> {action:?}"
+            ));
 
             match action {
                 SpaceAction::DiscardActivationGuard => {
