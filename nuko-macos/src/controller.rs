@@ -1591,8 +1591,20 @@ impl NukoInputController {
         if !decision.commit_text.is_empty() {
             Self::insert_text_on_client(client, &decision.commit_text);
 
+            // 日付/時刻の生成候補 (きょう→2026年…/いま→10:30 等) は **一過性** なので
+            // 学習層に一切流さない。学習すると翌日以降も古い日付が今日の日付より上位に
+            // 固定される (2026-11 ユーザー報告「きょう→2026年10月20日」)。候補自体は
+            // datetime_candidates が毎回 now で生成するので、学習しなくても正しく出る。
+            let is_datetime_commit = nuko_core::conversion::datetime::is_datetime_surface(
+                reading.as_str(),
+                decision.commit_text.as_str(),
+            );
+            if is_datetime_commit {
+                debug_log("commit: datetime surface (ephemeral), skip learning");
+            }
+
             // Layer 1: 観察ログに確定イベントを記録 (オプトイン無効なら no-op)。
-            if !reading.is_empty() {
+            if !reading.is_empty() && !is_datetime_commit {
                 let event = if obs_candidates.is_empty() {
                     ObservationEvent::commit(reading.as_str(), decision.commit_text.as_str())
                 } else {

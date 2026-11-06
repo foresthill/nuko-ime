@@ -94,6 +94,15 @@ impl CandidateList {
         self.candidates.iter_mut()
     }
 
+    /// 述語が `false` を返す候補を取り除く。選択インデックスは範囲外になったら
+    /// 先頭 (0) に戻す。注入・ソート前の候補集合の整形に使う。
+    pub fn retain(&mut self, keep: impl FnMut(&Candidate) -> bool) {
+        self.candidates.retain(keep);
+        if self.selected >= self.candidates.len() {
+            self.selected = 0;
+        }
+    }
+
     /// 候補数を取得
     #[must_use]
     pub fn len(&self) -> usize {

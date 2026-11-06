@@ -16,6 +16,33 @@ pub fn datetime_candidates(reading: &str) -> Vec<Candidate> {
     candidates_at(reading, Local::now())
 }
 
+/// この読みが日付/時刻を生成するトリガーか (きょう/あした/… )。
+#[must_use]
+pub fn is_datetime_reading(reading: &str) -> bool {
+    matches!(
+        reading,
+        "きょう" | "あした" | "あす" | "きのう" | "いま" | "じこく" | "にちじ"
+    )
+}
+
+/// 確定した (reading, surface) が **一過性の日付/時刻生成候補** かどうか。true なら
+/// 学習層はこれを記録してはいけない。
+///
+/// 2026-11 ユーザー報告の根治: 10/20 に「きょう」→「2026年10月20日」を確定したら
+/// それが学習され、翌日以降も毎日その**古い日付**が今日の日付より上位に出続けた。
+/// 日付/時刻は `datetime_candidates` が毎回 now で生成するので、学習する意味が無く、
+/// むしろ古い値を固定してしまう害だけがある。
+///
+/// 判定は「datetime トリガー読み」かつ「表層に数字 (ASCII 0-9) を含む」で行う。
+/// 生成される日付/時刻 (2026年10月20日 / 2026/10/20 / 令和8年10月20日 / R8.10.20 /
+/// 10:30 / 10時30分 / タイムスタンプ) は**すべて数字を含む**一方、漢字の既定候補
+/// (今日/明日/昨日/今/日時/時刻) は数字を含まない。この discriminator は日またぎ・
+/// 秒ズレ (確定が生成の数秒後) に影響されず頑健 (now 再生成との厳密一致より安全)。
+#[must_use]
+pub fn is_datetime_surface(reading: &str, surface: &str) -> bool {
+    is_datetime_reading(reading) && surface.chars().any(|c| c.is_ascii_digit())
+}
+
 /// 純粋版: `now` を渡してテスト可能にする。
 fn candidates_at(reading: &str, now: DateTime<Local>) -> Vec<Candidate> {
     let surfaces: Vec<String> = match reading {
@@ -156,5 +183,40 @@ mod tests {
     fn unrelated_reading_is_empty() {
         assert!(candidates_at("ねこ", fixed()).is_empty());
         assert!(candidates_at("", fixed()).is_empty());
+    }
+
+    /// ★ 一過性の日付/時刻生成候補は学習対象外 (2026-11「きょう→古い日付」根治)。
+    #[test]
+    fn datetime_surfaces_are_not_learnable() {
+        // 生成された日付/時刻 (数字を含む) → true (学習しない)。
+        for s in [
+            "2026年10月20日",
+            "2026年10月20日（火）",
+            "2026/10/20",
+            "2026-10-20",
+            "令和8年10月20日",
+            "R8.10.20",
+        ] {
+            assert!(
+                is_datetime_surface("きょう", s),
+                "きょう の生成日付 {s} は学習対象外"
+            );
+        }
+        assert!(is_datetime_surface("いま", "10:30"));
+        assert!(is_datetime_surface("いま", "10時30分"));
+        assert!(is_datetime_surface("にちじ", "2026年10月20日 10:30:45"));
+        assert!(is_datetime_surface("あした", "2026年10月21日"));
+        assert!(is_datetime_surface("きのう", "2026-10-19"));
+
+        // 漢字の既定候補 (数字なし) → false (学習してよい)。
+        assert!(!is_datetime_surface("きょう", "今日"));
+        assert!(!is_datetime_surface("きょう", "京"));
+        assert!(!is_datetime_surface("あした", "明日"));
+        assert!(!is_datetime_surface("いま", "今"));
+        assert!(!is_datetime_surface("にちじ", "日時"));
+
+        // datetime トリガーでない読みは、数字を含んでも対象外ではない (学習してよい)。
+        assert!(!is_datetime_surface("ねこ", "猫2"));
+        assert!(!is_datetime_surface("きょうと", "京都"));
     }
 }
