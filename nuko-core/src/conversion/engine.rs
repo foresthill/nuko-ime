@@ -512,8 +512,15 @@ impl ConversionEngine {
 
         // 「きょう」→今日の日付 / 「いま」→現在時刻 等を動的に候補生成する (①規則/生成器)。
         // 該当読み以外は空なので無変化。
-        for c in super::datetime::datetime_candidates(reading) {
-            if !candidates.iter().any(|x| x.surface == c.surface) {
+        //
+        // datetime トリガー読みでは、**過去に学習/辞書で紛れ込んだ古い日付/時刻の表層を
+        // 先に除去** してから、now で生成した新しい候補を注入する。これにより既に
+        // learning.json に残っている古いエントリ (例: きょう→2026年10月20日) も
+        // 自己修復的に出なくなる (2026-11 ユーザー報告の即時解消。今後の学習記録自体は
+        // `commit()` 側で抑止済みなので、これは既存データの掃除を兼ねる belt-and-suspenders)。
+        if super::datetime::is_datetime_reading(reading) {
+            candidates.retain(|c| !super::datetime::is_datetime_surface(reading, &c.surface));
+            for c in super::datetime::datetime_candidates(reading) {
                 candidates.push(c);
             }
         }
@@ -804,6 +811,13 @@ impl ConversionEngine {
     /// * `candidate` - 確定した候補
     /// * `context` - 変換コンテキスト
     pub fn commit(&mut self, candidate: &Candidate, context: &ConversionContext) -> Result<()> {
+        // 日付/時刻の生成候補 (きょう→2026年…/いま→10:30 等) は **一過性** なので
+        // 頻度学習 (Layer 0) に記録しない。記録すると翌日以降も確定時の古い日付が
+        // 今日の日付より上位に固定される (2026-11 ユーザー報告「きょう→2026年10月20日」)。
+        // 候補自体は毎回 now で生成される (`super::datetime`) ので学習不要。
+        if super::datetime::is_datetime_surface(&candidate.reading, &candidate.surface) {
+            return Ok(());
+        }
         self.learning.record(candidate, context)?;
         // 学習データの永続化が設定されていれば自動 save。失敗は warn にとどめ
         // commit 自体は成功扱い (= 学習はメモリには載った)。
@@ -1132,6 +1146,61 @@ mod tests {
             candidates.iter().next().unwrap().surface,
             "駒谷",
             "★ 単語登録が最優先で 1 位"
+        );
+    }
+
+    /// ★ 日付/時刻の生成候補は頻度学習しない (2026-11「きょう→古い日付」根治)。
+    ///
+    /// datetime トリガー読みで数字付き表層を確定しても学習されず、次の変換に
+    /// 出てこない (候補は毎回 now で生成されるため)。一方、datetime でない読みの
+    /// 数字付き表層は従来どおり学習される (ガードが広すぎないことの確認)。
+    #[test]
+    fn datetime_commit_is_not_learned_but_normal_is() {
+        let mut engine = ConversionEngine::new().unwrap();
+        let ctx = ConversionContext::new();
+
+        // (1) 日付を確定しても学習されない → 翌日以降に出てこない。
+        let date = Candidate::new("2099年1月1日", "きょう");
+        engine.commit(&date, &ctx).unwrap();
+        let after = engine.convert("きょう", &ctx).unwrap();
+        assert!(
+            !after.iter().any(|c| c.surface == "2099年1月1日"),
+            "確定した古い日付は学習されず候補に残らない"
+        );
+
+        // (2) datetime でない読みの数字付き表層は従来どおり学習される。
+        let normal = Candidate::new("猫2", "ねこ");
+        engine.commit(&normal, &ctx).unwrap();
+        let neko = engine.convert("ねこ", &ctx).unwrap();
+        assert!(
+            neko.iter().any(|c| c.surface == "猫2"),
+            "datetime でない読みの学習は維持される (ガードが広すぎない)"
+        );
+    }
+
+    /// ★ 既に学習済みの古い日付も変換時に自己修復される (データ掃除不要)。
+    ///
+    /// `commit()` のガードを迂回して学習ストアへ直接古い日付を入れても (= 既存ユーザーの
+    /// learning.json に残っている状態を模擬)、convert がそれを除去し、代わりに now の
+    /// 日付を注入する。2026-11 ユーザー報告の既存データ即時解消を固定する。
+    #[test]
+    fn stale_learned_date_is_self_healed_on_convert() {
+        let mut engine = ConversionEngine::new().unwrap();
+        let ctx = ConversionContext::new();
+
+        // 学習ストアへ直接注入 (commit ガードを迂回し、既存の汚染状態を作る)。
+        let stale = Candidate::new("2026年10月20日", "きょう");
+        engine.learning.record(&stale, &ctx).unwrap();
+
+        let out = engine.convert("きょう", &ctx).unwrap();
+        assert!(
+            !out.iter().any(|c| c.surface == "2026年10月20日"),
+            "古い学習済み日付は変換時に除去される"
+        );
+        // 既定の漢字候補は残る。
+        assert!(
+            out.iter().any(|c| c.surface == "今日"),
+            "今日 (漢字既定) は残る"
         );
     }
 
