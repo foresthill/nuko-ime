@@ -21,6 +21,12 @@ path = "src/bin/dict.rs"
 name = "nuko-bench"
 path = "src/bin/bench.rs"
 
+[features]
+default = []
+# libakaza バックエンドを有効化 (nuko-core 側の同名 feature を転送)。
+# `nuko convert --libakaza` で実機と同じ変換/文節区切りをターミナル再現するため。
+akaza = ["nuko-core/akaza"]
+
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 nuko-core = { workspace = true }

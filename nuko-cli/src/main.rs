@@ -41,6 +41,14 @@ enum Commands {
         /// 候補数
         #[arg(short = 'n', long, default_value = "5")]
         count: usize,
+        /// libakaza バックエンドを使い、実機と同じ変換・文節区切りを再現する
+        /// (要 `--features akaza` ビルド)。既定の静的辞書のみでは実機を再現できない。
+        #[arg(long)]
+        libakaza: bool,
+        /// 実機と同じ個人学習 (corrections.toml / segmentations.toml / learning.json /
+        /// user_dict.json) をロードする。学習由来の誤変換を再現・切り分けるのに使う。
+        #[arg(long)]
+        personal: bool,
     },
     /// ローマ字をかなに変換
     Romaji {
@@ -192,7 +200,12 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     match cli.command {
-        Commands::Convert { reading, count } => cmd_convert(&reading, count),
+        Commands::Convert {
+            reading,
+            count,
+            libakaza,
+            personal,
+        } => cmd_convert(&reading, count, libakaza, personal),
         Commands::Romaji { input } => cmd_romaji(&input),
         Commands::Predict { prefix, count } => cmd_predict(&prefix, count),
         Commands::DictInfo => cmd_dict_info(),
@@ -212,16 +225,35 @@ fn main() -> Result<()> {
     }
 }
 
-fn cmd_convert(reading: &str, count: usize) -> Result<()> {
+fn cmd_convert(reading: &str, count: usize, use_libakaza: bool, personal: bool) -> Result<()> {
     println!("{}", "ぬこIME 変換テスト".cyan().bold());
     println!("読み: {}", reading.yellow());
+    let backend = if use_libakaza {
+        "libakaza"
+    } else {
+        "静的辞書のみ"
+    };
+    let personal_note = if personal {
+        " + 個人学習"
+    } else {
+        " (個人学習なし)"
+    };
+    println!(
+        "バックエンド: {}{}",
+        backend.dimmed(),
+        personal_note.dimmed()
+    );
     println!();
 
-    let engine = ConversionEngine::new()?;
+    let engine = build_convert_engine(use_libakaza, personal)?;
     let context = nuko_core::conversion::ConversionContext::new();
-    let candidates = engine.convert(reading, &context)?;
 
-    println!("{}:", "変換候補".green());
+    // 文節区切りの診断 (libakaza 有効時のみ)。「お願い→の願い」のような区切りミスは
+    // flat 候補より segmented を見た方が原因が分かる。
+    print_segmented_diagnostic(&engine, reading);
+
+    let candidates = engine.convert(reading, &context)?;
+    println!("{}:", "変換候補 (flat)".green());
     for (i, candidate) in candidates.iter().take(count).enumerate() {
         let num = format!("{}.", i + 1);
         println!(
@@ -238,6 +270,125 @@ fn cmd_convert(reading: &str, count: usize) -> Result<()> {
 
     Ok(())
 }
+
+/// 変換エンジンを構築する。`use_libakaza` 時は実機と同じ libakaza バックエンドを
+/// ロードする (要 `--features akaza`)。モデルディレクトリは実機と同じ既定パス
+/// (`$HOME/Library/Application Support/nuko-ime/akaza-model`、環境変数
+/// `NUKO_AKAZA_MODEL_DIR` で上書き可)。
+fn build_convert_engine(use_libakaza: bool, personal: bool) -> Result<ConversionEngine> {
+    let mut engine = if use_libakaza {
+        #[cfg(feature = "akaza")]
+        {
+            let dir = akaza_model_dir();
+            eprintln!("(libakaza モデル: {})", dir.display());
+            ConversionEngine::with_libakaza(dir)?
+        }
+        #[cfg(not(feature = "akaza"))]
+        {
+            anyhow::bail!(
+                "--libakaza は akaza feature 付きビルドが必要です。例:\n  \
+                 cargo run --bin nuko --features akaza -- convert --libakaza '{}'",
+                "おねがいします"
+            )
+        }
+    } else {
+        ConversionEngine::new()?
+    };
+
+    if personal {
+        load_personal_learning(&mut engine);
+    }
+    Ok(engine)
+}
+
+/// 実機と同じ個人学習を engine に載せる (`nuko-macos` の state.rs setup と同等)。
+/// 学習由来の誤変換 (例: 常用語が壊れる) を再現・切り分けるための診断用。
+fn load_personal_learning(engine: &mut ConversionEngine) {
+    let Some(dir) = app_support_dir() else {
+        eprintln!("(個人学習ディレクトリが見つからないため、個人学習なしで継続)");
+        return;
+    };
+    // Layer 2: 訂正選好
+    let corrections = CorrectionStore::load(dir.join("corrections.toml")).unwrap_or_default();
+    eprintln!("(corrections: {} 件)", corrections.len());
+    engine.set_corrections(corrections);
+    // 文節の切り方
+    let segs = nuko_core::learning::SegmentationStore::load(dir.join("segmentations.toml"))
+        .unwrap_or_default();
+    eprintln!("(segmentations: {} 件)", segs.len());
+    engine.set_segmentations(segs);
+    // Layer 0: 頻度学習
+    if let Err(e) = engine.set_learning_path(dir.join("learning.json")) {
+        eprintln!("(learning.json load 失敗: {e})");
+    }
+    // 単語登録
+    if let Err(e) = engine
+        .dictionary_mut()
+        .load_user_dictionary(dir.join("user_dict.json"))
+    {
+        eprintln!("(user_dict.json load 失敗: {e})");
+    }
+}
+
+/// 個人学習データの標準ディレクトリ (`$HOME/Library/Application Support/nuko-ime`)。
+fn app_support_dir() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(
+        PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("nuko-ime"),
+    )
+}
+
+/// libakaza の既定モデルディレクトリ (実機 `nuko-macos` と同じ解決順)。
+#[cfg(feature = "akaza")]
+fn akaza_model_dir() -> PathBuf {
+    if let Ok(override_path) = std::env::var("NUKO_AKAZA_MODEL_DIR") {
+        return PathBuf::from(override_path);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join("Library")
+        .join("Application Support")
+        .join("nuko-ime")
+        .join("akaza-model")
+}
+
+/// 文節区切りの診断を表示する (libakaza 有効時のみ中身が出る)。
+#[cfg(feature = "akaza")]
+fn print_segmented_diagnostic(engine: &ConversionEngine, reading: &str) {
+    match engine.convert_segmented(reading) {
+        Ok(Some(seg)) => {
+            println!("{}:", "文節区切り (libakaza)".green());
+            for (i, s) in seg.segments.iter().enumerate() {
+                let top: Vec<String> = s
+                    .candidates
+                    .iter()
+                    .take(5)
+                    .map(|c| c.surface.clone())
+                    .collect();
+                println!(
+                    "  [{i}] {} ({}) → {}",
+                    s.current()
+                        .map(|c| c.surface.as_str())
+                        .unwrap_or("")
+                        .white()
+                        .bold(),
+                    s.reading.dimmed(),
+                    top.join(" / ").dimmed()
+                );
+            }
+            println!("  連結: {}", seg.current_surface().white().bold());
+            println!();
+        }
+        Ok(None) => {}
+        Err(e) => println!("  (文節区切り取得エラー: {e})"),
+    }
+}
+
+#[cfg(not(feature = "akaza"))]
+fn print_segmented_diagnostic(_engine: &ConversionEngine, _reading: &str) {}
 
 fn cmd_romaji(input: &str) -> Result<()> {
     println!("{}", "ぬこIME ローマ字変換".cyan().bold());
