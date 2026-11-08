@@ -391,6 +391,56 @@ impl ConversionEngine {
         Ok(())
     }
 
+    /// flat `convert` 用: libakaza の原文＋代替読み (ん+な行→ん+母音) をマージして
+    /// `candidates` 末尾に追加する。
+    ///
+    /// 「nn 曖昧さ」救済: 原文と代替読みの両方を変換し、言語モデルに正しい方を高スコアに
+    /// させる (じかんあるとき > じかんなるとき、残念 > ざんえん)。代替読みそのまま (純かな)
+    /// はノイズなので入れないが、代替読みが **実在語** (全体 1 語の漢字辞書語) のときだけ
+    /// その読みのひらがなを足す (しんに→しんい を選べるように。おんな→おんあ は出さない)。
+    #[cfg(feature = "akaza")]
+    fn merge_libakaza_candidates(
+        backend: &LibakazaBackend,
+        reading: &str,
+        candidates: &mut CandidateList,
+    ) {
+        for alt in nn_alternate_readings(reading) {
+            let libakaza_candidates = match backend.convert(&alt) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(reading = %alt, error = %e, "libakaza 変換失敗、静的辞書のみで継続");
+                    continue;
+                }
+            };
+            for mut candidate in libakaza_candidates {
+                // 代替読みそのまま (surface == alt = 純かな) はノイズなので入れない
+                // (おんな→おんあ 等)。segmented 側 (merge_nn_alternates) と同じ扱い。
+                if alt != *reading && candidate.surface == alt {
+                    continue;
+                }
+                candidate.score = candidate.score.saturating_add(LIBAKAZA_PRIORITY_BOOST);
+                // 代替読み由来の候補も学習は **入力読み** に紐づける (#160)。candidate.reading は
+                // しんい のままだと Layer0 が しんい でキーされ しんに で引けないため付け替える。
+                candidate.reading = reading.to_string();
+                if !candidates.iter().any(|c| c.surface == candidate.surface) {
+                    candidates.push(candidate);
+                }
+            }
+            // 代替読みが **実在語** なら、その読みのひらがなも候補に足す (低スコア末尾付近)。
+            // 一度選べば学習で上位化する。判定詳細は reading_is_single_dict_word 参照。
+            if alt != reading
+                && backend.reading_is_single_dict_word(&alt)
+                && !candidates.iter().any(|c| c.surface == alt)
+            {
+                candidates.push(
+                    Candidate::new(&alt, reading)
+                        .with_score(-85)
+                        .with_source(CandidateSource::System),
+                );
+            }
+        }
+    }
+
     /// かなを漢字に変換
     ///
     /// # 引数
@@ -414,38 +464,10 @@ impl ConversionEngine {
             }
         }
 
-        // 2. libakaza バックエンドが有効なら最優先で候補を追加。
-        //    「nn 曖昧さ」救済: 原文＋代替読み (ん+な行 → ん+母音) の両方を変換して
-        //    マージ。libakaza の言語モデルが正しい方を高スコアにする
-        //    (じかんあるとき > じかんなるとき、残念(ざんねん) > ざんえん)。
+        // 2. libakaza バックエンドが有効なら最優先で候補を追加 (原文＋代替読みのマージ)。
         #[cfg(feature = "akaza")]
         if let Some(backend) = &self.libakaza {
-            for alt in nn_alternate_readings(reading) {
-                match backend.convert(&alt) {
-                    Ok(libakaza_candidates) => {
-                        for mut candidate in libakaza_candidates {
-                            candidate.score =
-                                candidate.score.saturating_add(LIBAKAZA_PRIORITY_BOOST);
-                            // 代替読み (alt != reading) 由来の候補も、学習は **入力読み** に
-                            // 紐づける。例: 「しんに」と打って真意(代替読み しんい)を選んだとき、
-                            // candidate.reading を しんい のままにすると Layer0 頻度学習が しんい で
-                            // キーされ、次回 しんに で引けず「選んでも学習が効かない」。
-                            // candidate.reading は表示に使われず学習キー専用なので付け替えて安全。
-                            candidate.reading = reading.to_string();
-                            if !candidates.iter().any(|c| c.surface == candidate.surface) {
-                                candidates.push(candidate);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            reading = %alt,
-                            error = %e,
-                            "libakaza 変換失敗、静的辞書のみで継続"
-                        );
-                    }
-                }
-            }
+            Self::merge_libakaza_candidates(backend, reading, &mut candidates);
         }
 
         // 3. 辞書から候補を取得
@@ -638,6 +660,21 @@ impl ConversionEngine {
                     c.reading.clone_from(&seg.reading);
                     seg.candidates.push(c);
                     added += 1;
+                }
+                // 代替読みが **実在語** (全体 1 語の漢字辞書語) のときだけ、その読みの
+                // **ひらがな** も候補末尾に足す (2026-11 ユーザー要望:「しんに と打って
+                // 真意=漢字だけでなく ひらがな しんい も出したい」)。
+                // ん+母音 はローマ字で直接打てない (しんい は shinni=しんに になる) ため、
+                // かな しんい は候補に出さないと一生選べない。実在語判定で おんな→おんあ /
+                // こんにちは→こんいちは のようなノイズは出さない (= false なので足さない)。
+                if backend.reading_is_single_dict_word(alt)
+                    && !seg.candidates.iter().any(|x| x.surface == *alt)
+                {
+                    // surface=かな(しんい)、学習キーは入力読み(しんに)。一度選べば
+                    // Layer0 頻度学習で次回先頭に上がる (#160 と同じ帰属)。
+                    let mut kana = Candidate::new(alt, &seg.reading);
+                    kana.source = CandidateSource::System;
+                    seg.candidates.push(kana);
                 }
             }
         }
@@ -1560,6 +1597,72 @@ mod tests {
             shinni.reading, "しんに",
             "★ 代替読み候補の reading は入力読み (学習が しんに に紐づく)"
         );
+    }
+
+    /// 代替読みが **実在語** のときだけ、その読みのひらがなを候補に出す。
+    /// `しんに`→`しんい`(真意あり) は出し、`こんにちは`→`こんいちは`(語なし) は出さない。
+    ///
+    /// 実行: `cargo test -p nuko-core --release --features akaza alt_reading_kana -- --ignored --nocapture`
+    #[cfg(feature = "akaza")]
+    #[test]
+    #[ignore = "実機モデルが要る"]
+    fn alt_reading_kana_offered_only_for_real_words() {
+        let home = std::env::var("HOME").expect("HOME");
+        let model = format!("{home}/Library/Application Support/nuko-ime/akaza-model");
+        let engine = ConversionEngine::with_libakaza(&model).unwrap();
+        if !engine.has_libakaza() {
+            eprintln!("モデル未配置のためスキップ: {model}");
+            return;
+        }
+        // しんに: 代替読み しんい は実在語(真意) → ひらがな しんい が候補に出る。
+        let shinni = engine.convert("しんに", &ConversionContext::new()).unwrap();
+        let kana = shinni
+            .iter()
+            .find(|c| c.surface == "しんい")
+            .expect("ひらがな しんい が候補に出るはず (代替読みが実在語 真意)");
+        assert_eq!(
+            kana.reading, "しんに",
+            "★ かな候補の学習キーは入力読み しんに (一度選べば次回上位化)"
+        );
+        // こんにちは: 代替読み こんいちは は実在語でない → ひらがな こんいちは は出さない。
+        let konnichiha = engine
+            .convert("こんにちは", &ConversionContext::new())
+            .unwrap();
+        assert!(
+            !konnichiha.iter().any(|c| c.surface == "こんいちは"),
+            "こんいちは はノイズなので候補に出してはいけない"
+        );
+        // おんな: 代替読み おんあ も非実在語 → 出さない。
+        let onna = engine.convert("おんな", &ConversionContext::new()).unwrap();
+        assert!(
+            !onna.iter().any(|c| c.surface == "おんあ"),
+            "おんあ はノイズなので候補に出してはいけない"
+        );
+    }
+
+    /// backend 単体: 実在語判定 (`reading_is_single_dict_word`) の分離テスト。
+    #[cfg(feature = "akaza")]
+    #[test]
+    #[ignore = "実機モデルが要る"]
+    fn reading_is_single_dict_word_discriminates() {
+        let home = std::env::var("HOME").expect("HOME");
+        let model = format!("{home}/Library/Application Support/nuko-ime/akaza-model");
+        let Ok(backend) = super::super::backend::libakaza::LibakazaBackend::try_new(&model) else {
+            eprintln!("モデル未配置のためスキップ: {model}");
+            return;
+        };
+        for w in ["しんい", "はんい", "たんい", "せんえん"] {
+            assert!(
+                backend.reading_is_single_dict_word(w),
+                "{w} は実在語なので true のはず"
+            );
+        }
+        for n in ["こんいちは", "おんあ", "みんあ", "ざんえん"] {
+            assert!(
+                !backend.reading_is_single_dict_word(n),
+                "{n} は非実在語なので false のはず"
+            );
+        }
     }
 
     /// 実機モデル + 実機 corrections.toml を読んで「まつやさんとなんとか」の
