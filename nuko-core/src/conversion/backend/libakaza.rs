@@ -198,6 +198,40 @@ impl LibakazaBackend {
         Ok(out)
     }
 
+    /// `reading` ちょうどを **1 語でカバーする「漢字を含む辞書語」** が k-best パスに
+    /// あるか (= その読みが実在語か) を返す。
+    ///
+    /// 代替読み (ん+母音) が実在語のとき **だけ** そのひらがなを候補に出すための判定。
+    /// 例: `しんい`→真意 / `はんい`→範囲 は `true`、`こんいちは`/`おんあ` は `false`。
+    ///
+    /// # なぜ k-best か (forced 分割を使わない理由)
+    ///
+    /// 「全体を 1 文節に強制」(`convert_segmented_forced(r, &[0..r.len()])`) でも同じ
+    /// 判別はできるが、辞書に無い読み (`こんいちは` 等) を強制すると依存先 rsmarisa の
+    /// trie が **debug で整数アンダーフロー panic** する (release は wrap で“たまたま”動く
+    /// だけ)。通常経路の `convert_k_best` は安全で、debug テストでも使える。
+    #[must_use]
+    pub fn reading_is_single_dict_word(&self, reading: &str) -> bool {
+        if reading.is_empty() {
+            return false;
+        }
+        let Ok(paths) = self.engine.convert_k_best(reading, None, 9) else {
+            return false;
+        };
+        paths.iter().any(|path| {
+            path.segments.len() == 1
+                && path
+                    .segments
+                    .first()
+                    .and_then(|seg| seg.first())
+                    .is_some_and(|c| {
+                        c.surface_with_dynamic()
+                            .chars()
+                            .any(|ch| ('\u{4E00}'..='\u{9FFF}').contains(&ch))
+                    })
+        })
+    }
+
     /// 読み (ひらがな) を文節別に変換し、`SegmentedConversion` を返す。
     ///
     /// Phase 1.3 Step 1 で追加 (案 B = 文節別 API)。
