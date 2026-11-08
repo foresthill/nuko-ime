@@ -426,6 +426,12 @@ impl ConversionEngine {
                         for mut candidate in libakaza_candidates {
                             candidate.score =
                                 candidate.score.saturating_add(LIBAKAZA_PRIORITY_BOOST);
+                            // 代替読み (alt != reading) 由来の候補も、学習は **入力読み** に
+                            // 紐づける。例: 「しんに」と打って真意(代替読み しんい)を選んだとき、
+                            // candidate.reading を しんい のままにすると Layer0 頻度学習が しんい で
+                            // キーされ、次回 しんに で引けず「選んでも学習が効かない」。
+                            // candidate.reading は表示に使われず学習キー専用なので付け替えて安全。
+                            candidate.reading = reading.to_string();
                             if !candidates.iter().any(|c| c.surface == candidate.surface) {
                                 candidates.push(candidate);
                             }
@@ -608,7 +614,7 @@ impl ConversionEngine {
                     continue; // 代替変換失敗は無視 (原文候補は維持)
                 };
                 let mut added = 0usize;
-                for c in cands {
+                for mut c in cands {
                     if added >= MAX_ALT_CANDS_PER_SEG {
                         break;
                     }
@@ -620,6 +626,9 @@ impl ConversionEngine {
                     if seg.candidates.iter().any(|x| x.surface == c.surface) {
                         continue;
                     }
+                    // 学習は入力 (文節) 読みに紐づける。flat 側と同じ理由
+                    // (代替読み しんい のままだと しんに で学習を引けない)。
+                    c.reading.clone_from(&seg.reading);
                     seg.candidates.push(c);
                     added += 1;
                 }
@@ -1435,6 +1444,53 @@ mod tests {
         let engine = ConversionEngine::new().unwrap();
         let result = engine.convert_segmented("").unwrap();
         assert!(result.is_none(), "空入力は None");
+    }
+
+    #[test]
+    fn alt_reading_pick_is_learned_under_input_reading() {
+        // 代替読み (nn 曖昧性) 候補の学習帰属バグの回帰テスト。
+        // 「しんに」と打つと真意(代替読み しんい)が候補に出るが、選んで確定したとき
+        // 学習が「しんい」でキーされると次回「しんに」で引けず「選んでも効かない」。
+        // 修正: convert() が代替読み候補の reading を入力読みに付け替えるので、
+        // commit される候補は reading=「しんに」。それを学習すれば次回先頭に来る。
+        let mut engine = ConversionEngine::new().unwrap();
+        let ctx = ConversionContext::new();
+        // ユーザーが「しんに」と打って真意を選び確定した状況 (付け替え後の候補を commit)。
+        let picked = Candidate::new("真意", "しんに");
+        engine.commit(&picked, &ctx).unwrap();
+        // 次回「しんに」で変換 → Layer0 学習 (score 200_010) が libakaza/辞書に勝ち先頭。
+        let after = engine.convert("しんに", &ctx).unwrap();
+        assert_eq!(
+            after.selected().unwrap().surface,
+            "真意",
+            "★ しんに と打って選んだ真意が次回 1 位 (学習でカバーが効く)"
+        );
+    }
+
+    /// 実機モデルで「しんに」を変換し、代替読み由来の真意候補の reading が
+    /// **入力読み「しんに」** になっていること (= 学習が正しく紐づく) を検証する。
+    ///
+    /// 実行: `cargo test -p nuko-core --release --features akaza alt_reading_candidate_carries -- --ignored --nocapture`
+    #[cfg(feature = "akaza")]
+    #[test]
+    #[ignore = "実機モデルが要る"]
+    fn alt_reading_candidate_carries_input_reading_with_libakaza() {
+        let home = std::env::var("HOME").expect("HOME");
+        let model = format!("{home}/Library/Application Support/nuko-ime/akaza-model");
+        let engine = ConversionEngine::with_libakaza(&model).unwrap();
+        if !engine.has_libakaza() {
+            eprintln!("モデル未配置のためスキップ: {model}");
+            return;
+        }
+        let result = engine.convert("しんに", &ConversionContext::new()).unwrap();
+        let shinni = result
+            .iter()
+            .find(|c| c.surface == "真意")
+            .expect("真意 が代替読み (しんに→しんい) 経由で候補に出るはず");
+        assert_eq!(
+            shinni.reading, "しんに",
+            "★ 代替読み候補の reading は入力読み (学習が しんに に紐づく)"
+        );
     }
 
     /// 実機モデル + 実機 corrections.toml を読んで「まつやさんとなんとか」の
