@@ -217,6 +217,18 @@ PR #40 で `convert_k_best(reading, None, k=9)` に切替。各 `KBestPath` が�
 全体方針の表は [`docs/ARCHITECTURE.md` §3.4](docs/ARCHITECTURE.md)。規則/生成器を変えるときは
 **壊してはいけない既存ケースを回帰テストで固定してから**直す。
 
+### 落とし穴: nn 曖昧性の「代替読み候補」は学習キーを入力読みにする (#159 / PR #160)
+
+`しんに⇄しんい(真意)` / `たんに⇄たんい(単位)` は **全IME共通で `shinni→しんに` が正しいローマ字**（ソース: シャープ ローマ字ガイド / Mozc `romanji-hiragana.tsv`。romaji 層では解決不可、`おんな=onna` と同型）。nuko は `nn_alternate_readings` で `しんに→しんい` の**代替読みも変換してマージ**し、真意 を候補に出す（＝Google/ATOK が変換層でやる曖昧一致と同方式）。
+
+- **罠**: 代替読み由来候補の `candidate.reading` を代替読み（しんい）のままにすると、ユーザーが `しんに` と打って真意を選んでも **Layer0 頻度学習が しんい でキーされ**、次回 `しんに` で引けず「選んでも一生効かない」。観察ログ(Layer1/2)はオプトインなので未有効ユーザーでは訂正経路も働かない。
+- **ルール**: 代替読み候補は `candidate.reading` を**入力(文節)読みに付け替える**（`candidate.reading` は表示に使われず学習キー専用。controller は `seg.reading` を使う）。`engine.rs` の `convert()` / `merge_nn_alternates_into_segments()` 参照。これで一度選べば Layer0 (score 200_010 > libakaza 100_000) で次回先頭。
+- 初回ランキング（真意 を初手で上位）は未対応の follow-up（#159）。
+
+### 設計思想: 学習4層 ↔ 心の構造（意識/個人的無意識/集合的無意識/超意識）
+
+個人学習は**共有しない**、集合知は**有益な分だけアップデートで配布**、AI(dreaming)は**意図推論**——この振り分けは心の構造のメタファで整理できる。長期の設計思想は [`docs/LEARNING_ARCHITECTURE.md` §1.5](docs/LEARNING_ARCHITECTURE.md)（長期記憶）。このCLAUDE.md（短期記憶）には運用規約だけ置き、思想は docs 側を正とする。
+
 ## モデル配布の戦略
 
 - 現状: 各開発者が `make all` でローカル生成
