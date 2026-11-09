@@ -83,6 +83,14 @@ fn is_kana_char(c: char) -> bool {
 #[cfg(feature = "akaza")]
 const LIBAKAZA_PRIORITY_BOOST: i32 = 100_000;
 
+/// 代替読み (しんに→しんい) が実在語のとき、その**読みのひらがな**を候補に足すときの score。
+///
+/// 位置の意図: **旧字体 (`KYUJITAI_SCORE` = -80) より上・実在漢字 (BOOST 済み) より下**。
+/// 「真意」等の漢字変換は押し下げず、かつ「しんい」を旧字体の眞意/眞に より前に出す。
+/// この不変条件 (> -80) を壊すと旧字体の下に沈むので、kyujitai 側を変えたら要見直し。
+#[cfg(feature = "akaza")]
+const ALT_READING_KANA_SCORE: i32 = -70;
+
 /// 単語登録 (ユーザー辞書) 候補に乗せる優先度ブースト。
 ///
 /// 辞書候補は素の score が -100 前後で、libakaza (BOOST 100_000) の下に沈む。
@@ -426,7 +434,8 @@ impl ConversionEngine {
                     candidates.push(candidate);
                 }
             }
-            // 代替読みが **実在語** なら、その読みのひらがなも候補に足す (低スコア末尾付近)。
+            // 代替読みが **実在語** なら、その読みのひらがなも候補に足す。
+            // score は旧字体より上・実在漢字より下 (ALT_READING_KANA_SCORE 参照)。
             // 一度選べば学習で上位化する。判定詳細は reading_is_single_dict_word 参照。
             if alt != reading
                 && backend.reading_is_single_dict_word(&alt)
@@ -434,7 +443,7 @@ impl ConversionEngine {
             {
                 candidates.push(
                     Candidate::new(&alt, reading)
-                        .with_score(-85)
+                        .with_score(ALT_READING_KANA_SCORE)
                         .with_source(CandidateSource::System),
                 );
             }
