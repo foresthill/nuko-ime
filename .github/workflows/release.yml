@@ -31,7 +31,9 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-14
+    # macos-latest を使う (ci.yml と同じ)。macos-14 は本アカウントのランナー構成で
+    # 'not supported' になり run が cancelled になった (2026-11)。
+    runs-on: macos-latest
     env:
       # secrets は if: で直接使えないので env に写して判定する。
       HAS_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
