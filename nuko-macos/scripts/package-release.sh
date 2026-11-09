@@ -38,12 +38,17 @@ mkdir -p "$DIST"
 echo "[1/4] release ビルド..."
 cd "$PROJECT_ROOT"
 cargo build --release -p nuko-macos --features "$FEATURES"
+# BYOK/AI dreaming/アップデート確認 用の nuko CLI も同梱する (install.sh と同じ)。
+# これが無いと配布版 .app で「nuko CLI が見つかりません」になる。
+cargo build --release --bin nuko -p nuko-cli
 
 echo "[2/4] .app バンドル組み立て..."
 STAGE="$DIST/stage"
 APP="$STAGE/$APP_BUNDLE"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$PROJECT_ROOT/target/release/$APP_NAME" "$APP/Contents/MacOS/"
+# nuko CLI を同梱 (IME から current_exe の隣 = Contents/MacOS/nuko として解決)
+cp "$PROJECT_ROOT/target/release/nuko" "$APP/Contents/MacOS/"
 cp "$PROJECT_ROOT/nuko-macos/Info.plist" "$APP/Contents/"
 for icon in icon.tiff icon-japanese.tiff icon-roman.tiff; do
   [ -f "$PROJECT_ROOT/nuko-macos/resources/$icon" ] &&
@@ -57,9 +62,36 @@ for lang in ja en; do
   fi
 done
 
+# --- 2.5 コード署名 (Developer ID, hardened runtime) ---
+# SIGN_IDENTITY が空なら従来どおり未署名 (ローカル開発 = adhoc)。CI で Secrets から
+# 設定したときだけ署名する。入れ子の Mach-O (nuko) を先に、最後にバンドル本体を署名
+# (inside-out)。--options runtime は notarization の必須要件。
+if [ -n "${SIGN_IDENTITY:-}" ]; then
+  echo "[2.5] コード署名 ($SIGN_IDENTITY, hardened runtime)..."
+  codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP/Contents/MacOS/nuko"
+  codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP"
+  codesign --verify --deep --strict --verbose=2 "$APP"
+fi
+
 APP_ZIP="$DIST/${APP_NAME}-v${VERSION}-macos.zip"
 # ditto はバンドルの属性/権限を保ったまま zip 化する macOS 標準手段
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$APP_ZIP"
+
+# --- 2.7 公証 (notarytool) + staple ---
+# 署名済み & Apple 資格情報が揃っているときだけ。zip を Apple に送って公証チケットを
+# 取り、.app に staple してから zip を作り直す (チケットを同梱)。
+if [ -n "${SIGN_IDENTITY:-}" ] && [ -n "${APPLE_ID:-}" ] &&
+  [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+  echo "[2.7] 公証 (notarytool submit --wait)..."
+  xcrun notarytool submit "$APP_ZIP" \
+    --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+  echo "       staple..."
+  xcrun stapler staple "$APP"
+  rm -f "$APP_ZIP"
+  ditto -c -k --sequesterRsrc --keepParent "$APP" "$APP_ZIP"
+  xcrun stapler validate "$APP"
+  spctl -a -t exec -vv "$APP" || true
+fi
 
 # --- 3. モデル tar (NOTICE 同梱、CC BY-SA 4.0 帰属要件) ---
 echo "[3/4] モデル tar (NOTICE 同梱)..."
