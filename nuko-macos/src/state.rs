@@ -812,15 +812,32 @@ fn current_key_line(provider: &str) -> String {
 /// メニュー「🔄 アップデートを確認…」: `nuko update` でチェックし、結果をダイアログで表示。
 ///
 /// 更新があれば「今すぐ更新」でダウンロード→置換→再起動（反映には入力ソース切替が要る）。
-pub fn check_update_from_menu(mtm: MainThreadMarker) {
+///
+/// **非同期**: `nuko update` は GitHub へネットワーク呼び出しをするため、メインスレッド
+/// (= IME の run loop) で同期実行すると、応答が遅い/ハングした場合に**全アプリの入力が固まり
+/// ダイアログも出ない**（2026-11 ユーザー報告「アップデートを確認を押しても何も出ない」の
+/// 最有力原因）。dreaming と同じく subprocess はバックグラウンドで走らせ、完了したら
+/// `dispatch2` でメインキューへ戻り [`show_update_result`] が NSAlert を表示する。
+pub fn check_update_from_menu(_mtm: MainThreadMarker) {
+    std::thread::spawn(|| {
+        let (stdout, code) = run_update_check();
+        // NSAlert / NSApplication はメインスレッド限定。
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            if let Some(mtm) = MainThreadMarker::new() {
+                show_update_result(mtm, stdout, code);
+            }
+        });
+    });
+}
+
+/// アップデート確認結果を NSAlert で表示する（**メインスレッドで呼ぶこと**）。
+fn show_update_result(mtm: MainThreadMarker, stdout: String, code: Option<i32>) {
     use objc2_app_kit::{NSAlert, NSApplication, NSApplicationActivationPolicy};
     use objc2_foundation::NSString;
 
     // NSAlertFirstButtonReturn = 1000, Second = 1001, Third = 1002。
     const FIRST: isize = 1000;
     const SECOND: isize = 1001;
-
-    let (stdout, code) = run_update_check();
 
     // IME は background agent なので、ダイアログ表示中だけ通常アプリ化して前面に出す。
     let app = NSApplication::sharedApplication(mtm);
