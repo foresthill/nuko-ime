@@ -9,8 +9,8 @@
 //! (2026-10 ユーザー要望「リッチな画面」/「画面いっぱいで閉じられない」の修正)。
 
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
-use objc2::{msg_send, sel, ClassType, MainThreadMarker, MainThreadOnly};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
+use objc2::{define_class, msg_send, sel, ClassType, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSBackingStoreType, NSButton, NSColor, NSFont, NSPanel, NSPopUpMenuWindowLevel, NSScreen,
     NSScrollView, NSTextView, NSView, NSWindowStyleMask,
@@ -23,7 +23,42 @@ const LINE_HEIGHT: f64 = 19.0;
 const PADDING: f64 = 12.0;
 const CLOSE_SIZE: f64 = 22.0;
 const CLOSE_ROW: f64 = CLOSE_SIZE + 10.0; // ✕ ボタン行の高さ
+const BUTTON_ROW: f64 = 40.0; // アップデート時の操作ボタン行の高さ
+const BUTTON_H: f64 = 28.0;
 const MIN_HEIGHT: f64 = 120.0;
+
+// アップデートパネルの操作ボタン (リリースページを開く / 今すぐ更新) の **安定した** target。
+// SettingsTarget と同じ理由: ボタン target を IME controller にすると IMK がそれを破棄して
+// ボタンが効かなくなる。パネル (アプリ全体で 1 つ、state が保持) が本オブジェクトを持つ。
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "NukoUpdateActionsTarget"]
+    #[thread_kind = MainThreadOnly]
+    struct UpdateActionsTarget;
+
+    unsafe impl NSObjectProtocol for UpdateActionsTarget {}
+
+    impl UpdateActionsTarget {
+        /// 「リリースページを開く」。
+        #[unsafe(method(nukoOpenReleasePage:))]
+        fn open_release(&self, _s: Option<&AnyObject>) {
+            crate::state::open_release_page();
+        }
+        /// 「今すぐ更新」(nuko update --apply)。
+        #[unsafe(method(nukoApplyUpdate:))]
+        fn apply_update(&self, _s: Option<&AnyObject>) {
+            if let Some(mtm) = MainThreadMarker::new() {
+                crate::state::apply_update_from_panel(mtm);
+            }
+        }
+    }
+);
+
+impl UpdateActionsTarget {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        unsafe { msg_send![Self::alloc(mtm), init] }
+    }
+}
 
 /// 学習状況を表示する浮遊パネル (アプリ全体で 1 つ、[`crate::state`] が保持)。
 pub struct LearningStatusPanel {
@@ -31,6 +66,12 @@ pub struct LearningStatusPanel {
     scroll: Retained<NSScrollView>,
     text_view: Retained<NSTextView>,
     close: Retained<NSButton>,
+    /// アップデート時のみ表示する操作ボタン (既定は非表示)。
+    btn_release: Retained<NSButton>,
+    btn_update: Retained<NSButton>,
+    /// ボタンの安定した action target (パネルが保持し続ける)。
+    #[allow(dead_code)]
+    update_actions: Retained<UpdateActionsTarget>,
 }
 
 impl LearningStatusPanel {
@@ -94,10 +135,30 @@ impl LearningStatusPanel {
             close.setAction(Some(sel!(orderOut:)));
         }
 
+        // アップデート用の操作ボタン (既定は非表示)。target は安定オブジェクト。
+        let update_actions = UpdateActionsTarget::new(mtm);
+        let btn_release = NSButton::new(mtm);
+        btn_release.setTitle(&NSString::from_str("リリースページを開く"));
+        let btn_update = NSButton::new(mtm);
+        btn_update.setTitle(&NSString::from_str("今すぐ更新"));
+        unsafe {
+            let target: &AnyObject = &update_actions;
+            btn_release.setTarget(Some(target));
+            btn_release.setAction(Some(sel!(nukoOpenReleasePage:)));
+            btn_update.setTarget(Some(target));
+            btn_update.setAction(Some(sel!(nukoApplyUpdate:)));
+        }
+        btn_release.setHidden(true);
+        btn_update.setHidden(true);
+
         let scroll_view: &NSView = &scroll;
         let close_view: &NSView = close.as_super().as_super();
+        let btn_release_view: &NSView = btn_release.as_super().as_super();
+        let btn_update_view: &NSView = btn_update.as_super().as_super();
         container.addSubview(scroll_view);
         container.addSubview(close_view);
+        container.addSubview(btn_release_view);
+        container.addSubview(btn_update_view);
         panel.setContentView(Some(&container));
 
         let this = Self {
@@ -105,39 +166,74 @@ impl LearningStatusPanel {
             scroll,
             text_view,
             close,
+            btn_release,
+            btn_update,
+            update_actions,
         };
-        this.layout(MIN_HEIGHT);
+        this.layout(MIN_HEIGHT, false);
         this
     }
 
-    /// 内部: content 高さに合わせてスクロールビューと ✕ ボタンを再配置する。
-    fn layout(&self, height: f64) {
-        // スクロールビューは下 PADDING から、上は ✕ 行ぶん空ける。
+    /// 内部: content 高さに合わせてスクロールビュー・✕・操作ボタンを再配置する。
+    /// `with_buttons` のときは下端にボタン行ぶんを確保してリリース/更新ボタンを置く。
+    fn layout(&self, height: f64, with_buttons: bool) {
+        let btn_row = if with_buttons { BUTTON_ROW } else { 0.0 };
+        // スクロールビューは下 (PADDING + ボタン行) から、上は ✕ 行ぶん空ける。
         self.scroll.setFrame(NSRect::new(
-            NSPoint::new(PADDING, PADDING),
-            NSSize::new(WIDTH - PADDING * 2.0, height - CLOSE_ROW - PADDING),
+            NSPoint::new(PADDING, PADDING + btn_row),
+            NSSize::new(
+                WIDTH - PADDING * 2.0,
+                height - CLOSE_ROW - PADDING - btn_row,
+            ),
         ));
         // ✕ は右上。
         self.close.setFrame(NSRect::new(
             NSPoint::new(WIDTH - CLOSE_SIZE - 6.0, height - CLOSE_SIZE - 6.0),
             NSSize::new(CLOSE_SIZE, CLOSE_SIZE),
         ));
+        if with_buttons {
+            // 下端に 2 ボタンを横並び (左: リリースページ / 右: 今すぐ更新)。
+            let bw = (WIDTH - PADDING * 3.0) / 2.0;
+            self.btn_release.setFrame(NSRect::new(
+                NSPoint::new(PADDING, PADDING),
+                NSSize::new(bw, BUTTON_H),
+            ));
+            self.btn_update.setFrame(NSRect::new(
+                NSPoint::new(PADDING * 2.0 + bw, PADDING),
+                NSSize::new(bw, BUTTON_H),
+            ));
+        }
     }
 
     /// テキストを表示する (高さは画面内にクランプ、溢れたらスクロール、最前面表示)。
     pub fn show_text(&self, text: &str) {
+        self.btn_release.setHidden(true);
+        self.btn_update.setHidden(true);
+        self.render(text, false);
+    }
+
+    /// テキスト + アップデート操作ボタン (リリースページ / 今すぐ更新) を表示する。
+    pub fn show_update(&self, text: &str) {
+        self.btn_release.setHidden(false);
+        self.btn_update.setHidden(false);
+        self.render(text, true);
+    }
+
+    /// 内部: テキスト設定・高さ計算・再配置・最前面表示 (ボタン有無で行を確保)。
+    fn render(&self, text: &str, with_buttons: bool) {
         let ns = NSString::from_str(text);
         self.text_view.setString(&ns);
 
         let lines = text.lines().count().max(1);
-        let content_h = (lines as f64) * LINE_HEIGHT + CLOSE_ROW + PADDING * 2.0;
-        // 画面可視高さの 70% を上限、MIN_HEIGHT を下限。超過分はスクロール。
+        let btn_row = if with_buttons { BUTTON_ROW } else { 0.0 };
+        let content_h = (lines as f64) * LINE_HEIGHT + CLOSE_ROW + btn_row + PADDING * 2.0;
+        // 画面可視高さの 70% を上限、MIN_HEIGHT(+ボタン行) を下限。超過分はスクロール。
         let max_height = screen_visible_height().map_or(640.0, |h| h * 0.70);
-        let height = content_h.clamp(MIN_HEIGHT, max_height);
+        let height = content_h.clamp(MIN_HEIGHT + btn_row, max_height);
 
         let content = NSSize::new(WIDTH, height);
         self.panel.setContentSize(content);
-        self.layout(height);
+        self.layout(height, with_buttons);
 
         if let Some(pt) = center_top_left(content) {
             self.panel.setFrameTopLeftPoint(pt);
