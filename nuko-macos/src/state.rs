@@ -830,28 +830,88 @@ pub fn check_update_from_menu(_mtm: MainThreadMarker) {
     });
 }
 
-/// アップデート確認結果を NSAlert で表示する（**メインスレッドで呼ぶこと**）。
+// パネルの「リリースページを開く」ボタン用に、直近の更新のリリース URL を保持する。
+thread_local! {
+    static UPDATE_RELEASE_URL: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// アップデート確認結果を **自前パネル** で表示する（**メインスレッドで呼ぶこと**）。
 fn show_update_result(mtm: MainThreadMarker, stdout: String, code: Option<i32>) {
     // ★ NSAlert は使わない。IME (background agent) では標準 AppKit モーダルが前面に
     //   出ず「押しても何も出ない」になる (落とし穴 #1/#2。About 等の他メニューが
     //   NSAlert でなく自前 NSPanel を使っているのと同じ理由)。learning パネル
     //   (orderFrontRegardless + NSPopUpMenuWindowLevel) に載せ替えて確実に表示する。
-    let text = match code {
+    ensure_learning_panel(mtm);
+    match code {
+        // 更新あり: リリース URL を保持し、操作ボタン付きで表示する。
         Some(10) => {
             let url = extract_release_url(&stdout).unwrap_or_default();
-            format!(
+            UPDATE_RELEASE_URL.with(|c| *c.borrow_mut() = Some(url));
+            let text = format!(
                 "⬆️ アップデートがあります\n\n{stdout}\n\n\
-                 下記リリースページから新バージョンを入手してください:\n{url}\n\n\
+                 下のボタンから更新できます。\n\
                  ※ 更新後は【入力ソースを一度切替えて戻す】か再ログインで反映されます。"
-            )
+            );
+            with_learning_panel(|p| {
+                if let Some(p) = p {
+                    p.show_update(&text);
+                }
+            });
         }
-        Some(0) => format!("✅ 最新です\n\n{stdout}"),
-        _ => format!("⚠️ アップデート確認に失敗しました\n\n{stdout}"),
-    };
+        Some(0) => {
+            UPDATE_RELEASE_URL.with(|c| *c.borrow_mut() = None);
+            let text = format!("✅ 最新です\n\n{stdout}");
+            with_learning_panel(|p| {
+                if let Some(p) = p {
+                    p.show_text(&text);
+                }
+            });
+        }
+        _ => {
+            UPDATE_RELEASE_URL.with(|c| *c.borrow_mut() = None);
+            let text = format!("⚠️ アップデート確認に失敗しました\n\n{stdout}");
+            with_learning_panel(|p| {
+                if let Some(p) = p {
+                    p.show_text(&text);
+                }
+            });
+        }
+    }
+}
+
+/// パネルの「リリースページを開く」ボタン: 直近の更新のリリース URL をブラウザで開く。
+pub fn open_release_page() {
+    let url = UPDATE_RELEASE_URL.with(|c| c.borrow().clone());
+    if let Some(url) = url {
+        if !url.is_empty() {
+            let _ = std::process::Command::new("/usr/bin/open")
+                .arg(url)
+                .status();
+        }
+    }
+}
+
+/// パネルの「今すぐ更新」ボタン: `nuko update --apply` を起動 (DL→置換→再起動)。
+///
+/// 完了すると NukoIME が再起動する。反映には更新後に入力ソース切替か再ログインが要る
+/// (install.sh と同じ再登録の制約。[[nuko-ime-install-reregister]])。apply 自体は実機
+/// 未検証の経路なので、まず進捗を出してから subprocess をバックグラウンドで起動する。
+pub fn apply_update_from_panel(mtm: MainThreadMarker) {
     ensure_learning_panel(mtm);
     with_learning_panel(|p| {
         if let Some(p) = p {
-            p.show_text(&text);
+            p.show_text(
+                "⬇️ 更新をダウンロードして適用しています…\n\n\
+                 完了すると NukoIME が再起動します。\n\
+                 反映には更新後に【入力ソースを一度切替えて戻す】か再ログインが要ります。",
+            );
+        }
+    });
+    std::thread::spawn(|| {
+        if let Some(nuko) = resolve_nuko_binary() {
+            let _ = std::process::Command::new(&nuko)
+                .args(["update", "--apply"])
+                .status();
         }
     });
 }

@@ -701,7 +701,7 @@ fn cmd_update(apply: bool) -> Result<()> {
         std::process::exit(10);
     };
     if !apply {
-        println!("（メニューの「今すぐ更新」または `nuko update --apply` で自動更新できます）");
+        println!("（パネルの「今すぐ更新」ボタン、または `nuko update --apply` で更新できます）");
         std::process::exit(10); // 10 = 更新あり (未適用)
     }
     #[cfg(target_os = "macos")]
