@@ -832,56 +832,28 @@ pub fn check_update_from_menu(_mtm: MainThreadMarker) {
 
 /// アップデート確認結果を NSAlert で表示する（**メインスレッドで呼ぶこと**）。
 fn show_update_result(mtm: MainThreadMarker, stdout: String, code: Option<i32>) {
-    use objc2_app_kit::{NSAlert, NSApplication, NSApplicationActivationPolicy};
-    use objc2_foundation::NSString;
-
-    // NSAlertFirstButtonReturn = 1000, Second = 1001, Third = 1002。
-    const FIRST: isize = 1000;
-    const SECOND: isize = 1001;
-
-    // IME は background agent なので、ダイアログ表示中だけ通常アプリ化して前面に出す。
-    let app = NSApplication::sharedApplication(mtm);
-    let prev = app.activationPolicy();
-    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-    #[allow(deprecated)]
-    app.activateIgnoringOtherApps(true);
-
-    let alert = NSAlert::new(mtm);
-    match code {
+    // ★ NSAlert は使わない。IME (background agent) では標準 AppKit モーダルが前面に
+    //   出ず「押しても何も出ない」になる (落とし穴 #1/#2。About 等の他メニューが
+    //   NSAlert でなく自前 NSPanel を使っているのと同じ理由)。learning パネル
+    //   (orderFrontRegardless + NSPopUpMenuWindowLevel) に載せ替えて確実に表示する。
+    let text = match code {
         Some(10) => {
-            alert.setMessageText(&NSString::from_str("アップデートがあります"));
-            alert.setInformativeText(&NSString::from_str(&format!(
-                "{stdout}\n\n「今すぐ更新」でダウンロードして置換・再起動します。\n\
-                 反映には更新後に【入力ソースを一度切替えて戻す】か再ログインが必要です。"
-            )));
-            let _ = alert.addButtonWithTitle(&NSString::from_str("今すぐ更新"));
-            let _ = alert.addButtonWithTitle(&NSString::from_str("リリースページ"));
-            let _ = alert.addButtonWithTitle(&NSString::from_str("キャンセル"));
-            let resp = alert.runModal();
-            if resp == FIRST {
-                run_update_apply();
-            } else if resp == SECOND {
-                if let Some(url) = extract_release_url(&stdout) {
-                    let _ = std::process::Command::new("/usr/bin/open")
-                        .arg(url)
-                        .status();
-                }
-            }
+            let url = extract_release_url(&stdout).unwrap_or_default();
+            format!(
+                "⬆️ アップデートがあります\n\n{stdout}\n\n\
+                 下記リリースページから新バージョンを入手してください:\n{url}\n\n\
+                 ※ 更新後は【入力ソースを一度切替えて戻す】か再ログインで反映されます。"
+            )
         }
-        Some(0) => {
-            alert.setMessageText(&NSString::from_str("最新です"));
-            alert.setInformativeText(&NSString::from_str(&stdout));
-            let _ = alert.addButtonWithTitle(&NSString::from_str("OK"));
-            let _ = alert.runModal();
+        Some(0) => format!("✅ 最新です\n\n{stdout}"),
+        _ => format!("⚠️ アップデート確認に失敗しました\n\n{stdout}"),
+    };
+    ensure_learning_panel(mtm);
+    with_learning_panel(|p| {
+        if let Some(p) = p {
+            p.show_text(&text);
         }
-        _ => {
-            alert.setMessageText(&NSString::from_str("アップデート確認に失敗しました"));
-            alert.setInformativeText(&NSString::from_str(&stdout));
-            let _ = alert.addButtonWithTitle(&NSString::from_str("OK"));
-            let _ = alert.runModal();
-        }
-    }
-    app.setActivationPolicy(prev);
+    });
 }
 
 /// `nuko update` (チェックのみ) を実行して (stdout, 終了コード) を返す。
@@ -902,15 +874,6 @@ fn run_update_check() -> (String, Option<i32>) {
             (s, out.status.code())
         }
         Err(e) => (format!("nuko 実行失敗: {e}"), None),
-    }
-}
-
-/// `nuko update --apply` を実行 (DL→置換ヘルパー起動)。数秒後に NukoIME が再起動する。
-fn run_update_apply() {
-    if let Some(nuko) = resolve_nuko_binary() {
-        let _ = std::process::Command::new(&nuko)
-            .args(["update", "--apply"])
-            .status();
     }
 }
 
