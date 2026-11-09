@@ -27,10 +27,19 @@ pub struct DreamConfig {
     /// OpenRouter API のベース URL（既定 `https://openrouter.ai/api/v1`）。
     #[serde(default = "default_base_url")]
     pub base_url: String,
+    /// Ollama (OpenAI 互換) のベース URL（既定 `http://localhost:11434/v1`）。
+    /// 自社サーバーの Ollama を使う場合は SSH ポートフォワード後の localhost か、
+    /// 直接 `http://host:11434/v1` を指定する。
+    #[serde(default = "default_ollama_base_url")]
+    pub ollama_base_url: String,
 }
 
 fn default_base_url() -> String {
     "https://openrouter.ai/api/v1".to_string()
+}
+
+fn default_ollama_base_url() -> String {
+    "http://localhost:11434/v1".to_string()
 }
 
 impl Default for DreamConfig {
@@ -40,6 +49,7 @@ impl Default for DreamConfig {
             provider: None,
             model: None,
             base_url: default_base_url(),
+            ollama_base_url: default_ollama_base_url(),
         }
     }
 }
@@ -95,17 +105,34 @@ pub fn parse_completion(resp: &serde_json::Value) -> Result<String> {
     )))
 }
 
-/// OpenRouter を叩く [`DreamProvider`] 実装。
+/// OpenAI 互換 chat/completions を叩く [`DreamProvider`] 実装。
+///
+/// OpenRouter 用だが、`POST {base_url}/chat/completions` は OpenAI 互換なので
+/// **Ollama (`/v1/chat/completions`) など他の OpenAI 互換サーバーにも使える**。
+/// その場合は [`OpenRouterProvider::with_label`] で `label`（ログ/表示名）を差し替える。
 pub struct OpenRouterProvider {
     api_key: String,
     model: String,
     base_url: String,
+    /// `name()` と AI ログに使う表示名（既定 `"openrouter"`、Ollama 等では `"ollama"`）。
+    label: String,
 }
 
 impl OpenRouterProvider {
-    /// キー・モデル・ベース URL から構築する。
+    /// キー・モデル・ベース URL から構築する（表示名 = `openrouter`）。
     #[must_use]
     pub fn new(
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+        base_url: impl Into<String>,
+    ) -> Self {
+        Self::with_label("openrouter", api_key, model, base_url)
+    }
+
+    /// 表示名（`label`）を指定して構築する。OpenAI 互換の別サーバー（Ollama 等）用。
+    #[must_use]
+    pub fn with_label(
+        label: impl Into<String>,
         api_key: impl Into<String>,
         model: impl Into<String>,
         base_url: impl Into<String>,
@@ -114,13 +141,14 @@ impl OpenRouterProvider {
             api_key: api_key.into(),
             model: model.into(),
             base_url: base_url.into(),
+            label: label.into(),
         }
     }
 }
 
 impl DreamProvider for OpenRouterProvider {
     fn name(&self) -> &str {
-        "openrouter"
+        &self.label
     }
 
     fn complete(&self, prompt: &str) -> Result<String> {
@@ -164,7 +192,7 @@ impl DreamProvider for OpenRouterProvider {
             .map(str::to_string);
         nuko_core::ai_log::record(&nuko_core::ai_log::AiLogEntry {
             time: nuko_core::ai_log::now_iso(),
-            provider: "openrouter".to_string(),
+            provider: self.label.clone(),
             model: self.model.clone(),
             resolved_model: resolved,
             prompt: prompt.to_string(),
@@ -216,6 +244,34 @@ mod tests {
         assert!(!c.enabled);
         assert!(c.model.is_none());
         assert_eq!(c.base_url, "https://openrouter.ai/api/v1");
+    }
+
+    #[test]
+    fn ollama_base_url_defaults_to_localhost() {
+        let c = DreamConfig::default();
+        assert_eq!(c.ollama_base_url, "http://localhost:11434/v1");
+    }
+
+    #[test]
+    fn ollama_base_url_is_overridable_from_toml() {
+        // 会社サーバーの Ollama を SSH トンネル (localhost:11435) で使うケース。
+        let path = std::env::temp_dir().join(format!("nuko-ollama-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "provider = \"ollama\"\nmodel = \"qwen2.5:1.5b\"\nollama_base_url = \"http://localhost:11435/v1\"\n",
+        )
+        .unwrap();
+        let c = DreamConfig::load(&path).unwrap();
+        assert_eq!(c.provider.as_deref(), Some("ollama"));
+        assert_eq!(c.ollama_base_url, "http://localhost:11435/v1");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn with_label_sets_provider_name() {
+        let p = OpenRouterProvider::with_label("ollama", "k", "m", "http://localhost:11434/v1");
+        assert_eq!(p.name(), "ollama");
+        assert_eq!(OpenRouterProvider::new("k", "m", "b").name(), "openrouter");
     }
 
     #[test]

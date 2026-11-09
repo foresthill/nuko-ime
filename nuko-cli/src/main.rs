@@ -77,7 +77,7 @@ enum Commands {
         /// プロンプトに載せる読みの最大件数
         #[arg(long, default_value = "40")]
         max_readings: usize,
-        /// 推論プロバイダ ("mock" / "openrouter" / "anthropic"。未指定なら dry-run でプロンプト表示)
+        /// 推論プロバイダ ("mock" / "openrouter" / "anthropic" / "ollama"。未指定なら dry-run でプロンプト表示)
         #[arg(long)]
         provider: Option<String>,
         /// モデル (openrouter/anthropic 用。未指定なら ai.toml の model、それも無ければエラー)
@@ -549,7 +549,8 @@ fn normalize_provider(p: &str) -> Result<String> {
     match p.to_lowercase().as_str() {
         "anthropic" | "claude" => Ok("anthropic".to_string()),
         "openrouter" => Ok("openrouter".to_string()),
-        other => anyhow::bail!("未知のプロバイダ: {other} (anthropic / openrouter)"),
+        "ollama" => Ok("ollama".to_string()),
+        other => anyhow::bail!("未知のプロバイダ: {other} (anthropic / openrouter / ollama)"),
     }
 }
 
@@ -845,7 +846,7 @@ fn cmd_dream(
     };
     let provider_name = provider_name.as_str();
 
-    // プロバイダを解決 (mock / openrouter)。
+    // プロバイダを解決 (mock / openrouter / ollama / anthropic)。
     let provider: Box<dyn DreamProvider> = match provider_name {
         "mock" => Box::new(MockProvider::empty()),
         "openrouter" => {
@@ -870,6 +871,34 @@ fn cmd_dream(
             );
             Box::new(OpenRouterProvider::new(api_key, model, cfg.base_url))
         }
+        "ollama" => {
+            // Ollama は OpenAI 互換 (`/v1/chat/completions`) なので OpenRouterProvider を
+            // 流用し、表示名だけ "ollama" にする。認証不要 (キーがあれば使う、無ければダミー)。
+            // 自社サーバーの Ollama は SSH ポートフォワード後の localhost か、
+            // ai.toml の ollama_base_url に `http://host:11434/v1` を指定する。
+            use crate::openrouter::{DreamConfig, OpenRouterProvider};
+            let cfg = DreamConfig::load(dir.join("ai.toml"))?;
+            let api_key =
+                resolve_key("OLLAMA_API_KEY", "ollama").unwrap_or_else(|| "ollama".to_string());
+            let model = model.map(String::from).or(cfg.model).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "モデル未指定です。--model か ai.toml の model を設定してください \
+                     (例: qwen2.5:1.5b / llama3.2)。`ollama list` で確認。"
+                )
+            })?;
+            println!(
+                "  {} ollama / model={} / base_url={}",
+                "プロバイダ:".dimmed(),
+                model.cyan(),
+                cfg.ollama_base_url.dimmed()
+            );
+            Box::new(OpenRouterProvider::with_label(
+                "ollama",
+                api_key,
+                model,
+                cfg.ollama_base_url,
+            ))
+        }
         "anthropic" | "claude" => {
             use crate::anthropic::{model_hint, AnthropicProvider};
             let cfg = crate::openrouter::DreamConfig::load(dir.join("ai.toml"))?;
@@ -893,7 +922,9 @@ fn cmd_dream(
             Box::new(AnthropicProvider::new(api_key, model))
         }
         other => {
-            anyhow::bail!("未知のプロバイダ: {other} (\"mock\" / \"openrouter\" / \"anthropic\")");
+            anyhow::bail!(
+                "未知のプロバイダ: {other} (\"mock\" / \"openrouter\" / \"ollama\" / \"anthropic\")"
+            );
         }
     };
 
