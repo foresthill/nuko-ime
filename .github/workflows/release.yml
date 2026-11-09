@@ -1,0 +1,122 @@
+name: Release
+
+# タグ push (v*) で、署名 + 公証済みの NukoIME.app を作って GitHub Release に添付する。
+# 署名/公証は Developer ID + App 用パスワード (notarytool)。必要な Secrets は下記。
+# これらの Secrets が無い/空の場合は package-release.sh が未署名で通す (= 署名ステップが
+# 事実上 no-op)。CI 実行自体は失敗しない。
+#
+# 必要な Secrets (Settings → Secrets and variables → Actions):
+#   APPLE_CERTIFICATE           … Developer ID Application 証明書 (.p12) の base64
+#                                 (base64 -i cert.p12 | pbcopy で作る)
+#   APPLE_CERTIFICATE_PASSWORD  … .p12 書き出し時のパスワード
+#   APPLE_SIGNING_IDENTITY      … 例: "Developer ID Application: Your Name (TEAMID123)"
+#   APPLE_ID                    … Apple アカウントのメール
+#   APPLE_PASSWORD              … App 用パスワード (appleid.apple.com で発行)
+#   APPLE_TEAM_ID               … 10 桁の Team ID
+#
+# 注: モデル tar (~166MB) は生成物で CI には無いため、本ワークフローは **署名済み .app
+#     (zip) + SHA256SUMS のみ** を添付する。モデル tar は別途手動添付 (未変更なら前版を再利用)。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "対象タグ (例: v0.1.5)。既存タグを指定すること。"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    env:
+      # secrets は if: で直接使えないので env に写して判定する。
+      HAS_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
+    steps:
+      - name: タグを決定
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: 署名証明書をインポート (Secrets がある時のみ)
+        id: keychain
+        if: ${{ env.HAS_CERT == 'true' }}
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/build.keychain"
+          KCPW="$(openssl rand -base64 24)"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KCPW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KCPW" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPW" "$KEYCHAIN"
+          # build.keychain を検索リスト先頭に (login.keychain は残す)。codesign が
+          # Developer ID 署名鍵を見つけられるようにする定石。
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain
+          security default-keychain -s "$KEYCHAIN"
+          rm -f "$RUNNER_TEMP/cert.p12"
+          echo "keychain=$KEYCHAIN" >> "$GITHUB_OUTPUT"
+
+      - name: ビルド + 署名 + 公証 (package-release.sh)
+        env:
+          FEATURES: akaza
+          # モデルは CI に無い → 存在しないパスで skip (app のみパッケージ)。
+          MODEL_DIR: ${{ runner.temp }}/no-model
+          SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          ./nuko-macos/scripts/package-release.sh
+
+      - name: 成果物を確認
+        run: ls -la dist/ && cat dist/SHA256SUMS.txt
+
+      - name: GitHub Release に添付 (upsert)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          NOTES="docs/RELEASE_NOTES_${TAG}.md"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "既存 Release $TAG に添付 (--clobber)"
+            gh release upload "$TAG" dist/NukoIME-*-macos.zip dist/SHA256SUMS.txt --clobber
+          else
+            echo "Release $TAG を新規作成 (pre-release)"
+            if [ -f "$NOTES" ]; then
+              gh release create "$TAG" --prerelease \
+                --title "ぬこIME ${TAG} (macOS プレビュー)" \
+                --notes-file "$NOTES" \
+                dist/NukoIME-*-macos.zip dist/SHA256SUMS.txt
+            else
+              gh release create "$TAG" --prerelease \
+                --title "ぬこIME ${TAG} (macOS プレビュー)" \
+                --notes "署名・公証済み macOS プレビュー (未署名→署名済みへ)。モデル tar は別途添付。" \
+                dist/NukoIME-*-macos.zip dist/SHA256SUMS.txt
+            fi
+          fi
+
+      - name: キーチェーン後片付け
+        if: ${{ always() && steps.keychain.outputs.keychain != '' }}
+        run: security delete-keychain "${{ steps.keychain.outputs.keychain }}" || true
