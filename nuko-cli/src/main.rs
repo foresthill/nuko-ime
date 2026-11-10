@@ -99,8 +99,12 @@ enum Commands {
     },
     /// プロバイダのモデル一覧を実 API から取得して表示する (設定画面のモデル選択用)。
     Models {
-        /// プロバイダ ("anthropic" / "openrouter")
+        /// プロバイダ ("anthropic" / "openrouter" / "ollama")
         provider: String,
+        /// ベース URL を上書き (ollama/openrouter)。指定時は ai.toml より優先。
+        /// 設定窓の「Ollama ベースURL」欄を保存前でも接続確認するために使う。
+        #[arg(long)]
+        base_url: Option<String>,
     },
     /// アップデート確認 (GitHub Releases)。--apply で .app を置換・再起動 (macOS)。
     ///
@@ -218,7 +222,7 @@ fn main() -> Result<()> {
             apply,
         } => cmd_dream(max_readings, provider.as_deref(), model.as_deref(), apply),
         Commands::Config { action } => cmd_config(action),
-        Commands::Models { provider } => cmd_models(&provider),
+        Commands::Models { provider, base_url } => cmd_models(&provider, base_url.as_deref()),
         Commands::Update { apply } => cmd_update(apply),
         Commands::Dict { action } => cmd_dict(action),
         Commands::AiLog { count, full } => cmd_ai_log(count, full),
@@ -720,20 +724,22 @@ fn cmd_update(apply: bool) -> Result<()> {
 }
 
 /// `nuko models <provider>`: 実 API からモデル一覧を取得し id を 1 行ずつ出力する。
-fn cmd_models(provider: &str) -> Result<()> {
+fn cmd_models(provider: &str, base_override: Option<&str>) -> Result<()> {
     let provider = normalize_provider(provider)?;
     let ids = match provider.as_str() {
         "openrouter" => {
-            // base_url は ai.toml があればそれ、無ければ既定。公開 API なのでキー不要。
-            let base = nuko_data_dir()
-                .ok()
-                .map(|d| {
-                    crate::openrouter::DreamConfig::load(d.join("ai.toml")).unwrap_or_default()
-                })
-                .map_or_else(
-                    || "https://openrouter.ai/api/v1".to_string(),
-                    |c| c.base_url,
-                );
+            // base_url は --base-url 指定 > ai.toml > 既定。公開 API なのでキー不要。
+            let base = base_override.map(str::to_string).unwrap_or_else(|| {
+                nuko_data_dir()
+                    .ok()
+                    .map(|d| {
+                        crate::openrouter::DreamConfig::load(d.join("ai.toml")).unwrap_or_default()
+                    })
+                    .map_or_else(
+                        || "https://openrouter.ai/api/v1".to_string(),
+                        |c| c.base_url,
+                    )
+            });
             models::fetch_openrouter(&base)?
         }
         "anthropic" => {
@@ -745,17 +751,23 @@ fn cmd_models(provider: &str) -> Result<()> {
             models::fetch_anthropic(&key)?
         }
         "ollama" => {
-            // Ollama は OpenAI 互換 (`/v1/models`)。base は ai.toml の ollama_base_url
-            // (無ければ既定 localhost:11434)。キー不要。
-            let base = nuko_data_dir()
-                .ok()
-                .map(|d| {
-                    crate::openrouter::DreamConfig::load(d.join("ai.toml")).unwrap_or_default()
-                })
-                .map_or_else(
-                    || "http://localhost:11434/v1".to_string(),
-                    |c| c.ollama_base_url,
-                );
+            // Ollama は OpenAI 互換 (`/v1/models`)。base は --base-url > ai.toml > 既定。
+            // 設定窓で入力しただけ (保存前) の URL でも接続確認できるよう --base-url を優先。
+            let mut base = base_override.map(str::to_string).unwrap_or_else(|| {
+                nuko_data_dir()
+                    .ok()
+                    .map(|d| {
+                        crate::openrouter::DreamConfig::load(d.join("ai.toml")).unwrap_or_default()
+                    })
+                    .map_or_else(
+                        || "http://localhost:11434/v1".to_string(),
+                        |c| c.ollama_base_url,
+                    )
+            });
+            // `/v1` を含まない入力 (例 http://localhost:11435) は OpenAI 互換の /v1 を補う。
+            if !base.contains("/v1") {
+                base = format!("{}/v1", base.trim_end_matches('/'));
+            }
             models::fetch_openrouter(&base)?
         }
         _ => unreachable!("normalize_provider が検証済み"),
