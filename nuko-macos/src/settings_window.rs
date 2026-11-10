@@ -72,6 +72,11 @@ define_class!(
         fn fetch_models(&self, _s: Option<&AnyObject>) {
             crate::state::fetch_models();
         }
+        /// 「AI接続テスト」。選んだ provider/model で実際に AI へ ping し応答を確認する。
+        #[unsafe(method(nukoAiTest:))]
+        fn ai_test(&self, _s: Option<&AnyObject>) {
+            crate::state::ai_test();
+        }
         /// 「閉じる」(窓を隠して activation policy を戻す)。
         #[unsafe(method(nukoCloseSettings:))]
         fn close_action(&self, _s: Option<&AnyObject>) {
@@ -242,6 +247,18 @@ impl SettingsWindow {
             byok_save.setTarget(Some(save_target));
             byok_save.setAction(Some(sel!(nukoSaveSettings:)));
         }
+        // 「AI接続テスト」: 選んだ provider/model で実際に推論が返るか 1 往復で確認。
+        // モデル取得 (一覧が引けるか) より強い確認。保存の右隣に置く。
+        let ai_test = NSButton::new(mtm);
+        ai_test.setTitle(&NSString::from_str("AI接続テスト"));
+        ai_test.setFrame(NSRect::new(
+            NSPoint::new(PAD + 160.0, 244.0),
+            NSSize::new(160.0, 30.0),
+        ));
+        unsafe {
+            ai_test.setTarget(Some(save_target));
+            ai_test.setAction(Some(sel!(nukoAiTest:)));
+        }
 
         // ── 単語登録 / 学習の編集 セクション ──
         let dict_h = make_label(
@@ -322,6 +339,7 @@ impl SettingsWindow {
         content.addSubview(&key_field);
         content.addSubview(&model_combo);
         content.addSubview(&fetch_models);
+        content.addSubview(&ai_test);
         content.addSubview(&reading_field);
         content.addSubview(&surface_field);
         content.addSubview(&byok_save);
