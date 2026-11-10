@@ -744,6 +744,20 @@ fn cmd_models(provider: &str) -> Result<()> {
             })?;
             models::fetch_anthropic(&key)?
         }
+        "ollama" => {
+            // Ollama は OpenAI 互換 (`/v1/models`)。base は ai.toml の ollama_base_url
+            // (無ければ既定 localhost:11434)。キー不要。
+            let base = nuko_data_dir()
+                .ok()
+                .map(|d| {
+                    crate::openrouter::DreamConfig::load(d.join("ai.toml")).unwrap_or_default()
+                })
+                .map_or_else(
+                    || "http://localhost:11434/v1".to_string(),
+                    |c| c.ollama_base_url,
+                );
+            models::fetch_openrouter(&base)?
+        }
         _ => unreachable!("normalize_provider が検証済み"),
     };
     // おすすめ (Claude 系・特に Sonnet) を上位に (400件超から選びやすく)。

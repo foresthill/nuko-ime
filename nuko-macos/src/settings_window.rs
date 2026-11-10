@@ -91,17 +91,19 @@ impl SettingsTarget {
 // OpenRouter の API キー (sk-or-v1-… 約73文字) が 1 行で全部見える幅
 // (狭いとスクロールして一部しか見えず「気持ち悪い」とユーザー報告 2026-10)。
 const W: f64 = 720.0;
-const H: f64 = 480.0;
+const H: f64 = 530.0;
 const PAD: f64 = 20.0;
 const FIELD_W: f64 = W - PAD * 2.0;
 
 /// ぬこIME 設定ウィンドウ (アプリ全体で 1 つ、[`crate::state`] が保持)。
 pub struct SettingsWindow {
     window: Retained<NSWindow>,
-    /// プロバイダ選択 (ドロップダウン)。0=Anthropic / 1=OpenRouter。
+    /// プロバイダ選択 (ドロップダウン)。0=Anthropic / 1=OpenRouter / 2=Ollama。
     provider_popup: Retained<NSPopUpButton>,
     /// 最上部の「いま AI学習で使っている provider/model」行 (開くたびに ai.toml から更新)。
     active_label: Retained<NSTextField>,
+    /// Ollama のベース URL 入力欄 (ollama 選択時のみ ai.toml の ollama_base_url に保存)。
+    ollama_base_url_field: Retained<NSTextField>,
     // NSSecureTextField だと secure input mode が IME プロセスで効かず入力不能になる
     // (2026-10 実機)。平文の NSTextField にして確実に打てるようにする (保存後にクリア)。
     key_field: Retained<NSTextField>,
@@ -172,27 +174,37 @@ impl SettingsWindow {
 
         // 最上部: いま AI学習(dreaming)で使っている provider/model を示す行。
         // 開くたびに ai.toml から [`SettingsWindow::set_active_line`] で更新する。
-        let active_label = make_label(mtm, "AI学習: —", row(452.0, 18.0));
+        let active_label = make_label(mtm, "AI学習: —", row(502.0, 18.0));
 
         // ── BYOK セクション ──
-        let byok_h = make_label(mtm, "【 BYOK（AI学習の鍵）】", row(426.0, 18.0));
-        // プロバイダ選択ドロップダウン (0=Anthropic / 1=OpenRouter)。
+        let byok_h = make_label(mtm, "【 BYOK（AI学習の鍵）】", row(476.0, 18.0));
+        // プロバイダ選択ドロップダウン (0=Anthropic / 1=OpenRouter / 2=Ollama)。
         // チェックボックスより「それぞれに鍵を持てる」ことが直感的 (ユーザー要望 2026-10)。
-        let provider_label = make_label(mtm, "プロバイダ:", row(404.0, 16.0));
+        let provider_label = make_label(mtm, "プロバイダ:", row(454.0, 16.0));
         let provider_popup = {
             let p = NSPopUpButton::initWithFrame_pullsDown(
                 NSPopUpButton::alloc(mtm),
-                NSRect::new(NSPoint::new(PAD + 90.0, 400.0), NSSize::new(280.0, 26.0)),
+                NSRect::new(NSPoint::new(PAD + 90.0, 450.0), NSSize::new(280.0, 26.0)),
                 false,
             );
             p.addItemWithTitle(&NSString::from_str("Anthropic（claude 直）"));
             p.addItemWithTitle(&NSString::from_str("OpenRouter"));
+            p.addItemWithTitle(&NSString::from_str("Ollama（ローカル/自社）"));
             unsafe {
                 p.setTarget(Some(save_target));
                 p.setAction(Some(sel!(nukoProviderChanged:)));
             }
             p
         };
+        // Ollama のベース URL (OpenAI 互換。既定 http://localhost:11434/v1、
+        // 自社サーバーは SSH トンネル後の http://localhost:11435/v1 等)。
+        // 他プロバイダ選択時は無視される (保存は ollama 選択時のみ ai.toml に反映)。
+        let base_url_label = make_label(
+            mtm,
+            "Ollama ベースURL（例 http://localhost:11435/v1。既定は 11434）:",
+            row(424.0, 16.0),
+        );
+        let ollama_base_url_field = editable_field(mtm, row(400.0, 24.0));
         let key_label = make_label(mtm, "API キー（平文入力・保存後クリア）:", row(374.0, 16.0));
         let key_field = editable_field(mtm, row(350.0, 24.0));
         // 選択プロバイダに保存済みのキーを伏せ字で常時表示 (保存後も残るので「空に見える」を解消)。
@@ -294,6 +306,7 @@ impl SettingsWindow {
             &*active_label,
             &*byok_h,
             &*provider_label,
+            &*base_url_label,
             &*key_label,
             &*current_key_label,
             &*model_label,
@@ -305,6 +318,7 @@ impl SettingsWindow {
             content.addSubview(v);
         }
         content.addSubview(&provider_popup);
+        content.addSubview(&ollama_base_url_field);
         content.addSubview(&key_field);
         content.addSubview(&model_combo);
         content.addSubview(&fetch_models);
@@ -320,6 +334,7 @@ impl SettingsWindow {
             window,
             provider_popup,
             active_label,
+            ollama_base_url_field,
             key_field,
             current_key_label,
             model_combo,
@@ -389,20 +404,35 @@ impl SettingsWindow {
         }
     }
 
-    /// 選択中プロバイダ ("anthropic" / "openrouter")。ドロップダウンの index で判定。
+    /// 選択中プロバイダ ("anthropic" / "openrouter" / "ollama")。index で判定。
     pub fn selected_provider(&self) -> &'static str {
-        if self.provider_popup.indexOfSelectedItem() == 1 {
-            "openrouter"
-        } else {
-            "anthropic"
+        match self.provider_popup.indexOfSelectedItem() {
+            1 => "openrouter",
+            2 => "ollama",
+            _ => "anthropic",
         }
     }
 
     /// プロバイダのドロップダウンを指定プロバイダに合わせる (開いた時に ai.toml の値へ)。
-    /// "openrouter"=1、それ以外 (anthropic)=0。
+    /// "openrouter"=1、"ollama"=2、それ以外 (anthropic)=0。
     pub fn set_provider(&self, provider: &str) {
-        let idx: isize = if provider == "openrouter" { 1 } else { 0 };
+        let idx: isize = match provider {
+            "openrouter" => 1,
+            "ollama" => 2,
+            _ => 0,
+        };
         self.provider_popup.selectItemAtIndex(idx);
+    }
+
+    /// Ollama ベース URL 欄の現在値。
+    pub fn base_url_value(&self) -> String {
+        self.ollama_base_url_field.stringValue().to_string()
+    }
+
+    /// Ollama ベース URL 欄を設定する (開いた時に ai.toml の値へ)。
+    pub fn set_base_url(&self, s: &str) {
+        self.ollama_base_url_field
+            .setStringValue(&NSString::from_str(s));
     }
 
     /// 最上部の「AI学習で使用中」行を更新する。

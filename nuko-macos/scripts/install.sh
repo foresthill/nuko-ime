@@ -50,7 +50,7 @@ cp "$PROJECT_ROOT/nuko-macos/Info.plist" \
    "$PROJECT_ROOT/target/$APP_BUNDLE/Contents/"
 
 # アイコンファイル (TIFF) コピー
-for icon in icon.tiff icon-japanese.tiff icon-roman.tiff; do
+for icon in icon.tiff icon-japanese.tiff icon-roman.tiff AppIcon.icns; do
     if [ -f "$PROJECT_ROOT/nuko-macos/resources/$icon" ]; then
         cp "$PROJECT_ROOT/nuko-macos/resources/$icon" \
            "$PROJECT_ROOT/target/$APP_BUNDLE/Contents/Resources/"

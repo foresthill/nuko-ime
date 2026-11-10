@@ -720,22 +720,29 @@ pub fn show_settings(mtm: MainThreadMarker) {
         }
         // ai.toml の実際の設定を読み、ドロップダウン・モデル欄・「使用中」行をそれに合わせる
         // (従来は常に Anthropic を指していて「いま何を使っているか分からない」とユーザー報告 2026-10)。
-        let (enabled, cfg_provider, cfg_model) = read_ai_config();
+        let (enabled, cfg_provider, cfg_model, cfg_ollama_base) = read_ai_config();
         let model = if cfg_model.is_empty() {
             "claude-sonnet-5-5".to_string()
         } else {
             cfg_model.clone()
         };
         // 有効な provider を優先。未設定なら anthropic を既定に。
-        let active_provider = if cfg_provider == "openrouter" {
-            "openrouter"
+        let active_provider = match cfg_provider.as_str() {
+            "openrouter" => "openrouter",
+            "ollama" => "ollama",
+            _ => "anthropic",
+        };
+        // base_url 欄は保存値があればそれ、無ければ既定 (localhost:11434) を薄く表示。
+        let base_url_display = if cfg_ollama_base.is_empty() {
+            "http://localhost:11434/v1".to_string()
         } else {
-            "anthropic"
+            cfg_ollama_base.clone()
         };
         if let Some(win) = w.as_ref() {
             win.show(mtm, &model);
             // ドロップダウンを実際の provider に合わせてから「現在のキー」をその provider で表示。
             win.set_provider(active_provider);
+            win.set_base_url(&base_url_display);
             // 最上部: いま AI学習(dreaming)で使っている provider/model。
             if enabled && !cfg_provider.is_empty() {
                 win.set_active_line(&format!("AI学習: {active_provider} / {model} を使用中"));
@@ -784,8 +791,14 @@ pub fn save_settings() {
             win.clear_key();
         }
 
-        // provider/model を ai.toml に保存 (enabled=true)。
-        if let Err(e) = write_ai_toml(provider, model) {
+        // provider/model (+ ollama の base_url) を ai.toml に保存 (enabled=true)。
+        // base_url は ollama 選択時のみ意味を持つ (他 provider では無視して空で書かない)。
+        let base_url = if provider == "ollama" {
+            win.base_url_value()
+        } else {
+            String::new()
+        };
+        if let Err(e) = write_ai_toml(provider, model, &base_url) {
             win.set_status(&format!("⚠️ ai.toml 書込失敗: {e}"));
             return;
         }
@@ -1187,19 +1200,20 @@ pub fn forget_learning_from_window() {
     });
 }
 
-/// ai.toml から (enabled, provider, model) を読む (簡易パース)。
+/// ai.toml から (enabled, provider, model, ollama_base_url) を読む (簡易パース)。
 ///
-/// 無い／読めない時は `(false, "", "")`。設定ウィンドウを開いた時に
-/// 「いま AI学習で使っている provider/model」とドロップダウン初期選択に使う。
-fn read_ai_config() -> (bool, String, String) {
+/// 無い／読めない時は `(false, "", "", "")`。設定ウィンドウを開いた時に
+/// 「いま AI学習で使っている provider/model」とドロップダウン初期選択・base_url 欄に使う。
+fn read_ai_config() -> (bool, String, String, String) {
     let mut enabled = false;
     let mut provider = String::new();
     let mut model = String::new();
+    let mut ollama_base_url = String::new();
     let Some(dir) = nuko_app_support_dir() else {
-        return (enabled, provider, model);
+        return (enabled, provider, model, ollama_base_url);
     };
     let Ok(text) = std::fs::read_to_string(dir.join("ai.toml")) else {
-        return (enabled, provider, model);
+        return (enabled, provider, model, ollama_base_url);
     };
     for line in text.lines() {
         let t = line.trim();
@@ -1211,10 +1225,11 @@ fn read_ai_config() -> (bool, String, String) {
             "enabled" => enabled = val == "true",
             "provider" => provider = val.to_string(),
             "model" => model = val.to_string(),
+            "ollama_base_url" => ollama_base_url = val.to_string(),
             _ => {}
         }
     }
-    (enabled, provider, model)
+    (enabled, provider, model, ollama_base_url)
 }
 
 /// 同梱 `nuko config set-key <provider>` を stdin 経由で呼びキーを Keychain に保存する。
@@ -1243,8 +1258,11 @@ fn save_key_via_cli(provider: &str, key: &str) -> std::result::Result<(), String
     }
 }
 
-/// ai.toml を書き出す (enabled=true + provider + model)。
-fn write_ai_toml(provider: &str, model: &str) -> std::io::Result<()> {
+/// ai.toml を書き出す (enabled=true + provider + model + 任意で ollama_base_url)。
+///
+/// `ollama_base_url` が空でなければ `ollama_base_url = "..."` 行を足す
+/// (Ollama を自社サーバー等の別 URL に向けるため。空なら書かず既定 11434 が使われる)。
+fn write_ai_toml(provider: &str, model: &str, ollama_base_url: &str) -> std::io::Result<()> {
     let Some(dir) = nuko_app_support_dir() else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -1257,7 +1275,11 @@ fn write_ai_toml(provider: &str, model: &str) -> std::io::Result<()> {
     } else {
         model
     };
-    let content = format!("enabled = true\nprovider = \"{provider}\"\nmodel = \"{model}\"\n");
+    let mut content = format!("enabled = true\nprovider = \"{provider}\"\nmodel = \"{model}\"\n");
+    let base = ollama_base_url.trim();
+    if !base.is_empty() {
+        content.push_str(&format!("ollama_base_url = \"{base}\"\n"));
+    }
     std::fs::write(dir.join("ai.toml"), content)
 }
 
