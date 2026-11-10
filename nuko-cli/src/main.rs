@@ -99,8 +99,25 @@ enum Commands {
     },
     /// プロバイダのモデル一覧を実 API から取得して表示する (設定画面のモデル選択用)。
     Models {
-        /// プロバイダ ("anthropic" / "openrouter")
+        /// プロバイダ ("anthropic" / "openrouter" / "ollama")
         provider: String,
+        /// ベース URL を上書き (ollama/openrouter)。指定時は ai.toml より優先。
+        /// 設定窓の「Ollama ベースURL」欄を保存前でも接続確認するために使う。
+        #[arg(long)]
+        base_url: Option<String>,
+    },
+    /// AI (dreaming) に短い ping を送り、選んだモデルで実際に応答が返るか確認する
+    /// (設定画面の「AI接続テスト」用)。モデル取得と違い本当に推論できるかまで見る。
+    AiTest {
+        /// プロバイダ ("anthropic" / "openrouter" / "ollama"; 省略時は ai.toml)
+        #[arg(long)]
+        provider: Option<String>,
+        /// モデル (省略時は ai.toml の model)
+        #[arg(long)]
+        model: Option<String>,
+        /// ベース URL を上書き (ollama/openrouter)。指定時は ai.toml より優先。
+        #[arg(long)]
+        base_url: Option<String>,
     },
     /// アップデート確認 (GitHub Releases)。--apply で .app を置換・再起動 (macOS)。
     ///
@@ -218,7 +235,12 @@ fn main() -> Result<()> {
             apply,
         } => cmd_dream(max_readings, provider.as_deref(), model.as_deref(), apply),
         Commands::Config { action } => cmd_config(action),
-        Commands::Models { provider } => cmd_models(&provider),
+        Commands::Models { provider, base_url } => cmd_models(&provider, base_url.as_deref()),
+        Commands::AiTest {
+            provider,
+            model,
+            base_url,
+        } => cmd_ai_test(provider.as_deref(), model.as_deref(), base_url.as_deref()),
         Commands::Update { apply } => cmd_update(apply),
         Commands::Dict { action } => cmd_dict(action),
         Commands::AiLog { count, full } => cmd_ai_log(count, full),
@@ -720,20 +742,22 @@ fn cmd_update(apply: bool) -> Result<()> {
 }
 
 /// `nuko models <provider>`: 実 API からモデル一覧を取得し id を 1 行ずつ出力する。
-fn cmd_models(provider: &str) -> Result<()> {
+fn cmd_models(provider: &str, base_override: Option<&str>) -> Result<()> {
     let provider = normalize_provider(provider)?;
     let ids = match provider.as_str() {
         "openrouter" => {
-            // base_url は ai.toml があればそれ、無ければ既定。公開 API なのでキー不要。
-            let base = nuko_data_dir()
-                .ok()
-                .map(|d| {
-                    crate::openrouter::DreamConfig::load(d.join("ai.toml")).unwrap_or_default()
-                })
-                .map_or_else(
-                    || "https://openrouter.ai/api/v1".to_string(),
-                    |c| c.base_url,
-                );
+            // base_url は --base-url 指定 > ai.toml > 既定。公開 API なのでキー不要。
+            let base = base_override.map(str::to_string).unwrap_or_else(|| {
+                nuko_data_dir()
+                    .ok()
+                    .map(|d| {
+                        crate::openrouter::DreamConfig::load(d.join("ai.toml")).unwrap_or_default()
+                    })
+                    .map_or_else(
+                        || "https://openrouter.ai/api/v1".to_string(),
+                        |c| c.base_url,
+                    )
+            });
             models::fetch_openrouter(&base)?
         }
         "anthropic" => {
@@ -745,17 +769,23 @@ fn cmd_models(provider: &str) -> Result<()> {
             models::fetch_anthropic(&key)?
         }
         "ollama" => {
-            // Ollama は OpenAI 互換 (`/v1/models`)。base は ai.toml の ollama_base_url
-            // (無ければ既定 localhost:11434)。キー不要。
-            let base = nuko_data_dir()
-                .ok()
-                .map(|d| {
-                    crate::openrouter::DreamConfig::load(d.join("ai.toml")).unwrap_or_default()
-                })
-                .map_or_else(
-                    || "http://localhost:11434/v1".to_string(),
-                    |c| c.ollama_base_url,
-                );
+            // Ollama は OpenAI 互換 (`/v1/models`)。base は --base-url > ai.toml > 既定。
+            // 設定窓で入力しただけ (保存前) の URL でも接続確認できるよう --base-url を優先。
+            let mut base = base_override.map(str::to_string).unwrap_or_else(|| {
+                nuko_data_dir()
+                    .ok()
+                    .map(|d| {
+                        crate::openrouter::DreamConfig::load(d.join("ai.toml")).unwrap_or_default()
+                    })
+                    .map_or_else(
+                        || "http://localhost:11434/v1".to_string(),
+                        |c| c.ollama_base_url,
+                    )
+            });
+            // `/v1` を含まない入力 (例 http://localhost:11435) は OpenAI 互換の /v1 を補う。
+            if !base.contains("/v1") {
+                base = format!("{}/v1", base.trim_end_matches('/'));
+            }
             models::fetch_openrouter(&base)?
         }
         _ => unreachable!("normalize_provider が検証済み"),
@@ -812,6 +842,145 @@ fn cmd_config(action: ConfigAction) -> Result<()> {
     Ok(())
 }
 
+/// provider 名（+ 任意の model / base_url 上書き）から dreaming の [`DreamProvider`] を構築する。
+///
+/// `nuko dream`（ai.toml 駆動・`verbose=true`）と `nuko ai-test`（設定窓で保存前の値を
+/// そのまま接続確認・`verbose=false`）が共用する。`base_url_override` は openrouter/ollama の
+/// ベース URL を ai.toml より優先させる（設定窓で入力しただけの URL をテストするため。
+/// anthropic は専用エンドポイントなので上書きは無視）。
+fn build_dream_provider(
+    dir: &std::path::Path,
+    provider_name: &str,
+    model: Option<&str>,
+    base_url_override: Option<&str>,
+    verbose: bool,
+) -> Result<Box<dyn DreamProvider>> {
+    let provider: Box<dyn DreamProvider> = match provider_name {
+        "mock" => Box::new(MockProvider::empty()),
+        "openrouter" => {
+            use crate::openrouter::{DreamConfig, OpenRouterProvider};
+            let cfg = DreamConfig::load(dir.join("ai.toml"))?;
+            let api_key = resolve_key("OPENROUTER_API_KEY", "openrouter").ok_or_else(|| {
+                anyhow::anyhow!(
+                    "OPENROUTER_API_KEY が未設定です。環境変数か \
+                     `nuko config set-key openrouter` (Keychain) で設定してください。"
+                )
+            })?;
+            let model = model.map(String::from).or(cfg.model).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "モデル未指定です。--model か ai.toml の model を設定してください \
+                         (例: anthropic/claude-3.5-sonnet)。"
+                )
+            })?;
+            let base = base_url_override.map_or(cfg.base_url, String::from);
+            if verbose {
+                println!(
+                    "  {} openrouter / model={}",
+                    "プロバイダ:".dimmed(),
+                    model.cyan()
+                );
+            }
+            Box::new(OpenRouterProvider::new(api_key, model, base))
+        }
+        "ollama" => {
+            // Ollama は OpenAI 互換 (`/v1/chat/completions`) なので OpenRouterProvider を
+            // 流用し、表示名だけ "ollama" にする。認証不要 (キーがあれば使う、無ければダミー)。
+            // 自社サーバーの Ollama は SSH ポートフォワード後の localhost か、
+            // ai.toml の ollama_base_url に `http://host:11434/v1` を指定する。
+            use crate::openrouter::{DreamConfig, OpenRouterProvider};
+            let cfg = DreamConfig::load(dir.join("ai.toml"))?;
+            let api_key =
+                resolve_key("OLLAMA_API_KEY", "ollama").unwrap_or_else(|| "ollama".to_string());
+            let model = model.map(String::from).or(cfg.model).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "モデル未指定です。--model か ai.toml の model を設定してください \
+                     (例: qwen2.5:1.5b / llama3.2)。`ollama list` で確認。"
+                )
+            })?;
+            // base は --base-url 上書き > ai.toml。`/v1` を含まない入力は OpenAI 互換の /v1 を補う。
+            let mut base = base_url_override.map_or(cfg.ollama_base_url, String::from);
+            if !base.contains("/v1") {
+                base = format!("{}/v1", base.trim_end_matches('/'));
+            }
+            if verbose {
+                println!(
+                    "  {} ollama / model={} / base_url={}",
+                    "プロバイダ:".dimmed(),
+                    model.cyan(),
+                    base.dimmed()
+                );
+            }
+            Box::new(OpenRouterProvider::with_label(
+                "ollama", api_key, model, base,
+            ))
+        }
+        "anthropic" | "claude" => {
+            use crate::anthropic::{model_hint, AnthropicProvider};
+            let cfg = crate::openrouter::DreamConfig::load(dir.join("ai.toml"))?;
+            let api_key = resolve_key("ANTHROPIC_API_KEY", "anthropic").ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ANTHROPIC_API_KEY が未設定です。環境変数か \
+                     `nuko config set-key anthropic` (Keychain) で設定してください。"
+                )
+            })?;
+            let model = model.map(String::from).or(cfg.model).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "モデル未指定です。--model か ai.toml の model を設定してください ({})。",
+                    model_hint()
+                )
+            })?;
+            if verbose {
+                println!(
+                    "  {} anthropic / model={}",
+                    "プロバイダ:".dimmed(),
+                    model.cyan()
+                );
+            }
+            Box::new(AnthropicProvider::new(api_key, model))
+        }
+        other => {
+            anyhow::bail!(
+                "未知のプロバイダ: {other} (\"mock\" / \"openrouter\" / \"ollama\" / \"anthropic\")"
+            );
+        }
+    };
+    Ok(provider)
+}
+
+/// `nuko ai-test`: dreaming と同じ経路 (`provider.complete`) でAIに短い ping を送り、
+/// 実際に応答が返るかを確認する（設定窓の「AI接続テスト」ボタン用）。
+///
+/// 「モデル取得」が一覧を引けるだけなのに対し、こちらは **選んだモデルで本当に推論できるか**
+/// までを 1 往復で確認する（例: ollama にそのモデルが pull されていなければここで分かる）。
+fn cmd_ai_test(provider: Option<&str>, model: Option<&str>, base_url: Option<&str>) -> Result<()> {
+    let dir = nuko_data_dir()?;
+    let cfg = crate::openrouter::DreamConfig::load(dir.join("ai.toml")).unwrap_or_default();
+    let provider_name = provider
+        .map(String::from)
+        .or_else(|| cfg.provider.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!("プロバイダ未指定です (--provider か ai.toml の provider)。")
+        })?;
+    let provider = build_dream_provider(&dir, &provider_name, model, base_url, false)?;
+    let started = std::time::Instant::now();
+    // 最小の ping。応答の中身は問わず「返ってくること」を確認する。
+    let reply = provider.complete("接続テストです。「OK」とだけ返してください。")?;
+    let ms = started.elapsed().as_millis();
+    let first: String = reply
+        .trim()
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(40)
+        .collect();
+    println!(
+        "✅ 接続OK: {} が応答しました（{ms}ms）: {first}",
+        provider.name()
+    );
+    Ok(())
+}
+
 fn cmd_dream(
     max_readings: usize,
     provider: Option<&str>,
@@ -860,87 +1029,9 @@ fn cmd_dream(
     };
     let provider_name = provider_name.as_str();
 
-    // プロバイダを解決 (mock / openrouter / ollama / anthropic)。
-    let provider: Box<dyn DreamProvider> = match provider_name {
-        "mock" => Box::new(MockProvider::empty()),
-        "openrouter" => {
-            use crate::openrouter::{DreamConfig, OpenRouterProvider};
-            let cfg = DreamConfig::load(dir.join("ai.toml"))?;
-            let api_key = resolve_key("OPENROUTER_API_KEY", "openrouter").ok_or_else(|| {
-                anyhow::anyhow!(
-                    "OPENROUTER_API_KEY が未設定です。環境変数か \
-                     `nuko config set-key openrouter` (Keychain) で設定してください。"
-                )
-            })?;
-            let model = model.map(String::from).or(cfg.model).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "モデル未指定です。--model か ai.toml の model を設定してください \
-                         (例: anthropic/claude-3.5-sonnet)。"
-                )
-            })?;
-            println!(
-                "  {} openrouter / model={}",
-                "プロバイダ:".dimmed(),
-                model.cyan()
-            );
-            Box::new(OpenRouterProvider::new(api_key, model, cfg.base_url))
-        }
-        "ollama" => {
-            // Ollama は OpenAI 互換 (`/v1/chat/completions`) なので OpenRouterProvider を
-            // 流用し、表示名だけ "ollama" にする。認証不要 (キーがあれば使う、無ければダミー)。
-            // 自社サーバーの Ollama は SSH ポートフォワード後の localhost か、
-            // ai.toml の ollama_base_url に `http://host:11434/v1` を指定する。
-            use crate::openrouter::{DreamConfig, OpenRouterProvider};
-            let cfg = DreamConfig::load(dir.join("ai.toml"))?;
-            let api_key =
-                resolve_key("OLLAMA_API_KEY", "ollama").unwrap_or_else(|| "ollama".to_string());
-            let model = model.map(String::from).or(cfg.model).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "モデル未指定です。--model か ai.toml の model を設定してください \
-                     (例: qwen2.5:1.5b / llama3.2)。`ollama list` で確認。"
-                )
-            })?;
-            println!(
-                "  {} ollama / model={} / base_url={}",
-                "プロバイダ:".dimmed(),
-                model.cyan(),
-                cfg.ollama_base_url.dimmed()
-            );
-            Box::new(OpenRouterProvider::with_label(
-                "ollama",
-                api_key,
-                model,
-                cfg.ollama_base_url,
-            ))
-        }
-        "anthropic" | "claude" => {
-            use crate::anthropic::{model_hint, AnthropicProvider};
-            let cfg = crate::openrouter::DreamConfig::load(dir.join("ai.toml"))?;
-            let api_key = resolve_key("ANTHROPIC_API_KEY", "anthropic").ok_or_else(|| {
-                anyhow::anyhow!(
-                    "ANTHROPIC_API_KEY が未設定です。環境変数か \
-                     `nuko config set-key anthropic` (Keychain) で設定してください。"
-                )
-            })?;
-            let model = model.map(String::from).or(cfg.model).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "モデル未指定です。--model か ai.toml の model を設定してください ({})。",
-                    model_hint()
-                )
-            })?;
-            println!(
-                "  {} anthropic / model={}",
-                "プロバイダ:".dimmed(),
-                model.cyan()
-            );
-            Box::new(AnthropicProvider::new(api_key, model))
-        }
-        other => {
-            anyhow::bail!(
-                "未知のプロバイダ: {other} (\"mock\" / \"openrouter\" / \"ollama\" / \"anthropic\")"
-            );
-        }
-    };
+    // プロバイダを解決 (mock / openrouter / ollama / anthropic)。dream は ai.toml 駆動なので
+    // base_url 上書きなし・verbose 表示あり (nuko ai-test と共用する構築ロジック)。
+    let provider = build_dream_provider(&dir, provider_name, model, None, true)?;
 
     let raw = provider.complete(&prompt)?;
     let proposal = parse_proposal(&raw)?;

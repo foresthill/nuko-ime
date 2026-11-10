@@ -7,15 +7,22 @@
 //! ネットワークは nuko-cli に閉じる（nuko-core には持ち込まない設計）。取得した id を
 //! `nuko models <provider>` が 1 行ずつ標準出力に書き、設定画面がそれを読んで一覧化する。
 
+use std::time::Duration;
+
 use anyhow::{anyhow, Result};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// 死んだ SSH トンネル等で設定窓が固まらないよう、モデル取得は短めに打ち切る。
+const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// OpenRouter の公開モデル一覧（id のみ、ソート済み・重複排除）。認証不要。
+/// Ollama (OpenAI 互換 `/v1/models`) もこの関数で取得する。
 pub fn fetch_openrouter(base_url: &str) -> Result<Vec<String>> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let json: serde_json::Value = ureq::get(&url)
         .set("X-Title", "nuko-ime")
+        .timeout(FETCH_TIMEOUT)
         .call()
         .map_err(|e| anyhow!("OpenRouter models 取得失敗: {e}"))?
         .into_json()
@@ -28,6 +35,7 @@ pub fn fetch_anthropic(api_key: &str) -> Result<Vec<String>> {
     let resp = ureq::get("https://api.anthropic.com/v1/models")
         .set("x-api-key", api_key)
         .set("anthropic-version", ANTHROPIC_VERSION)
+        .timeout(FETCH_TIMEOUT)
         .call();
     let json: serde_json::Value = match resp {
         Ok(r) => r

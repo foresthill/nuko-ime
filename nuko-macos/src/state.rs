@@ -811,11 +811,23 @@ pub fn save_settings() {
             win.set_status(&format!("✅ {provider} に保存しました ← {}", mask_key_rich(&key)));
         }
         win.set_current_key(&current_key_line(provider));
+        // 最上部の「使用中」行も保存直後に更新する (保存できたことが一目で分かるように)。
+        if model.is_empty() {
+            win.set_active_line("AI学習: 未設定（モデルを入れて保存すると有効化されます）");
+        } else {
+            win.set_active_line(&format!("AI学習: {provider} / {model} を使用中"));
+        }
     });
 }
 
 /// 「現在のキー」行の文字列を作る (選択プロバイダの保存済みキーを伏せ字で、無ければ未登録)。
+///
+/// Ollama はローカル/自社サーバーで**キー不要**なので「未登録」は誤解を招く。
+/// 代わりに「キー不要」と出して、状態確認は『AI接続テスト』に誘導する。
 fn current_key_line(provider: &str) -> String {
+    if provider == "ollama" {
+        return "現在のキー（ollama）: キー不要（『AI接続テスト』で疎通を確認）".to_string();
+    }
     match query_key_masked(provider) {
         Some(m) => format!("現在のキー（{provider}）: {m}"),
         None => format!("現在のキー（{provider}）: 未登録"),
@@ -961,16 +973,26 @@ fn extract_release_url(s: &str) -> Option<String> {
 /// 取得は同梱 `nuko models <provider>`（ネットワークは CLI 側）。設定窓が前面なので
 /// ブロッキングでも他アプリの入力は阻害しない。
 pub fn fetch_models() {
-    // provider だけ先に取り出して borrow を解放してから取得（ネットワーク中は borrow を持たない）。
-    let provider = SETTINGS_WINDOW.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .map(SettingsWindow::selected_provider)
+    // provider と（ollama のみ）ベース URL を先に取り出して borrow を解放してから取得
+    // （ネットワーク中は borrow を持たない）。ollama は「向こうに pull 済みのモデル」しか
+    // 無いので、保存前でも欄に入力した URL で接続確認できるよう欄の値を渡す。
+    let params = SETTINGS_WINDOW.with(|cell| {
+        cell.borrow().as_ref().map(|win| {
+            let p = win.selected_provider();
+            let base = if p == "ollama" {
+                let b = win.base_url_value();
+                let b = b.trim();
+                (!b.is_empty()).then(|| b.to_string())
+            } else {
+                None
+            };
+            (p, base)
+        })
     });
-    let Some(provider) = provider else {
+    let Some((provider, base_override)) = params else {
         return;
     };
-    let result = query_models(provider);
+    let result = query_models(provider, base_override.as_deref());
     SETTINGS_WINDOW.with(|cell| {
         let w = cell.borrow();
         let Some(win) = w.as_ref() else {
@@ -980,23 +1002,136 @@ pub fn fetch_models() {
             Ok(ids) if !ids.is_empty() => {
                 let n = ids.len();
                 win.set_model_items(&ids);
-                win.set_status(&format!(
-                    "✅ {provider} のモデル {n} 件（上位＝おすすめ Claude系。欄に入力して絞り込み可）"
-                ));
+                if provider == "ollama" {
+                    win.set_status(&format!(
+                        "✅ 接続OK: Ollama のモデル {n} 件（一覧から選択。この中のモデルだけ使えます）"
+                    ));
+                } else {
+                    win.set_status(&format!(
+                        "✅ {provider} のモデル {n} 件（上位＝おすすめ Claude系。欄に入力して絞り込み可）"
+                    ));
+                }
             }
+            Ok(_) if provider == "ollama" => win.set_status(
+                "⚠️ 接続OKだがモデルが0件。サーバーに ollama pull でモデルを入れてください",
+            ),
             Ok(_) => win.set_status(&format!("⚠️ {provider} のモデルが0件でした")),
+            Err(e) if provider == "ollama" => {
+                win.set_status(&format!("⚠️ 接続失敗: {e}（ベースURL・SSHトンネルを確認）"))
+            }
             Err(e) => win.set_status(&format!("⚠️ モデル取得失敗: {e}")),
         }
     });
 }
 
-/// `nuko models <provider>` を叩いてモデル id のリストを得る。
-fn query_models(provider: &str) -> std::result::Result<Vec<String>, String> {
+/// 設定窓の「AI接続テスト」: 選んだ provider/model で AI に実際に ping を送り応答を確認する。
+///
+/// **非同期**: `nuko ai-test` は AI に 1 往復の推論を投げるため数秒かかり得る。メインスレッド
+/// (= IME の run loop) で同期実行すると応答待ちの間**全アプリの入力が固まる**ので、
+/// subprocess はバックグラウンドで走らせ、完了したら [`dispatch2`] でメインキューに戻って
+/// 結果をステータス欄に出す（[`check_update_from_menu`] と同じ方式）。
+pub fn ai_test() {
+    // UI アクセスはメインスレッド限定。欄の値を先に取り出してからスレッドへ渡す。
+    let params = SETTINGS_WINDOW.with(|cell| {
+        cell.borrow().as_ref().map(|win| {
+            let provider = win.selected_provider().to_string();
+            let model = win.model_value().trim().to_string();
+            let base = if provider == "ollama" {
+                let b = win.base_url_value().trim().to_string();
+                (!b.is_empty()).then_some(b)
+            } else {
+                None
+            };
+            // 入力済みキー (空白除去)。保存前でもテストできるよう env で渡す。空なら保存済みを使う。
+            let key: String = win
+                .key_value()
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            (provider, model, base, key)
+        })
+    });
+    let Some((provider, model, base, key)) = params else {
+        return;
+    };
+    if model.is_empty() {
+        SETTINGS_WINDOW.with(|cell| {
+            if let Some(win) = cell.borrow().as_ref() {
+                win.set_status(
+                    "⚠️ モデル未指定。『モデル取得』で選ぶか入力してからテストしてください",
+                );
+            }
+        });
+        return;
+    }
+    SETTINGS_WINDOW.with(|cell| {
+        if let Some(win) = cell.borrow().as_ref() {
+            win.set_status("⏳ AI接続テスト中…（応答を待っています）");
+        }
+    });
+    std::thread::spawn(move || {
+        let result = run_ai_test(&provider, &model, base.as_deref(), &key);
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            SETTINGS_WINDOW.with(|cell| {
+                if let Some(win) = cell.borrow().as_ref() {
+                    match result {
+                        Ok(msg) => win.set_status(&msg),
+                        Err(e) => win.set_status(&format!("❌ 接続失敗: {e}")),
+                    }
+                }
+            });
+        });
+    });
+}
+
+/// `nuko ai-test --provider … [--model …] [--base-url …]` を叩く（別スレッドから呼ぶ）。
+/// 入力済みキーがあれば対応する env で渡す（`resolve_key` は env を Keychain より優先）。
+fn run_ai_test(
+    provider: &str,
+    model: &str,
+    base: Option<&str>,
+    key: &str,
+) -> std::result::Result<String, String> {
     let nuko = resolve_nuko_binary().ok_or_else(|| "nuko CLI が見つかりません".to_string())?;
-    let out = std::process::Command::new(&nuko)
-        .args(["models", provider])
-        .output()
-        .map_err(|e| format!("nuko 実行失敗: {e}"))?;
+    let mut cmd = std::process::Command::new(&nuko);
+    cmd.args(["ai-test", "--provider", provider, "--model", model]);
+    if let Some(b) = base {
+        cmd.args(["--base-url", b]);
+    }
+    if !key.is_empty() {
+        let var = match provider {
+            "openrouter" => "OPENROUTER_API_KEY",
+            "anthropic" => "ANTHROPIC_API_KEY",
+            _ => "OLLAMA_API_KEY",
+        };
+        cmd.env(var, key);
+    }
+    let out = cmd.output().map_err(|e| format!("nuko 実行失敗: {e}"))?;
+    if out.status.success() {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Ok(if s.is_empty() {
+            "✅ 接続OK".to_string()
+        } else {
+            s
+        })
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// `nuko models <provider> [--base-url <url>]` を叩いてモデル id のリストを得る。
+/// `base_override` は ollama のベース URL 欄の値（保存前でも接続確認できるよう上書き）。
+fn query_models(
+    provider: &str,
+    base_override: Option<&str>,
+) -> std::result::Result<Vec<String>, String> {
+    let nuko = resolve_nuko_binary().ok_or_else(|| "nuko CLI が見つかりません".to_string())?;
+    let mut cmd = std::process::Command::new(&nuko);
+    cmd.args(["models", provider]);
+    if let Some(base) = base_override {
+        cmd.args(["--base-url", base]);
+    }
+    let out = cmd.output().map_err(|e| format!("nuko 実行失敗: {e}"))?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
