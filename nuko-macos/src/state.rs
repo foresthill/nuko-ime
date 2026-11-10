@@ -750,9 +750,12 @@ pub fn show_settings(mtm: MainThreadMarker) {
                 win.set_active_line("AI学習: 未設定（鍵とモデルを保存すると有効化されます）");
             }
             win.set_current_key(&current_key_line(active_provider));
+            win.set_conn_status("接続: ⏳ 確認中…");
             win.set_status(&format!("保存状態 {}", stored_key_status()));
         }
     });
+    // 窓を開いた直後に AI 接続ステータスを自動チェック (borrow_mut を抜けてから呼ぶ)。
+    check_ai_status();
 }
 
 /// 設定ウィンドウの「保存」: キーを Keychain、provider/model を ai.toml に保存する。
@@ -1117,6 +1120,58 @@ fn run_ai_test(
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
+}
+
+/// 設定窓の AI 接続ステータス（🟢/🔴）を更新する。開いた時と🔄更新ボタンから呼ぶ。
+///
+/// 疎通は `/v1/models`（[`query_models`]）で確認する＝**トークン課金ゼロ**の軽量チェック。
+/// SSH トンネルが落ちていれば接続拒否で即 🔴 になる。完全な推論可否は「AI接続テスト」
+/// ([`ai_test`]) の方で確認する（こちらは一目で分かる疎通インジケータ）。
+///
+/// **非同期**: ネットワークを待つ間 IME を固めないよう別スレッド + メインキュー復帰。
+pub fn check_ai_status() {
+    let params = SETTINGS_WINDOW.with(|cell| {
+        cell.borrow().as_ref().map(|win| {
+            let provider = win.selected_provider();
+            let base = if provider == "ollama" {
+                let b = win.base_url_value().trim().to_string();
+                (!b.is_empty()).then_some(b)
+            } else {
+                None
+            };
+            (provider, base)
+        })
+    });
+    let Some((provider, base)) = params else {
+        return;
+    };
+    SETTINGS_WINDOW.with(|cell| {
+        if let Some(win) = cell.borrow().as_ref() {
+            win.set_conn_status("接続: ⏳ 確認中…");
+        }
+    });
+    std::thread::spawn(move || {
+        let result = query_models(provider, base.as_deref());
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            SETTINGS_WINDOW.with(|cell| {
+                if let Some(win) = cell.borrow().as_ref() {
+                    match result {
+                        Ok(ids) if !ids.is_empty() => {
+                            win.set_conn_status(&format!("接続: 🟢 OK（{}モデル）", ids.len()));
+                        }
+                        // 到達はできたがモデル0（ollama にまだ pull していない等）。
+                        Ok(_) => win.set_conn_status("接続: 🟡 到達OK・モデル0"),
+                        Err(e) => {
+                            // 長いエラーは短く（先頭 1 行・30 文字）。
+                            let short: String =
+                                e.lines().next().unwrap_or("").chars().take(30).collect();
+                            win.set_conn_status(&format!("接続: 🔴 未接続（{short}）"));
+                        }
+                    }
+                }
+            });
+        });
+    });
 }
 
 /// `nuko models <provider> [--base-url <url>]` を叩いてモデル id のリストを得る。

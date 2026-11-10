@@ -77,6 +77,11 @@ define_class!(
         fn ai_test(&self, _s: Option<&AnyObject>) {
             crate::state::ai_test();
         }
+        /// 接続ステータスの🔄更新。/v1/models への軽量疎通で 🟢/🔴 を出し直す (課金ゼロ)。
+        #[unsafe(method(nukoRefreshAiStatus:))]
+        fn refresh_ai_status(&self, _s: Option<&AnyObject>) {
+            crate::state::check_ai_status();
+        }
         /// 「閉じる」(窓を隠して activation policy を戻す)。
         #[unsafe(method(nukoCloseSettings:))]
         fn close_action(&self, _s: Option<&AnyObject>) {
@@ -107,6 +112,9 @@ pub struct SettingsWindow {
     provider_popup: Retained<NSPopUpButton>,
     /// 最上部の「いま AI学習で使っている provider/model」行 (開くたびに ai.toml から更新)。
     active_label: Retained<NSTextField>,
+    /// AI 接続ステータス行 (🟢接続OK / 🔴未接続)。開いた時と🔄更新で /v1/models 疎通を反映。
+    /// SSH トンネルが落ちていると dreaming 実行時に繋がらないので、事前に一目で分かるように。
+    conn_label: Retained<NSTextField>,
     /// Ollama のベース URL 入力欄 (ollama 選択時のみ ai.toml の ollama_base_url に保存)。
     ollama_base_url_field: Retained<NSTextField>,
     // NSSecureTextField だと secure input mode が IME プロセスで効かず入力不能になる
@@ -177,9 +185,29 @@ impl SettingsWindow {
 
         let content: Retained<NSView> = NSView::initWithFrame(NSView::alloc(mtm), frame);
 
-        // 最上部: いま AI学習(dreaming)で使っている provider/model を示す行。
+        // 最上部: いま AI学習(dreaming)で使っている provider/model を示す行 (左)。
         // 開くたびに ai.toml から [`SettingsWindow::set_active_line`] で更新する。
-        let active_label = make_label(mtm, "AI学習: —", row(502.0, 18.0));
+        let active_label = make_label(
+            mtm,
+            "AI学習: —",
+            NSRect::new(NSPoint::new(PAD, 502.0), NSSize::new(380.0, 18.0)),
+        );
+        // 同じ行の右寄り: AI 接続ステータス (🟢/🔴)。右端に🔄更新ボタン。
+        let conn_label = make_label(
+            mtm,
+            "接続: —",
+            NSRect::new(NSPoint::new(PAD + 390.0, 502.0), NSSize::new(190.0, 18.0)),
+        );
+        let refresh_status = NSButton::new(mtm);
+        refresh_status.setTitle(&NSString::from_str("🔄 更新"));
+        refresh_status.setFrame(NSRect::new(
+            NSPoint::new(W - PAD - 90.0, 498.0),
+            NSSize::new(90.0, 24.0),
+        ));
+        unsafe {
+            refresh_status.setTarget(Some(save_target));
+            refresh_status.setAction(Some(sel!(nukoRefreshAiStatus:)));
+        }
 
         // ── BYOK セクション ──
         let byok_h = make_label(mtm, "【 BYOK（AI学習の鍵）】", row(476.0, 18.0));
@@ -321,6 +349,7 @@ impl SettingsWindow {
 
         for v in [
             &*active_label,
+            &*conn_label,
             &*byok_h,
             &*provider_label,
             &*base_url_label,
@@ -335,6 +364,7 @@ impl SettingsWindow {
             content.addSubview(v);
         }
         content.addSubview(&provider_popup);
+        content.addSubview(&refresh_status);
         content.addSubview(&ollama_base_url_field);
         content.addSubview(&key_field);
         content.addSubview(&model_combo);
@@ -352,6 +382,7 @@ impl SettingsWindow {
             window,
             provider_popup,
             active_label,
+            conn_label,
             ollama_base_url_field,
             key_field,
             current_key_label,
@@ -456,6 +487,11 @@ impl SettingsWindow {
     /// 最上部の「AI学習で使用中」行を更新する。
     pub fn set_active_line(&self, s: &str) {
         self.active_label.setStringValue(&NSString::from_str(s));
+    }
+
+    /// AI 接続ステータス行 (🟢/🔴/⏳) を更新する。
+    pub fn set_conn_status(&self, s: &str) {
+        self.conn_label.setStringValue(&NSString::from_str(s));
     }
 
     /// 「現在のキー」行を更新する (選択プロバイダの保存済みキーを伏せ字で表示)。
