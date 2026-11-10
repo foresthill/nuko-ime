@@ -206,6 +206,66 @@ pub fn apply_segment_corrections(
     segmented.corrections_applied = any_changed;
 }
 
+/// 文節別変換結果に **文節ごとの** Layer 0 頻度学習を適用し並べ替える。
+///
+/// flat の [`ConversionEngine::convert`] は頻度候補 ([`LearningManager::get_candidates`]) を
+/// マージするが、`convert_segmented` では **未適用** だった。このため「文中に現れる語」を
+/// 何度確定しても、次回の文節変換で頻度が参照されず **libakaza の既定順が永遠に勝つ**
+/// バグがあった (2026-11 ユーザー報告:「砲→方 / 用→様 が何度直しても勝てない。
+/// 学習に勝って欲しい」)。
+///
+/// Layer 2 (訂正学習 [`apply_segment_corrections`]) は観察ログ **opt-in** 前提だが、
+/// Layer 0 頻度は **確定のたびに常時記録** される ([`ConversionEngine::commit`])。よって
+/// これを segmented にも効かせれば、オプトイン無効のユーザーでも
+/// **「一度でも選び直せば次回から勝つ」** が成立する。
+///
+/// 一致は **読み完全一致のみ** (`seg.reading == entry.reading`)。接尾・分割への流用は
+/// しない (over-generalization で常用語を壊すため — `correction.rs` の 2026-09-29 回帰
+/// 「だい→台 が だいじょうぶ を 台じょうぶ に壊す」の教訓)。
+// 呼び出し元 convert_segmented は akaza-gated なので、非 akaza の lib ビルドでは未使用
+// (テストからは使う)。
+#[cfg_attr(not(feature = "akaza"), allow(dead_code))]
+pub fn apply_segment_frequency(
+    segmented: &mut super::SegmentedConversion,
+    learning: &LearningManager,
+) {
+    let ctx = ConversionContext::new();
+    for seg in &mut segmented.segments {
+        let seg_reading = seg.reading.clone();
+        let Ok(learned) = learning.get_candidates(&seg_reading, &ctx) else {
+            continue;
+        };
+        let mut changed = false;
+        for lc in learned {
+            // 一過性の日付/時刻表層 (きょう→2026年…) は学習に載せない。commit 側で記録を
+            // 抑止済みだが、古い learning.json 掃除を兼ねた belt-and-suspenders (flat と同じ)。
+            if super::datetime::is_datetime_surface(&seg_reading, &lc.surface) {
+                continue;
+            }
+            // 読み完全一致の学習表層: 既存候補なら頻度スコアを加算 (= 先頭へ押し上げ)、
+            // 候補に無ければ注入 (libakaza/辞書に無い語をユーザー学習で出せるように)。
+            if let Some(c) = seg.candidates.iter_mut().find(|c| c.surface == lc.surface) {
+                c.score = c.score.saturating_add(lc.score);
+                changed = true;
+            } else {
+                seg.candidates.push(
+                    Candidate::new(&lc.surface, &seg_reading)
+                        .with_score(lc.score)
+                        .with_source(CandidateSource::User),
+                );
+                changed = true;
+            }
+        }
+        if changed {
+            seg.candidates.sort_by_key(|c| std::cmp::Reverse(c.score));
+            seg.select(0); // 並べ替え後の先頭 (最良) を選択に戻す
+                           // 学習が効いた = Layer 2 と同様「学習適用」フラグを立てる。
+                           // controller は nn 曖昧語で segmented を flat より優先する判定に使う。
+            segmented.corrections_applied = true;
+        }
+    }
+}
+
 /// 変換エンジン
 pub struct ConversionEngine {
     /// 辞書マネージャー
@@ -620,6 +680,12 @@ impl ConversionEngine {
         // 千円 等が出なかった)。末尾追加のみで既存の順序・選択は変えないので、
         // 残念/案内 等を displace しない (回帰ゼロ優先)。
         self.merge_nn_alternates_into_segments(backend, &mut segmented);
+        // Layer 0: **文節ごとに** 頻度学習を適用する (nn 代替候補も含む最終候補集合に効かせ
+        // たいので nn マージの後)。flat の convert() は頻度を参照するが convert_segmented は
+        // 未参照だったため、「文中の語」を何度確定しても次回の文節変換で頻度が無視され、
+        // libakaza の既定順が永遠に勝っていた (2026-11「砲→方 / 用→様 が勝てない」)。
+        // 観察ログ opt-in に依存しない常時 ON 経路なので、未オプトインでも「直したら次回勝つ」。
+        apply_segment_frequency(&mut segmented, &self.learning);
         // 旧字体モード: 各文節の候補に旧字体版を追加 (OFF 既定なら無変化)。
         if self.kyujitai_mode {
             for seg in &mut segmented.segments {
@@ -968,6 +1034,116 @@ mod tests {
         );
         // 他文節は不変
         assert_eq!(segmented.segments[1].surface(), Some("さんと"));
+    }
+
+    /// ★★ Layer 0 頻度が **文節ごと** に効き、文中の語でも学習が勝つ。
+    /// (2026-11 ユーザー報告:「砲→方 / 用→様 が何度直しても勝てない。勝って欲しい」。
+    ///  原因は convert_segmented が頻度を参照していなかったこと。観察ログ opt-in 不要。)
+    #[test]
+    fn segment_frequency_reorders_within_sentence() {
+        use crate::conversion::{Segment, SegmentedConversion};
+
+        // Layer 0: 「ほう→方」を 1 回確定 (頻度学習に載る)
+        let mut learning = LearningManager::new().unwrap();
+        let ctx = ConversionContext::new();
+        learning
+            .record(&Candidate::new("方", "ほう"), &ctx)
+            .unwrap();
+
+        // 文「…のほう です」の ほう 文節。libakaza 既定は 砲、方 は下位。
+        let cand = |s: &str, r: &str, score: i32| {
+            Candidate::new(s, r)
+                .with_score(score)
+                .with_source(CandidateSource::System)
+        };
+        let mut segmented = SegmentedConversion::new(vec![
+            Segment::new(
+                "ほう",
+                vec![cand("砲", "ほう", 99_900), cand("方", "ほう", 99_800)],
+            ),
+            Segment::new("です", vec![cand("です", "です", 0)]),
+        ]);
+
+        assert_eq!(
+            segmented.segments[0].surface(),
+            Some("砲"),
+            "適用前は libakaza 既定 砲"
+        );
+
+        apply_segment_frequency(&mut segmented, &learning);
+
+        assert_eq!(
+            segmented.segments[0].surface(),
+            Some("方"),
+            "★ 一度確定した 方 が文中でも 1 位 (頻度 200_000+ が libakaza 既定を上回る)"
+        );
+        assert_eq!(
+            segmented.segments[1].surface(),
+            Some("です"),
+            "他文節は不変"
+        );
+        assert!(
+            segmented.corrections_applied,
+            "★ 学習が効いたら corrections_applied が立つ (segmented 優先の判定に使う)"
+        );
+    }
+
+    /// ★ 学習した表層が候補に無くても **注入** されて 1 位になる (辞書/libakaza に無い語)。
+    #[test]
+    fn segment_frequency_injects_learned_surface_absent_from_candidates() {
+        use crate::conversion::{Segment, SegmentedConversion};
+
+        let mut learning = LearningManager::new().unwrap();
+        let ctx = ConversionContext::new();
+        learning
+            .record(&Candidate::new("方", "ほう"), &ctx)
+            .unwrap();
+
+        let cand = |s: &str, r: &str, score: i32| {
+            Candidate::new(s, r)
+                .with_score(score)
+                .with_source(CandidateSource::System)
+        };
+        // 候補に 方 が無い (砲 のみ) ケース
+        let mut segmented =
+            SegmentedConversion::new(vec![Segment::new("ほう", vec![cand("砲", "ほう", 99_900)])]);
+
+        apply_segment_frequency(&mut segmented, &learning);
+
+        assert_eq!(
+            segmented.segments[0].surface(),
+            Some("方"),
+            "★ 候補に無くても注入して 1 位"
+        );
+    }
+
+    /// ★ 学習が無ければ既定順のまま・フラグも立たない (回帰ゼロ)。
+    #[test]
+    fn segment_frequency_noop_without_learning() {
+        use crate::conversion::{Segment, SegmentedConversion};
+
+        let learning = LearningManager::new().unwrap();
+        let cand = |s: &str, r: &str, score: i32| {
+            Candidate::new(s, r)
+                .with_score(score)
+                .with_source(CandidateSource::System)
+        };
+        let mut segmented = SegmentedConversion::new(vec![Segment::new(
+            "ほう",
+            vec![cand("砲", "ほう", 99_900), cand("方", "ほう", 99_800)],
+        )]);
+
+        apply_segment_frequency(&mut segmented, &learning);
+
+        assert_eq!(
+            segmented.segments[0].surface(),
+            Some("砲"),
+            "★ 学習無しなら既定 砲 のまま"
+        );
+        assert!(
+            !segmented.corrections_applied,
+            "★ 学習が無ければ corrections_applied は立たない"
+        );
     }
 
     /// ★ 敬称込みで切られた文節でも学習が効く (回帰: #87 が実機で効かなかった件)。
