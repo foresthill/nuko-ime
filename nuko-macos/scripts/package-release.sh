@@ -50,7 +50,7 @@ cp "$PROJECT_ROOT/target/release/$APP_NAME" "$APP/Contents/MacOS/"
 # nuko CLI を同梱 (IME から current_exe の隣 = Contents/MacOS/nuko として解決)
 cp "$PROJECT_ROOT/target/release/nuko" "$APP/Contents/MacOS/"
 cp "$PROJECT_ROOT/nuko-macos/Info.plist" "$APP/Contents/"
-for icon in icon.tiff icon-japanese.tiff icon-roman.tiff; do
+for icon in icon.tiff icon-japanese.tiff icon-roman.tiff AppIcon.icns; do
   [ -f "$PROJECT_ROOT/nuko-macos/resources/$icon" ] &&
     cp "$PROJECT_ROOT/nuko-macos/resources/$icon" "$APP/Contents/Resources/"
 done
