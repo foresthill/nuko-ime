@@ -41,13 +41,13 @@
 [GitHub Releases](https://github.com/foresthill/nuko-ime/releases) から未署名の
 プレビュー版を入手できます。**未署名のため導入に手作業が要ります**:
 
-1. `NukoIME-v0.1.5-macos.zip` を展開 → `NukoIME.app` を `~/Library/Input Methods/` に置く
+1. `NukoIME-v0.1.6-macos.zip` を展開 → `NukoIME.app` を `~/Library/Input Methods/` に置く
 2. Finder で `NukoIME.app` を**右クリック →「開く」**、または
    **システム設定 → プライバシーとセキュリティ**で許可(Gatekeeper 対策)
 3. 変換モデルを配置(これが無いと変換品質が落ちる):
    ```bash
    mkdir -p "$HOME/Library/Application Support/nuko-ime"
-   tar -xzf nuko-ime-model-v0.1.5.tar.gz -C "$HOME/Library/Application Support/nuko-ime/"
+   tar -xzf nuko-ime-model-v0.1.6.tar.gz -C "$HOME/Library/Application Support/nuko-ime/"
    ```
 4. ログアウト→ログイン後、システム設定 → キーボード → 入力ソースで「ぬこIME」を追加
 
