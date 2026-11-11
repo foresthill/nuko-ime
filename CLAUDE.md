@@ -225,6 +225,16 @@ PR #40 で `convert_k_best(reading, None, k=9)` に切替。各 `KBestPath` が�
 - **ルール**: 代替読み候補は `candidate.reading` を**入力(文節)読みに付け替える**（`candidate.reading` は表示に使われず学習キー専用。controller は `seg.reading` を使う）。`engine.rs` の `convert()` / `merge_nn_alternates_into_segments()` 参照。これで一度選べば Layer0 (score 200_010 > libakaza 100_000) で次回先頭。
 - 初回ランキング（真意 を初手で上位）は未対応の follow-up（#159）。
 
+### 落とし穴: 学習は flat / segmented の **両経路** に配線する (#178 / PR #178)
+
+変換経路は 2 つある。**両方に同じ個人重みを効かせること。** 片方だけだと「単体では学習が効くのに、文中の語では永遠に勝てない」という再現しにくいバグになる。
+
+- `convert()`（flat・単文節/静的辞書）は Layer0 頻度＋Layer2 訂正を合成する。
+- `convert_segmented()`（libakaza の複数文節＝**文の大半**）は当初 **Layer0 頻度を未適用**で、Layer2（観察ログ **opt-in** 前提）しか効かせていなかった。→ 観察ログ未有効ユーザーでは文中の語に学習が一つも効かず、`ほう→法`・`よう→用` 等 libakaza 既定が永遠に 1 位に戻った（2026-11「砲→方 / 用→様 が何度直しても勝てない。勝って欲しい」）。
+- **根治**: `engine.rs` に `apply_segment_frequency(segmented, learning)` を追加し `convert_segmented` の nn マージ後に適用（読み完全一致のみ・接尾/分割流用なし＝「学習 over-generalization」PR #106 の教訓）。opt-in 不要の常時 ON なので「一度選び直せば次回勝つ」が成立。
+- **検証は `--release`**（debug は rsmarisa 再帰で try_new パニック）。一時 HOME に `learning.json` を仕込み、本番学習を汚さず `nuko convert --libakaza --personal` で before/after を実測した（ほうがいい 法→方 / このよう 用→様）。
+- 残件: 間違った表層も確定済みだと Layer0 が重み投票になり tie で負け得る。「打ち直し＝間違い降格」の決定的機構は follow-up。思想は [`docs/LEARNING_ARCHITECTURE.md` の「個人重みの合成」](docs/LEARNING_ARCHITECTURE.md) を正とする。
+
 ### 設計思想: 学習4層 ↔ 心の構造（意識/個人的無意識/集合的無意識/超意識）
 
 個人学習は**共有しない**、集合知は**有益な分だけアップデートで配布**、AI(dreaming)は**意図推論**——この振り分けは心の構造のメタファで整理できる。長期の設計思想は [`docs/LEARNING_ARCHITECTURE.md` §1.5](docs/LEARNING_ARCHITECTURE.md)（長期記憶）。このCLAUDE.md（短期記憶）には運用規約だけ置き、思想は docs 側を正とする。
