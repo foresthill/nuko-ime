@@ -930,7 +930,8 @@ pub fn apply_update_from_panel(mtm: MainThreadMarker) {
         if let Some(p) = p {
             p.show_text(
                 "⬇️ 更新をダウンロードして適用しています…\n\n\
-                 完了すると NukoIME が再起動します。\n\
+                 完了すると NukoIME が自動で再起動し、【通知でお知らせ】します。\n\
+                 （ダウンロード〜再起動で十数秒ほどかかります）\n\
                  反映には更新後に【入力ソースを一度切替えて戻す】か再ログインが要ります。",
             );
         }

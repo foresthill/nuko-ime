@@ -91,10 +91,14 @@ pub fn fetch_latest() -> Result<ReleaseInfo> {
 /// NukoIME を終了させてから行う（旧版は `.old` に退避してロールバック可能に）。
 /// 反映には入力ソースの切替/再ログインが要る旨は呼び出し側が案内する。
 ///
+/// `version` は完了通知に表示するバージョン文字列（例: `v0.1.10`）。置換は自プロセスを
+/// `killall` するため、呼び出し側では完了を知らせられない。swap.sh の最後で macOS 通知を
+/// 出し、「いつ完了したか」をユーザーに伝える（通知センターにタイムスタンプが残る）。
+///
 /// # エラー
 /// DL / 解凍 / 展開結果に `NukoIME.app` が無い場合。
 #[cfg(target_os = "macos")]
-pub fn apply_macos(zip_url: &str) -> Result<()> {
+pub fn apply_macos(zip_url: &str, version: &str) -> Result<()> {
     use std::io::copy;
     use std::process::{Command, Stdio};
 
@@ -130,6 +134,9 @@ pub fn apply_macos(zip_url: &str) -> Result<()> {
     let home = std::env::var("HOME")?;
     let dest = format!("{home}/Library/Input Methods/NukoIME.app");
     let new_app_str = new_app.to_str().ok_or_else(|| anyhow!("展開パスが不正"))?;
+    // 通知文に埋め込むバージョンは安全な文字だけに制限する（単一引用符の osascript
+    // 文字列を壊さない・シェルインジェクションを防ぐ）。想定は `v0.1.10` 等。
+    let notify_version = sanitize_version(version);
     let helper = tmp.join("swap.sh");
     let script = format!(
         r#"#!/bin/sh
@@ -141,6 +148,8 @@ rm -rf "{dest}.old"
 [ -d "{dest}" ] && mv "{dest}" "{dest}.old"
 cp -R "{new_app_str}" "{dest}"
 open "{dest}" 2>/dev/null || true
+# 完了通知: 自プロセス (nuko/NukoIME) は killall 済みなので、ここで「いつ終わったか」を伝える。
+osascript -e 'display notification "{notify_version} に更新しました。入力ソースを一度切替えると反映されます。" with title "ぬこIME 更新完了" sound name "Glass"' 2>/dev/null || true
 "#
     );
     std::fs::write(&helper, script)?;
@@ -155,4 +164,46 @@ open "{dest}" 2>/dev/null || true
         .stderr(Stdio::null())
         .spawn()?;
     Ok(())
+}
+
+/// 完了通知へ埋め込むバージョン文字列を安全な文字（英数・`.`/`+`/`_`/`-`）だけに制限する。
+///
+/// `version` は GitHub の tag 由来（通常 `v0.1.10`）だが、万一引用符や空白・`;` 等が
+/// 混ざっても単一引用符の osascript 文字列やシェルを壊さないよう除去する。空になったら
+/// 無難な既定文言を返す。
+#[cfg(target_os = "macos")]
+fn sanitize_version(version: &str) -> String {
+    let cleaned: String = version
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '_' | '-'))
+        .collect();
+    if cleaned.is_empty() {
+        "最新版".to_string()
+    } else {
+        cleaned
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::sanitize_version;
+
+    #[test]
+    fn sanitize_version_keeps_tag_chars() {
+        assert_eq!(sanitize_version("v0.1.10"), "v0.1.10");
+    }
+
+    #[test]
+    fn sanitize_version_strips_shell_dangerous_chars() {
+        let out = sanitize_version("v1.0'; rm -rf /");
+        assert_eq!(out, "v1.0rm-rf");
+        assert!(!out.contains('\''), "単一引用符を残さない");
+        assert!(!out.contains(';'), "セミコロンを残さない");
+        assert!(!out.contains(' '), "空白を残さない");
+    }
+
+    #[test]
+    fn sanitize_version_falls_back_when_empty() {
+        assert_eq!(sanitize_version("'''"), "最新版");
+    }
 }
