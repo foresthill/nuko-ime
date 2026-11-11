@@ -71,14 +71,25 @@ impl DreamConfig {
 }
 
 /// OpenRouter chat completions のリクエスト body を組み立てる（純粋）。
+///
+/// `json_mode = true` のとき `response_format: {"type":"json_object"}` を付け、
+/// サーバー側に **有効な JSON オブジェクトだけ**を返させる（OpenAI 互換 JSON モード）。
+/// Ollama 等のローカルモデルは「JSON だけ出力」という指示文を無視して説明文を返しがちで、
+/// dreaming の `parse_proposal` が「JSON オブジェクトが見つかりません」で失敗する。これを防ぐ。
+/// 出典: Ollama 公式 docs/api/openai-compatibility.mdx（`/v1/chat/completions` は
+/// `response_format` と JSON mode をサポート）。
 #[must_use]
-pub fn build_request_body(model: &str, prompt: &str) -> serde_json::Value {
-    serde_json::json!({
+pub fn build_request_body(model: &str, prompt: &str, json_mode: bool) -> serde_json::Value {
+    let mut body = serde_json::json!({
         "model": model,
         "messages": [{ "role": "user", "content": prompt }],
         // 応答にコスト (usage.cost) とトークン数を含めてもらう (AI ログ用)。
         "usage": { "include": true },
-    })
+    });
+    if json_mode {
+        body["response_format"] = serde_json::json!({ "type": "json_object" });
+    }
+    body
 }
 
 /// OpenRouter の応答 JSON から本文（`choices[0].message.content`）を取り出す（純粋）。
@@ -116,6 +127,9 @@ pub struct OpenRouterProvider {
     base_url: String,
     /// `name()` と AI ログに使う表示名（既定 `"openrouter"`、Ollama 等では `"ollama"`）。
     label: String,
+    /// JSON モード（`response_format: {"type":"json_object"}`）を使うか。既定 `false`。
+    /// Ollama 等のローカルモデルで dreaming 応答を JSON に強制するために `true` にする。
+    json_mode: bool,
 }
 
 impl OpenRouterProvider {
@@ -142,7 +156,17 @@ impl OpenRouterProvider {
             model: model.into(),
             base_url: base_url.into(),
             label: label.into(),
+            json_mode: false,
         }
+    }
+
+    /// JSON モード（`response_format: {"type":"json_object"}`）の有効/無効を切り替える
+    /// ビルダー。Ollama 等のローカルモデルが説明文を返して dreaming の JSON パースに
+    /// 失敗するのを防ぐために使う（既定は無効）。
+    #[must_use]
+    pub fn with_json_mode(mut self, on: bool) -> Self {
+        self.json_mode = on;
+        self
     }
 }
 
@@ -154,7 +178,7 @@ impl DreamProvider for OpenRouterProvider {
     fn complete(&self, prompt: &str) -> Result<String> {
         let started = std::time::Instant::now();
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let body = build_request_body(&self.model, prompt);
+        let body = build_request_body(&self.model, prompt, self.json_mode);
         let resp = ureq::post(&url)
             .set("Authorization", &format!("Bearer {}", self.api_key))
             .set("X-Title", "nuko-ime")
@@ -212,10 +236,40 @@ mod tests {
 
     #[test]
     fn build_request_body_shape() {
-        let body = build_request_body("test/model", "こんにちは");
+        let body = build_request_body("test/model", "こんにちは", false);
         assert_eq!(body["model"], "test/model");
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"], "こんにちは");
+    }
+
+    #[test]
+    fn build_request_body_omits_response_format_by_default() {
+        let body = build_request_body("m", "p", false);
+        assert!(
+            body.get("response_format").is_none(),
+            "json_mode=false では response_format を付けない (openrouter 既定)"
+        );
+    }
+
+    #[test]
+    fn build_request_body_sets_json_object_when_json_mode() {
+        let body = build_request_body("m", "p", true);
+        assert_eq!(
+            body["response_format"],
+            serde_json::json!({ "type": "json_object" }),
+            "json_mode=true で OpenAI 互換 JSON モードを要求する"
+        );
+    }
+
+    #[test]
+    fn with_json_mode_builder_toggles_flag() {
+        // 既定 (new/with_label) は false、ビルダーで true にできる。
+        let p = OpenRouterProvider::with_label("ollama", "k", "m", "b").with_json_mode(true);
+        assert!(p.json_mode, "ビルダーで有効化できる");
+        assert!(
+            !OpenRouterProvider::new("k", "m", "b").json_mode,
+            "openrouter 既定は無効"
+        );
     }
 
     #[test]
