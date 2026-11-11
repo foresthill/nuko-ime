@@ -910,9 +910,12 @@ fn build_dream_provider(
                     base.dimmed()
                 );
             }
-            Box::new(OpenRouterProvider::with_label(
-                "ollama", api_key, model, base,
-            ))
+            // ローカルモデルは「JSON だけ出力」の指示を無視して説明文を返しがちなので、
+            // OpenAI 互換 JSON モード (response_format: json_object) を強制して
+            // dreaming の JSON パース失敗を防ぐ (Ollama 公式がサポート)。
+            Box::new(
+                OpenRouterProvider::with_label("ollama", api_key, model, base).with_json_mode(true),
+            )
         }
         "anthropic" | "claude" => {
             use crate::anthropic::{model_hint, AnthropicProvider};
