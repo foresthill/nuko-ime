@@ -140,6 +140,6 @@ nuko learn relearn  # 観察ログから訂正選好を作り直す
 ## 現時点の制限
 
 - **macOS 専用**（Windows / Linux は計画中、未実装）
-- **未署名**（初回導入に手作業が必要。[README](../README.md#インストール) 参照）
+- **署名 + 公証済み（Developer ID）**（Gatekeeper 警告なしで導入可。手順は [README](../README.md#インストール) 参照）
 - Electron/Chromium 系アプリではハイライト・ポップアップ位置に制約
 - AI ベースの学習（BYOK による夜間最適化）は未実装。現状は頻度学習＋決定論的な訂正学習

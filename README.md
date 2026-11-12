@@ -38,20 +38,19 @@
 
 ### プレビュー版 (ビルド不要・推奨)
 
-[GitHub Releases](https://github.com/foresthill/nuko-ime/releases) から未署名の
-プレビュー版を入手できます。**未署名のため導入に手作業が要ります**:
+[GitHub Releases](https://github.com/foresthill/nuko-ime/releases) から
+**署名 + 公証済み（Developer ID）**のプレビュー版を入手できます:
 
-1. `NukoIME-v0.1.10-macos.zip` を展開 → `NukoIME.app` を `~/Library/Input Methods/` に置く
-2. Finder で `NukoIME.app` を**右クリック →「開く」**、または
-   **システム設定 → プライバシーとセキュリティ**で許可(Gatekeeper 対策)
-3. 変換モデルを配置(これが無いと変換品質が落ちる):
+1. `NukoIME-v0.1.11-macos.zip` を展開 → `NukoIME.app` を `~/Library/Input Methods/` に置く
+2. 変換モデルを配置(これが無いと変換品質が落ちる。内容は v0.1.3〜同一なので直近の
+   モデル同梱版から取得):
    ```bash
    mkdir -p "$HOME/Library/Application Support/nuko-ime"
-   tar -xzf nuko-ime-model-v0.1.10.tar.gz -C "$HOME/Library/Application Support/nuko-ime/"
+   tar -xzf nuko-ime-model-v0.1.6.tar.gz -C "$HOME/Library/Application Support/nuko-ime/"
    ```
-4. ログアウト→ログイン後、システム設定 → キーボード → 入力ソースで「ぬこIME」を追加
+3. ログアウト→ログイン後、システム設定 → キーボード → 入力ソースで「ぬこIME」を追加
 
-> 署名 + notarization(Gatekeeper 警告なしの導入)と、モデルの初回自動 DL は次版で対応予定。
+> 公証済みのため Gatekeeper の警告なしで導入できます。モデルの初回自動 DL は次版で対応予定。
 
 ### ソースからビルド (macOS)
 
