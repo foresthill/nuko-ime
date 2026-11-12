@@ -242,10 +242,18 @@ pub fn apply_segment_frequency(
             if super::datetime::is_datetime_surface(&seg_reading, &lc.surface) {
                 continue;
             }
-            // 読み完全一致の学習表層: 既存候補なら頻度スコアを加算 (= 先頭へ押し上げ)、
-            // 候補に無ければ注入 (libakaza/辞書に無い語をユーザー学習で出せるように)。
+            // 読み完全一致の学習表層: Layer 0 頻度スコアを **max で引き上げる** (加算ではない)。
+            //
+            // ★なぜ max か (2026-11-12、--explain でスコア内訳を透明化して判明した回帰の根治):
+            // 既存候補を「加算」にすると、libakaza の基礎スコア (ログ確率ベースで多くは負値、
+            // 例 ように = −1408) を学習スコアに足し込むため、同じ count でも基礎が負に沈んで
+            // いる表層ほど不利になる。一方、候補に無い表層は下の else で **純 Layer 0** を注入
+            // するので、低 count の注入表層が高 count の既存表層に勝つ非対称が生まれていた
+            // (例: 用に count 4 = 200040 が ように count 36 = −1408+200360 = 198952 に勝つ)。
+            // → 既存も注入も **純 Layer 0 スコア** に揃え、count 順の正しい並びに戻す。
+            // 基礎が学習より高い稀なケース (強い libakaza 候補) は max がそのまま基礎を残す。
             if let Some(c) = seg.candidates.iter_mut().find(|c| c.surface == lc.surface) {
-                c.score = c.score.saturating_add(lc.score);
+                c.score = c.score.max(lc.score);
                 changed = true;
             } else {
                 seg.candidates.push(
@@ -1143,6 +1151,59 @@ mod tests {
         assert!(
             !segmented.corrections_applied,
             "★ 学習が無ければ corrections_applied は立たない"
+        );
+    }
+
+    /// ★★ 回帰ガード (2026-11-12、ように→用に): libakaza 基礎が **負値** の高 count 既存候補が、
+    /// 低 count の **注入**候補に負けてはいけない。旧実装 (加算) だと基礎の負値を学習に足し込み、
+    /// `ように = base(−500) + 200_030 = 199_530` が `用に = 純 200_010` に沈んで逆転していた。
+    /// max に直して「既存も注入も純 Layer 0」に揃えることで count 順 (36>4) が守られる。
+    /// ※本テストは旧 `saturating_add` 実装では **落ちる** (= 回帰を捕捉する)。
+    #[test]
+    fn segment_frequency_high_count_existing_beats_low_count_injection() {
+        use crate::conversion::{Segment, SegmentedConversion};
+
+        let mut learning = LearningManager::new().unwrap();
+        let ctx = ConversionContext::new();
+        // ように を 3 回、用に を 1 回確定 (count: ように 3 > 用に 1)。
+        for _ in 0..3 {
+            learning
+                .record(&Candidate::new("ように", "ように"), &ctx)
+                .unwrap();
+        }
+        learning
+            .record(&Candidate::new("用に", "ように"), &ctx)
+            .unwrap();
+
+        // 文中の「ように」文節。libakaza 基礎は負値 (ように = −500)。用に は候補に無い。
+        let cand = |s: &str, r: &str, score: i32| {
+            Candidate::new(s, r)
+                .with_score(score)
+                .with_source(CandidateSource::System)
+        };
+        let mut segmented = SegmentedConversion::new(vec![Segment::new(
+            "ように",
+            vec![cand("ように", "ように", -500), cand("様に", "ように", -800)],
+        )]);
+
+        apply_segment_frequency(&mut segmented, &learning);
+
+        assert_eq!(
+            segmented.segments[0].surface(),
+            Some("ように"),
+            "★ 高 count の既存 ように(3) が 低 count の注入 用に(1) に勝つ (旧加算では 用に に逆転していた)"
+        );
+        // 用に も注入はされるが先頭ではない。
+        let top3: Vec<&str> = segmented.segments[0]
+            .candidates
+            .iter()
+            .take(3)
+            .map(|c| c.surface.as_str())
+            .collect();
+        assert_eq!(top3.first(), Some(&"ように"), "★ 先頭は ように");
+        assert!(
+            top3.contains(&"用に"),
+            "用に も候補には注入されている (ただし下位)"
         );
     }
 
