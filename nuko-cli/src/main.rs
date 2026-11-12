@@ -49,6 +49,10 @@ enum Commands {
         /// user_dict.json) をロードする。学習由来の誤変換を再現・切り分けるのに使う。
         #[arg(long)]
         personal: bool,
+        /// スコアリングの内訳を表示する (候補ごとの score / source / 個人学習 count)。
+        /// 「なぜこの候補が勝つのか」を可視化する。`--personal` と併用すると実データで見える。
+        #[arg(long)]
+        explain: bool,
     },
     /// ローマ字をかなに変換
     Romaji {
@@ -222,7 +226,8 @@ fn main() -> Result<()> {
             count,
             libakaza,
             personal,
-        } => cmd_convert(&reading, count, libakaza, personal),
+            explain,
+        } => cmd_convert(&reading, count, libakaza, personal, explain),
         Commands::Romaji { input } => cmd_romaji(&input),
         Commands::Predict { prefix, count } => cmd_predict(&prefix, count),
         Commands::DictInfo => cmd_dict_info(),
@@ -247,7 +252,13 @@ fn main() -> Result<()> {
     }
 }
 
-fn cmd_convert(reading: &str, count: usize, use_libakaza: bool, personal: bool) -> Result<()> {
+fn cmd_convert(
+    reading: &str,
+    count: usize,
+    use_libakaza: bool,
+    personal: bool,
+    explain: bool,
+) -> Result<()> {
     println!("{}", "ぬこIME 変換テスト".cyan().bold());
     println!("読み: {}", reading.yellow());
     let backend = if use_libakaza {
@@ -270,20 +281,40 @@ fn cmd_convert(reading: &str, count: usize, use_libakaza: bool, personal: bool) 
     let engine = build_convert_engine(use_libakaza, personal)?;
     let context = nuko_core::conversion::ConversionContext::new();
 
+    // --explain 用: 個人学習 (Layer 0) の実 count を learning.json から読み、候補へ注釈する。
+    // engine の内部スコアを分解せず「実データの回数」を直接見せる (推測でなく実値)。
+    let counts = if explain && personal {
+        app_support_dir()
+            .map(|d| load_learning_counts(&d.join("learning.json")))
+            .unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    };
+
     // 文節区切りの診断 (libakaza 有効時のみ)。「お願い→の願い」のような区切りミスは
-    // flat 候補より segmented を見た方が原因が分かる。
-    print_segmented_diagnostic(&engine, reading);
+    // flat 候補より segmented を見た方が原因が分かる。--explain で候補ごとの内訳も出す。
+    print_segmented_diagnostic(&engine, reading, explain, &counts);
 
     let candidates = engine.convert(reading, &context)?;
     println!("{}:", "変換候補 (flat)".green());
     for (i, candidate) in candidates.iter().take(count).enumerate() {
         let num = format!("{}.", i + 1);
-        println!(
-            "  {} {} {}",
-            num.dimmed(),
-            candidate.surface.white().bold(),
-            format!("({})", candidate.reading).dimmed()
-        );
+        if explain {
+            println!(
+                "  {} {} {} {}",
+                num.dimmed(),
+                candidate.surface.white().bold(),
+                format!("({})", candidate.reading).dimmed(),
+                explain_annotation(candidate, &counts)
+            );
+        } else {
+            println!(
+                "  {} {} {}",
+                num.dimmed(),
+                candidate.surface.white().bold(),
+                format!("({})", candidate.reading).dimmed()
+            );
+        }
     }
 
     if candidates.len() > count {
@@ -291,6 +322,52 @@ fn cmd_convert(reading: &str, count: usize, use_libakaza: bool, personal: bool) 
     }
 
     Ok(())
+}
+
+/// `learning.json` を読み、`(読み, 表層) -> count` のマップにする (--explain 用)。
+/// 失敗時は空マップ (診断表示が count 無しになるだけ)。
+fn load_learning_counts(
+    path: &std::path::Path,
+) -> std::collections::HashMap<(String, String), u32> {
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        surface: String,
+        reading: String,
+        #[serde(default)]
+        count: u32,
+    }
+    let mut map = std::collections::HashMap::new();
+    if let Ok(text) = std::fs::read_to_string(path) {
+        if let Ok(entries) = serde_json::from_str::<Vec<Entry>>(&text) {
+            for e in entries {
+                map.insert((e.reading, e.surface), e.count);
+            }
+        }
+    }
+    map
+}
+
+/// `--explain` 用の 1 候補の内訳文字列: `score=... [source] 学習×N`。
+///
+/// source はどの層由来か (System=libakaza/静的, User=訂正/頻度注入, Learned=学習辞書)。
+/// `counts` に (読み,表層) があれば個人学習 (Layer 0) の実 count を併記する。
+fn explain_annotation(
+    candidate: &nuko_core::conversion::Candidate,
+    counts: &std::collections::HashMap<(String, String), u32>,
+) -> String {
+    use nuko_core::conversion::CandidateSource;
+    let src = match candidate.source {
+        CandidateSource::System => "libakaza/静的",
+        CandidateSource::User => "個人(訂正/頻度)",
+        CandidateSource::Learned => "学習辞書",
+    };
+    let learn = counts
+        .get(&(candidate.reading.clone(), candidate.surface.clone()))
+        .map(|c| format!(" 学習×{c}"))
+        .unwrap_or_default();
+    format!("score={} [{}]{}", candidate.score, src, learn)
+        .dimmed()
+        .to_string()
 }
 
 /// 変換エンジンを構築する。`use_libakaza` 時は実機と同じ libakaza バックエンドを
@@ -378,28 +455,40 @@ fn akaza_model_dir() -> PathBuf {
 }
 
 /// 文節区切りの診断を表示する (libakaza 有効時のみ中身が出る)。
+///
+/// `explain` 時は各文節の上位候補について score / source / 個人学習 count の内訳を出す
+/// (「なぜこの文節がこの表層になるのか」を可視化。例: 読みキーが `よう` に割れて 用 が勝つ)。
 #[cfg(feature = "akaza")]
-fn print_segmented_diagnostic(engine: &ConversionEngine, reading: &str) {
+fn print_segmented_diagnostic(
+    engine: &ConversionEngine,
+    reading: &str,
+    explain: bool,
+    counts: &std::collections::HashMap<(String, String), u32>,
+) {
     match engine.convert_segmented(reading) {
         Ok(Some(seg)) => {
             println!("{}:", "文節区切り (libakaza)".green());
             for (i, s) in seg.segments.iter().enumerate() {
-                let top: Vec<String> = s
-                    .candidates
-                    .iter()
-                    .take(5)
-                    .map(|c| c.surface.clone())
-                    .collect();
-                println!(
-                    "  [{i}] {} ({}) → {}",
-                    s.current()
-                        .map(|c| c.surface.as_str())
-                        .unwrap_or("")
-                        .white()
-                        .bold(),
-                    s.reading.dimmed(),
-                    top.join(" / ").dimmed()
-                );
+                let head = s.current().map(|c| c.surface.as_str()).unwrap_or("");
+                println!("  [{i}] {} ({})", head.white().bold(), s.reading.dimmed(),);
+                if explain {
+                    // 文節内の候補を score 降順で内訳表示 (実際の順位決定が見える)。
+                    for c in s.candidates.iter().take(6) {
+                        println!(
+                            "        {} {}",
+                            c.surface.white(),
+                            explain_annotation(c, counts)
+                        );
+                    }
+                } else {
+                    let top: Vec<String> = s
+                        .candidates
+                        .iter()
+                        .take(5)
+                        .map(|c| c.surface.clone())
+                        .collect();
+                    println!("        → {}", top.join(" / ").dimmed());
+                }
             }
             println!("  連結: {}", seg.current_surface().white().bold());
             println!();
@@ -410,7 +499,13 @@ fn print_segmented_diagnostic(engine: &ConversionEngine, reading: &str) {
 }
 
 #[cfg(not(feature = "akaza"))]
-fn print_segmented_diagnostic(_engine: &ConversionEngine, _reading: &str) {}
+fn print_segmented_diagnostic(
+    _engine: &ConversionEngine,
+    _reading: &str,
+    _explain: bool,
+    _counts: &std::collections::HashMap<(String, String), u32>,
+) {
+}
 
 fn cmd_romaji(input: &str) -> Result<()> {
     println!("{}", "ぬこIME ローマ字変換".cyan().bold());
