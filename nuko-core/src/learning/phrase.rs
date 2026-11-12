@@ -22,6 +22,24 @@ use crate::error::{NukoError, Result};
 /// フレーズ (= 文相当) だけを対象にするための下限。
 pub const MIN_PHRASE_READING_CHARS: usize = 6;
 
+/// この確定をフレーズとして記録すべきか (#187 §5 のゲート、純粋関数)。
+///
+/// 条件 (すべて満たすとき `true`):
+/// - **複数文節** (`segment_count >= 2`)。単一文節・単語は Layer 0 頻度学習に任せる。
+/// - 読み・表層がどちらも非空。
+/// - 読み ≠ 表層 (かな素通りはフレーズにしない)。
+/// - 読みが [`MIN_PHRASE_READING_CHARS`] 文字以上 (= 文相当)。
+///
+/// datetime 等の**一過性**表層の除外は呼び出し側の責務 (controller 側で既に除外済み)。
+#[must_use]
+pub fn should_record_phrase(reading: &str, surface: &str, segment_count: usize) -> bool {
+    segment_count >= 2
+        && !reading.is_empty()
+        && !surface.is_empty()
+        && reading != surface
+        && reading.chars().count() >= MIN_PHRASE_READING_CHARS
+}
+
 /// 1 件のフレーズ学習。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhraseEntry {
@@ -257,5 +275,21 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let store = PhraseStore::load(&path).unwrap();
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn should_record_phrase_gate() {
+        // 複数文節・長い読み・読み≠表層 → 記録する。
+        assert!(should_record_phrase(GOKAKUNIN, GOKAKUNIN_SURFACE, 5));
+        // 単一文節は記録しない (Layer 0 に任せる)。
+        assert!(!should_record_phrase(GOKAKUNIN, GOKAKUNIN_SURFACE, 1));
+        assert!(!should_record_phrase(GOKAKUNIN, GOKAKUNIN_SURFACE, 0));
+        // 読み == 表層 (かな素通り) は記録しない。
+        assert!(!should_record_phrase("あいうえおか", "あいうえおか", 3));
+        // 短い読み (< MIN) は記録しない。
+        assert!(!should_record_phrase("にほんご", "日本語", 3));
+        // 空は記録しない。
+        assert!(!should_record_phrase("", "x", 3));
+        assert!(!should_record_phrase("あいうえおか", "", 3));
     }
 }

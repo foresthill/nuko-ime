@@ -20,5 +20,5 @@ pub use observation::{
     filter_out_reading, prune_for_cap, ObservationEvent, ObservationLog, OBS_CAP_HIGH_WATERMARK,
     OBS_CAP_KEEP_RECENT_COMMITS,
 };
-pub use phrase::{PhraseEntry, PhraseStore, MIN_PHRASE_READING_CHARS};
+pub use phrase::{should_record_phrase, PhraseEntry, PhraseStore, MIN_PHRASE_READING_CHARS};
 pub use segmentation::{ranges_from_segment_readings, SegmentationEntry, SegmentationStore};
