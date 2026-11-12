@@ -235,6 +235,16 @@ PR #40 で `convert_k_best(reading, None, k=9)` に切替。各 `KBestPath` が�
 - **検証は `--release`**（debug は rsmarisa 再帰で try_new パニック）。一時 HOME に `learning.json` を仕込み、本番学習を汚さず `nuko convert --libakaza --personal` で before/after を実測した（ほうがいい 法→方 / このよう 用→様）。
 - 残件: 間違った表層も確定済みだと Layer0 が重み投票になり tie で負け得る。「打ち直し＝間違い降格」の決定的機構は follow-up。思想は [`docs/LEARNING_ARCHITECTURE.md` の「個人重みの合成」](docs/LEARNING_ARCHITECTURE.md) を正とする。
 
+### 落とし穴: segmented の Layer0 反映は「加算」でなく **`max(基礎, Layer0)`** (#184 / PR #184)
+
+`apply_segment_frequency` が Layer0 頻度を候補へ効かせるとき、**既存候補も注入候補も「純 Layer0」に揃える**こと（`c.score = c.score.max(lc.score)`）。加算は禁止。
+
+- **罠**: libakaza の文節候補スコアは**ログ確率ベースで多くは負値**。既存候補に `基礎 + Layer0` と加算すると、負の基礎に沈んだ高 count 表層が、候補に無く**純 Layer0** で注入される低 count 表層に**逆転**される。
+- 実測（`--explain`・`--release`・実 `learning.json`、読み `ように`）: BEFORE 加算 → `用に(×4) 200040` が `ように(×36) −1408+200360=198952` に勝って 1位（＝ユーザー報告「文中で 用に になる」）。AFTER `max` → `ように 200360` が 1位、count 順（36>5>4）に整列。
+- flat `convert()` は元々「置換」で正しく count 順。壊れていたのは **segmented だけ**。
+- **検証手順の定石**: ① 誤変換を見たら `nuko convert <読み> --libakaza --personal --explain`（#183、`--release` 必須）で内訳を撮る → ② 失敗ケースをユニットテスト化（旧 `add` で落ちることを実測）→ ③ `max` 等の修正後に before/after を再度 `--explain` で実測。推測で辞書/スコアを弄らない。
+- 残件（③ 降格 / 文脈）: `そこ(×28 底 > ×27 そこ)` は count どおりで `max` では覆らない。降格機構 or `context_hash` が要る。詳細と設計思想は [`docs/LEARNING_ARCHITECTURE.md` §1.6（スコア透明化）/ §個人重みの合成](docs/LEARNING_ARCHITECTURE.md) を正とする。
+
 ### 設計思想: 学習4層 ↔ 心の構造（意識/個人的無意識/集合的無意識/超意識）
 
 個人学習は**共有しない**、集合知は**有益な分だけアップデートで配布**、AI(dreaming)は**意図推論**——この振り分けは心の構造のメタファで整理できる。長期の設計思想は [`docs/LEARNING_ARCHITECTURE.md` §1.5](docs/LEARNING_ARCHITECTURE.md)（長期記憶）。このCLAUDE.md（短期記憶）には運用規約だけ置き、思想は docs 側を正とする。
