@@ -525,7 +525,15 @@ fn cmd_predict(prefix: &str, count: usize) -> Result<()> {
     println!("入力: {}", prefix.yellow());
     println!();
 
-    let engine = ConversionEngine::new()?;
+    let mut engine = ConversionEngine::new()?;
+    // フレーズ予測 (#187) は常時ON。`phrases.json` があれば load して前方一致で候補へ。
+    if let Some(dir) = app_support_dir() {
+        let path = dir.join("phrases.json");
+        match engine.load_phrases(&path) {
+            Ok(()) => eprintln!("(phrases: {} 件)", engine.phrases().len()),
+            Err(e) => eprintln!("(phrases.json load 失敗: {e})"),
+        }
+    }
     let predictions = engine.predict(prefix, count)?;
 
     if predictions.is_empty() {

@@ -10,7 +10,7 @@ use super::{Candidate, CandidateList, CandidateSource, ConversionContext};
 use crate::dictionary::DictionaryManager;
 use crate::error::{NukoError, Result};
 use crate::input::{to_halfwidth_katakana, to_katakana};
-use crate::learning::{CorrectionStore, LearningManager, SegmentationStore};
+use crate::learning::{CorrectionStore, LearningManager, PhraseStore, SegmentationStore};
 
 /// 自然分割の境界 (`nat_bounds` = 0 と `total` を含む累積オフセット) に対し、
 /// `hint` 読みが 1 文節になるよう強制境界を作った `force_ranges` を返す。
@@ -287,6 +287,9 @@ pub struct ConversionEngine {
     corrections: CorrectionStore,
     /// 文節位置の学習 (ユーザーが切り直した「切り方」)。空なら無変化。
     segmentations: SegmentationStore,
+    /// フレーズ予測 (#187)。確定した文を読み全体→表層全体で覚え、前方一致で予測する。
+    /// 空なら [`Self::predict`] は静的辞書のみ。個人データ・非共有。
+    phrases: PhraseStore,
     /// 旧字体モード。ON なら候補の旧字体版 (國/體/學…) を末尾に追加する。既定 OFF。
     kyujitai_mode: bool,
 }
@@ -304,6 +307,7 @@ impl ConversionEngine {
             libakaza: None,
             corrections: CorrectionStore::default(),
             segmentations: SegmentationStore::default(),
+            phrases: PhraseStore::default(),
             kyujitai_mode: false,
         })
     }
@@ -338,6 +342,7 @@ impl ConversionEngine {
             libakaza,
             corrections: CorrectionStore::default(),
             segmentations: SegmentationStore::default(),
+            phrases: PhraseStore::default(),
             kyujitai_mode: false,
         })
     }
@@ -403,6 +408,27 @@ impl ConversionEngine {
     #[must_use]
     pub fn segmentations(&self) -> &SegmentationStore {
         &self.segmentations
+    }
+
+    /// `phrases.json` からフレーズ予測ストアを load する(無ければ空)。
+    ///
+    /// # エラー
+    /// ファイルはあるがパースに失敗した場合。
+    pub fn load_phrases(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        self.phrases = PhraseStore::load(path)?;
+        tracing::info!(count = self.phrases.len(), "フレーズ予測を load");
+        Ok(())
+    }
+
+    /// フレーズ予測ストアを設定する。
+    pub fn set_phrases(&mut self, phrases: PhraseStore) {
+        self.phrases = phrases;
+    }
+
+    /// フレーズ予測ストアへの参照(保存・表示用)。
+    #[must_use]
+    pub fn phrases(&self) -> &PhraseStore {
+        &self.phrases
     }
 
     /// 旧字体モードを設定する。ON なら候補に旧字体版を追加する (既定 OFF)。
@@ -913,17 +939,37 @@ impl ConversionEngine {
     /// # 戻り値
     /// (完全な読み, 変換候補) のリスト
     pub fn predict(&self, prefix: &str, max_results: usize) -> Result<Vec<(String, Candidate)>> {
-        if prefix.is_empty() {
+        if prefix.is_empty() || max_results == 0 {
             return Ok(Vec::new());
         }
 
         let mut predictions = Vec::new();
+        // 同一表層の重複を防ぐ (フレーズ予測と辞書で同じ語が出ることがある)。
+        let mut seen = std::collections::HashSet::new();
 
-        // 前方一致で辞書を検索
+        // 1) フレーズ予測 (#187)。確定済みの定型句を読み全体の前方一致で先頭に出す。
+        //    これが「ん＋母音」境界を打ち切る前に候補選択で回避する肝 (= 既存IME の
+        //    予測変換と同じ回避策)。個人学習由来なので source = Learned。
+        for entry in self.phrases.predict(prefix, max_results) {
+            if !seen.insert(entry.surface.clone()) {
+                continue;
+            }
+            let candidate = Candidate::new(entry.surface, entry.reading.clone())
+                .with_score(i32::try_from(entry.count).unwrap_or(i32::MAX))
+                .with_source(CandidateSource::Learned);
+            predictions.push((entry.reading, candidate));
+            if predictions.len() >= max_results {
+                return Ok(predictions);
+            }
+        }
+
+        // 2) 前方一致で静的辞書を検索
         let results = self.dictionary.prefix_search(prefix)?;
-
         for (reading, candidates) in results {
             for candidate in candidates {
+                if !seen.insert(candidate.surface.clone()) {
+                    continue;
+                }
                 predictions.push((reading.clone(), candidate));
                 if predictions.len() >= max_results {
                     return Ok(predictions);
@@ -995,6 +1041,34 @@ mod tests {
         // かなそのまま、カタカナの候補は必ず含まれる
         assert!(candidates.iter().any(|c| c.surface == "にほん"));
         assert!(candidates.iter().any(|c| c.surface == "ニホン"));
+    }
+
+    /// ★ フレーズ予測 (#187)。確定済みの定型句が、末尾ん (= 単一 n で打てる) の
+    /// 短い前置きで予測候補の先頭に出る。= 「ん＋母音」境界の回避。
+    #[test]
+    fn predict_surfaces_learned_phrase_first() {
+        let mut engine = ConversionEngine::new().unwrap();
+        let mut store = PhraseStore::new();
+        store.record(
+            "ごかくにんいただけますとさいわいです",
+            "ご確認いただけますと幸いです",
+        );
+        engine.set_phrases(store);
+
+        // 末尾ん で引ける短い前置きで、長い表層が先頭に補完される。
+        let hits = engine.predict("ごかくにん", 9).unwrap();
+        assert!(!hits.is_empty(), "フレーズが予測されるべき");
+        assert_eq!(hits[0].1.surface, "ご確認いただけますと幸いです");
+        assert_eq!(hits[0].1.source, CandidateSource::Learned, "出所は学習");
+    }
+
+    /// フレーズ無しでも静的辞書の予測は従来どおり動く (回帰防止)。
+    #[test]
+    fn predict_without_phrases_is_unchanged() {
+        let engine = ConversionEngine::new().unwrap();
+        // 空 prefix / max=0 は空。
+        assert!(engine.predict("", 9).unwrap().is_empty());
+        assert!(engine.predict("にほん", 0).unwrap().is_empty());
     }
 
     /// ★ 学習 (corrections) が **文節ごと** に効き、複数文節の文の中でも順位が直る。
