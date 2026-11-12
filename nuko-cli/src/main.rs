@@ -824,8 +824,9 @@ fn cmd_update(apply: bool) -> Result<()> {
     }
     #[cfg(target_os = "macos")]
     {
-        update::apply_macos(zip)?;
+        update::apply_macos(zip, &info.tag)?;
         println!("更新を適用中です。数秒後に NukoIME が再起動します。");
+        println!("完了すると通知でお知らせします。");
         println!("反映には【入力ソースを一度切替えて戻す】か再ログインが必要です。");
     }
     #[cfg(not(target_os = "macos"))]
