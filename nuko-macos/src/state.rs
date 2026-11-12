@@ -558,6 +558,39 @@ pub fn toggle_candidate_score_visible() -> bool {
     now_on
 }
 
+/// 候補パネルに「出所バッジ」(学習/個人) を表示するか。
+/// app support dir の `CANDIDATE_SOURCE_BADGE` マーカーの有無。既定 OFF。
+///
+/// 表示は純粋に描画だけの話でエンジンには影響しない (変換結果は不変)。
+#[must_use]
+pub fn candidate_source_badge_enabled() -> bool {
+    nuko_app_support_dir()
+        .map(|d| d.join("CANDIDATE_SOURCE_BADGE").exists())
+        .unwrap_or(false)
+}
+
+/// 出所バッジ表示をトグルして **新しい状態** を返す。
+///
+/// マーカーファイル `CANDIDATE_SOURCE_BADGE` を作成/削除するだけ。エンジンへの
+/// 反映は不要 (描画時に [`candidate_source_badge_enabled`] を読む)。
+/// dir 取得不可時は false を返す (変更なし)。
+pub fn toggle_candidate_source_badge() -> bool {
+    let Some(dir) = nuko_app_support_dir() else {
+        return false;
+    };
+    let marker = dir.join("CANDIDATE_SOURCE_BADGE");
+    let now_on = if marker.exists() {
+        let _ = std::fs::remove_file(&marker);
+        false
+    } else {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(&marker, b"");
+        true
+    };
+    tracing::info!(enabled = now_on, "出所バッジ表示を切り替え");
+    now_on
+}
+
 /// 単語登録の永続辞書 (`~/…/nuko-ime/user_dict.json`) を起動時にロードする。
 ///
 /// ファイルが無くても path を設定するため、以後の [`register_word`] の保存が効く。

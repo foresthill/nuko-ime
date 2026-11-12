@@ -113,8 +113,11 @@ impl CustomCandidatePanel {
     }
 
     /// 候補リストと選択 index を更新し、パネルサイズを内容に合わせる (flat モード)。
-    pub fn set_candidates(&self, items: &[String], selected: usize) {
-        self.render(None, items, selected);
+    ///
+    /// `badges` は items と同じ長さ・同じ並びの出所ラベル (空文字は無印)。`None` で
+    /// 従来どおりバッジ無し。出所バッジ表示トグル (既定 OFF) が OFF のとき `None`。
+    pub fn set_candidates(&self, items: &[String], selected: usize, badges: Option<&[String]>) {
+        self.render(None, items, selected, badges);
     }
 
     /// 候補リスト + **文節分割ヘッダ** を表示する (segmented モード)。
@@ -128,12 +131,19 @@ impl CustomCandidatePanel {
         selected: usize,
         segments: &[String],
         focused: usize,
+        badges: Option<&[String]>,
     ) {
-        self.render(Some((segments, focused)), items, selected);
+        self.render(Some((segments, focused)), items, selected, badges);
     }
 
     /// 内部: ヘッダ有無を問わず描画 + 高さ調整。
-    fn render(&self, header: Option<(&[String], usize)>, items: &[String], selected: usize) {
+    fn render(
+        &self,
+        header: Option<(&[String], usize)>,
+        items: &[String],
+        selected: usize,
+        badges: Option<&[String]>,
+    ) {
         if items.is_empty() {
             self.hide();
             return;
@@ -141,7 +151,8 @@ impl CustomCandidatePanel {
         // 候補が多くても 1 ページ (CANDIDATE_PAGE_SIZE 件) ぶんだけ描く。
         // 実際に描画した行数を受け取って高さに使う。
         let hint = self.hint.borrow();
-        let (attr, line_count) = build_attributed_string(header, items, selected, hint.as_deref());
+        let (attr, line_count) =
+            build_attributed_string(header, items, selected, hint.as_deref(), badges);
         self.label.setAttributedStringValue(&attr);
 
         let height = (line_count as f64) * LINE_HEIGHT + PADDING * 2.0;
@@ -193,11 +204,14 @@ fn build_attributed_string(
     items: &[String],
     selected: usize,
     footer: Option<&str>,
+    badges: Option<&[String]>,
 ) -> (Retained<NSMutableAttributedString>, usize) {
     let mut combined = String::new();
     // 文節ヘッダの focused 範囲 / 選択候補行の範囲 (utf16: start, len)。背景強調に使う。
     let mut header_focus_range: Option<(usize, usize)> = None;
     let mut selected_line_range: Option<(usize, usize)> = None;
+    // 出所バッジの範囲 (utf16: start, len)。淡色の前景色で描くため。
+    let mut badge_ranges: Vec<(usize, usize)> = Vec::new();
     let mut line_count: usize = 0;
 
     // 行間の改行を「2 行目以降の先頭」に入れるためのヘルパ。
@@ -240,6 +254,19 @@ fn build_attributed_string(
         let line = format!("{marker}{}. {item}", j + 1);
         let start = combined.encode_utf16().count();
         combined.push_str(&line);
+        // 出所バッジ (学習/個人 のみ。空文字 = 無印 = エンジン既定)。surface の後に
+        // 淡色で添える。番号・選択ハイライトの整列は崩さない。
+        if let Some(badge) = badges
+            .and_then(|b| b.get(page_start + j))
+            .map(String::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            combined.push_str("  ");
+            let b_start = combined.encode_utf16().count();
+            combined.push_str(badge);
+            let b_len = combined.encode_utf16().count() - b_start;
+            badge_ranges.push((b_start, b_len));
+        }
         let end = combined.encode_utf16().count();
         if j == in_page_selected {
             selected_line_range = Some((start, end - start));
@@ -297,6 +324,20 @@ fn build_attributed_string(
                 let value: &AnyObject = (*bg_color).as_ref();
                 let dict = NSDictionary::from_slices(&[&*key], &[value]);
                 attr_string.addAttributes_range(&dict, NSRange::new(start, len));
+            }
+        }
+    }
+
+    // 出所バッジは淡色の前景色 (tertiaryLabelColor) で添える。
+    // labelColor の後に適用して上書きする (バッジだけ目立たせない)。
+    for (start, len) in &badge_ranges {
+        if *len > 0 {
+            unsafe {
+                let dim_color = NSColor::tertiaryLabelColor();
+                let key = NSForegroundColorAttributeName.copy();
+                let value: &AnyObject = (*dim_color).as_ref();
+                let dict = NSDictionary::from_slices(&[&*key], &[value]);
+                attr_string.addAttributes_range(&dict, NSRange::new(*start, *len));
             }
         }
     }
