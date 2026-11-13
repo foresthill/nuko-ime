@@ -401,6 +401,12 @@ define_class!(
             self._toggle_score_visible_impl();
         }
 
+        /// メニュー項目「候補に出所を表示」のアクション (ON/OFF トグル)。
+        #[unsafe(method(nukoToggleSourceBadge:))]
+        fn nuko_toggle_source_badge(&self, _sender: Option<&AnyObject>) {
+            self._toggle_source_badge_impl();
+        }
+
         // 注意: 本 IME は **方式3 (handleEvent:) 単独**。方式1 (inputText:/
         // didCommandBySelector:) は実装しない。3 方式は排他で、混在は落とし穴 #9
         // (打てない/クラッシュ, PR #51/#52)。方式3 一本化は keyCode/修飾キーを得るため
@@ -509,6 +515,19 @@ impl NukoInputController {
                 &empty,
             );
             score_item.setState(if crate::state::candidate_score_visible() {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            });
+
+            // 出所バッジ表示トグル (既定 OFF): 候補に「学習/個人」の印を淡色で添える。
+            let badge = NSString::from_str("候補に出所を表示（学習/個人）");
+            let badge_item = menu.addItemWithTitle_action_keyEquivalent(
+                &badge,
+                Some(sel!(nukoToggleSourceBadge:)),
+                &empty,
+            );
+            badge_item.setState(if crate::state::candidate_source_badge_enabled() {
                 NSControlStateValueOn
             } else {
                 NSControlStateValueOff
@@ -626,6 +645,28 @@ impl NukoInputController {
             .to_string()
         } else {
             "⬜️ 候補にスコアを表示: OFF\n\n候補は表層のみ表示します。".to_string()
+        };
+        self._present_learning(&text);
+    }
+
+    /// メニュー「候補に出所を表示」: ON/OFF をトグルして結果をパネル表示する。
+    ///
+    /// 変換結果そのものは一切変えない (描画だけ)。次に候補ウィンドウが開いたときから反映。
+    fn _toggle_source_badge_impl(&self) {
+        let on = crate::state::toggle_candidate_source_badge();
+        let text = if on {
+            concat!(
+                "✅ 候補に出所を表示: ON\n\n",
+                "自分の履歴/登録から出た候補に淡色の印を添えます。\n",
+                "  学習 … 過去に自分が選んだ (頻度学習)\n",
+                "  個人 … 単語登録・訂正で自分が決めた\n",
+                "  (無印) … エンジン既定の候補\n\n",
+                "※ 変換結果そのものは変わりません。何度も選ぶと「学習」印の\n",
+                "　候補が上位に上がっていくのが見えます。",
+            )
+            .to_string()
+        } else {
+            "⬜️ 候補に出所を表示: OFF\n\n印を付けずに候補だけを表示します。".to_string()
         };
         self._present_learning(&text);
     }
@@ -1810,6 +1851,19 @@ impl NukoInputController {
 
     // --- 候補ウィンドウ (singleton CustomCandidatePanel) ---------------
 
+    /// 候補の出所バッジ文字列 (出所バッジ表示トグル ON のときだけ使う)。
+    ///
+    /// **自分由来の候補だけ**に印を付ける。`System` (libakaza 統計エンジン / 静的辞書 /
+    /// かな・カナ・代替読み = エンジン既定) は大半を占めるので無印にして視覚ノイズを抑える。
+    /// 「無印 = 既定、印あり = 自分の履歴/登録」という読み方になる。
+    fn source_badge(source: CandidateSource) -> &'static str {
+        match source {
+            CandidateSource::Learned => "学習", // Layer0 頻度学習 (過去に自分が選んだ)
+            CandidateSource::User => "個人",    // 単語登録 / Layer2 訂正選好
+            CandidateSource::System => "",      // エンジン既定 (無印)
+        }
+    }
+
     /// 候補ウィンドウを表示する (自前 NSPanel)
     ///
     /// 現在の `state.candidates` を CustomPanel に流し、`client` の
@@ -1838,13 +1892,24 @@ impl NukoInputController {
         let (snapshot, reading) = {
             let state = self.ivars().state.borrow();
             let reading = state.composition.clone();
+            let badge_on = crate::state::candidate_source_badge_enabled();
             let snap = state.candidates.as_ref().map(|c| {
                 let items = Self::panel_items(c, score_on);
-                (items, c.selected_index(), Self::panel_segments(&state))
+                let badges: Option<Vec<String>> = badge_on.then(|| {
+                    c.iter()
+                        .map(|x| Self::source_badge(x.source).to_string())
+                        .collect()
+                });
+                (
+                    items,
+                    c.selected_index(),
+                    Self::panel_segments(&state),
+                    badges,
+                )
             });
             (snap, reading)
         };
-        let Some((items, selected, seg_info)) = snapshot else {
+        let Some((items, selected, seg_info, badges)) = snapshot else {
             return;
         };
         // 単語登録ヒント: 今の読みが「直前に別読みで出した語」の登録対象なら、
@@ -1861,10 +1926,11 @@ impl NukoInputController {
         with_custom_panel(|panel| {
             if let Some(panel) = panel {
                 panel.set_registration_hint(hint.clone());
+                let badges = badges.as_deref();
                 if let Some((segs, focused)) = &seg_info {
-                    panel.set_candidates_segmented(&items, selected, segs, *focused);
+                    panel.set_candidates_segmented(&items, selected, segs, *focused, badges);
                 } else {
-                    panel.set_candidates(&items, selected);
+                    panel.set_candidates(&items, selected, badges);
                 }
                 let visible = panel.show_at(position);
                 debug_log(&format!(
@@ -1911,22 +1977,34 @@ impl NukoInputController {
         let score_on = crate::state::candidate_score_visible();
         let snapshot = {
             let state = self.ivars().state.borrow();
+            let badge_on = crate::state::candidate_source_badge_enabled();
             state.candidates.as_ref().map(|c| {
                 let items = Self::panel_items(c, score_on);
-                (items, c.selected_index(), Self::panel_segments(&state))
+                let badges: Option<Vec<String>> = badge_on.then(|| {
+                    c.iter()
+                        .map(|x| Self::source_badge(x.source).to_string())
+                        .collect()
+                });
+                (
+                    items,
+                    c.selected_index(),
+                    Self::panel_segments(&state),
+                    badges,
+                )
             })
         };
-        let Some((items, selected, seg_info)) = snapshot else {
+        let Some((items, selected, seg_info, badges)) = snapshot else {
             return;
         };
         debug_log(&format!("sync_panel_selection: selected={selected}"));
         with_custom_panel(|panel| {
             if let Some(panel) = panel {
                 if panel.is_visible() {
+                    let badges = badges.as_deref();
                     if let Some((segs, focused)) = &seg_info {
-                        panel.set_candidates_segmented(&items, selected, segs, *focused);
+                        panel.set_candidates_segmented(&items, selected, segs, *focused, badges);
                     } else {
-                        panel.set_candidates(&items, selected);
+                        panel.set_candidates(&items, selected, badges);
                     }
                 }
             }
