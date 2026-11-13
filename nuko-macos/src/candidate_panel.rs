@@ -17,7 +17,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{msg_send, AnyThread, ClassType, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSBackgroundColorAttributeName, NSBackingStoreType, NSColor, NSFont,
+    NSBackgroundColorAttributeName, NSBackingStoreType, NSColor, NSFont, NSFontAttributeName,
     NSForegroundColorAttributeName, NSPanel, NSPopUpMenuWindowLevel, NSTextField, NSView,
     NSWindowStyleMask,
 };
@@ -32,6 +32,8 @@ const DEFAULT_WIDTH: f64 = 280.0;
 const LINE_HEIGHT: f64 = 22.0;
 const PADDING: f64 = 8.0;
 const FONT_SIZE: f64 = 14.0;
+/// スコア併記用フォントサイズ (本文より小さく、桁揃えのため等幅数字で描く)。
+const SCORE_FONT_SIZE: f64 = 11.0;
 
 /// 自前の候補ウィンドウ
 ///
@@ -116,8 +118,16 @@ impl CustomCandidatePanel {
     ///
     /// `badges` は items と同じ長さ・同じ並びの出所ラベル (空文字は無印)。`None` で
     /// 従来どおりバッジ無し。出所バッジ表示トグル (既定 OFF) が OFF のとき `None`。
-    pub fn set_candidates(&self, items: &[String], selected: usize, badges: Option<&[String]>) {
-        self.render(None, items, selected, badges);
+    /// `scores` は items と同じ長さ・同じ並びの候補スコア。`None` で併記無し
+    /// (スコア表示トグル既定 OFF)。ON のとき surface の後に小さい等幅数字で添える。
+    pub fn set_candidates(
+        &self,
+        items: &[String],
+        selected: usize,
+        badges: Option<&[String]>,
+        scores: Option<&[i32]>,
+    ) {
+        self.render(None, items, selected, badges, scores);
     }
 
     /// 候補リスト + **文節分割ヘッダ** を表示する (segmented モード)。
@@ -132,8 +142,9 @@ impl CustomCandidatePanel {
         segments: &[String],
         focused: usize,
         badges: Option<&[String]>,
+        scores: Option<&[i32]>,
     ) {
-        self.render(Some((segments, focused)), items, selected, badges);
+        self.render(Some((segments, focused)), items, selected, badges, scores);
     }
 
     /// 内部: ヘッダ有無を問わず描画 + 高さ調整。
@@ -143,6 +154,7 @@ impl CustomCandidatePanel {
         items: &[String],
         selected: usize,
         badges: Option<&[String]>,
+        scores: Option<&[i32]>,
     ) {
         if items.is_empty() {
             self.hide();
@@ -152,7 +164,7 @@ impl CustomCandidatePanel {
         // 実際に描画した行数を受け取って高さに使う。
         let hint = self.hint.borrow();
         let (attr, line_count) =
-            build_attributed_string(header, items, selected, hint.as_deref(), badges);
+            build_attributed_string(header, items, selected, hint.as_deref(), badges, scores);
         self.label.setAttributedStringValue(&attr);
 
         let height = (line_count as f64) * LINE_HEIGHT + PADDING * 2.0;
@@ -205,6 +217,7 @@ fn build_attributed_string(
     selected: usize,
     footer: Option<&str>,
     badges: Option<&[String]>,
+    scores: Option<&[i32]>,
 ) -> (Retained<NSMutableAttributedString>, usize) {
     let mut combined = String::new();
     // 文節ヘッダの focused 範囲 / 選択候補行の範囲 (utf16: start, len)。背景強調に使う。
@@ -212,6 +225,8 @@ fn build_attributed_string(
     let mut selected_line_range: Option<(usize, usize)> = None;
     // 出所バッジの範囲 (utf16: start, len)。淡色の前景色で描くため。
     let mut badge_ranges: Vec<(usize, usize)> = Vec::new();
+    // スコア併記の範囲 (utf16: start, len, is_positive)。小さい等幅数字 + 正=緑/負=オレンジ。
+    let mut score_ranges: Vec<(usize, usize, bool)> = Vec::new();
     let mut line_count: usize = 0;
 
     // 行間の改行を「2 行目以降の先頭」に入れるためのヘルパ。
@@ -254,6 +269,15 @@ fn build_attributed_string(
         let line = format!("{marker}{}. {item}", j + 1);
         let start = combined.encode_utf16().count();
         combined.push_str(&line);
+        // スコア併記 (スコア表示トグル ON のとき)。surface の後に小さい等幅数字で
+        // 添える。正=緑/負=オレンジで「なぜその順か」を色でも示す (#183 スコア透明化)。
+        if let Some(score) = scores.and_then(|s| s.get(page_start + j)).copied() {
+            combined.push_str("  ");
+            let s_start = combined.encode_utf16().count();
+            combined.push_str(&score.to_string());
+            let s_len = combined.encode_utf16().count() - s_start;
+            score_ranges.push((s_start, s_len, score >= 0));
+        }
         // 出所バッジ (学習/個人 のみ。空文字 = 無印 = エンジン既定)。surface の後に
         // 淡色で添える。番号・選択ハイライトの整列は崩さない。
         if let Some(badge) = badges
@@ -338,6 +362,37 @@ fn build_attributed_string(
                 let value: &AnyObject = (*dim_color).as_ref();
                 let dict = NSDictionary::from_slices(&[&*key], &[value]);
                 attr_string.addAttributes_range(&dict, NSRange::new(*start, *len));
+            }
+        }
+    }
+
+    // スコアは小さい等幅数字フォント + 正=緑/負=オレンジ で添える。
+    // 「値が大きい(緑)ほど優先」が一目で分かるように色で意味づけし、等幅数字で
+    // 桁を縦に揃える。labelColor の後に適用して前景色・フォントを上書きする。
+    if !score_ranges.is_empty() {
+        unsafe {
+            // 等幅数字フォント (weight=Regular=0.0)。桁がぶれず表のように読める。
+            let score_font = NSFont::monospacedDigitSystemFontOfSize_weight(SCORE_FONT_SIZE, 0.0);
+            let font_key = NSFontAttributeName.copy();
+            let color_key = NSForegroundColorAttributeName.copy();
+            for (start, len, is_positive) in &score_ranges {
+                if *len == 0 {
+                    continue;
+                }
+                let range = NSRange::new(*start, *len);
+                // フォント (小さい等幅数字)
+                let font_value: &AnyObject = (*score_font).as_ref();
+                let font_dict = NSDictionary::from_slices(&[&*font_key], &[font_value]);
+                attr_string.addAttributes_range(&font_dict, range);
+                // 前景色 (正=緑 / 負=オレンジ)
+                let color = if *is_positive {
+                    NSColor::systemGreenColor()
+                } else {
+                    NSColor::systemOrangeColor()
+                };
+                let color_value: &AnyObject = (*color).as_ref();
+                let color_dict = NSDictionary::from_slices(&[&*color_key], &[color_value]);
+                attr_string.addAttributes_range(&color_dict, range);
             }
         }
     }
