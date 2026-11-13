@@ -527,6 +527,37 @@ pub fn toggle_kyujitai() -> bool {
     now_on
 }
 
+/// 候補スコア表示が有効か (app support dir の `CANDIDATE_SCORE_VISIBLE` マーカーの有無)。既定 OFF。
+///
+/// ON のとき候補パネルの各行に libakaza/学習の score を併記する (= `--explain` のパネル版。
+/// スコア透明化 #183)。表示専用フラグなのでエンジンには反映しない (パネル描画時に読む)。
+#[must_use]
+pub fn candidate_score_visible() -> bool {
+    nuko_app_support_dir()
+        .map(|d| d.join("CANDIDATE_SCORE_VISIBLE").exists())
+        .unwrap_or(false)
+}
+
+/// 候補スコア表示をトグルして **新しい状態** を返す。
+///
+/// マーカーファイル `CANDIDATE_SCORE_VISIBLE` を作成/削除する。dir 取得不可時は false。
+pub fn toggle_candidate_score_visible() -> bool {
+    let Some(dir) = nuko_app_support_dir() else {
+        return false;
+    };
+    let marker = dir.join("CANDIDATE_SCORE_VISIBLE");
+    let now_on = if marker.exists() {
+        let _ = std::fs::remove_file(&marker);
+        false
+    } else {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(&marker, b"");
+        true
+    };
+    tracing::info!(enabled = now_on, "候補スコア表示を切り替え");
+    now_on
+}
+
 /// 単語登録の永続辞書 (`~/…/nuko-ime/user_dict.json`) を起動時にロードする。
 ///
 /// ファイルが無くても path を設定するため、以後の [`register_word`] の保存が効く。
