@@ -140,6 +140,20 @@ pub fn nn_alternate_readings(reading: &str) -> Vec<String> {
     out
 }
 
+/// 文スコア = 各文節の**選択中候補**の score 合計 (i64 で桁あふれ回避)。
+///
+/// 異なる分割 (原文 vs ん+母音代替) を比較するための指標。score は同一 libakaza
+/// モデル由来なので比較可能。候補が空の文節は 0 とみなす。
+#[must_use]
+pub fn sentence_score(segmented: &super::SegmentedConversion) -> i64 {
+    segmented
+        .segments
+        .iter()
+        .filter_map(super::Segment::current)
+        .map(|c| i64::from(c.score))
+        .sum()
+}
+
 /// 文節別変換結果に **文節ごとの** 個人選好 (訂正学習) の bias を適用し並べ替える。
 ///
 /// `convert()` (flat) と同じ bias を segmented 経路にも効かせるための関数。これが無いと
@@ -694,6 +708,15 @@ impl ConversionEngine {
         if segmented.is_empty() {
             return Ok(None);
         }
+        // ★ 文全体の「ん＋母音」境界救済 (2026-11 ユーザー報告「ご確認いただけ…が永遠に
+        //   直らない」)。ローマ字 nn+母音 は `ん+な行` に固定されるため、**文節をまたぐ**
+        //   「ご確認(…にん)｜いただけ」の境界は、文節内だけ見る merge_nn_alternates では
+        //   救えない (ん が前文節末・い が次文節頭)。そこで **文全体の読み** に ん+な行→
+        //   ん+母音 の代替を当て、各代替を丸ごと再分割して **文スコア (選択候補 score 合計)
+        //   が最大の分割** を採る。= flat convert() が既にやっている「両読みを libakaza に
+        //   変換させ LM にスコアで選ばせる」(残念/案内 は代替の方が低スコアで自然に守られる)
+        //   を、segmented にも文単位で拡張したもの。アポストロフィ不要で ATOK 等と同じ挙動。
+        segmented = self.pick_best_nn_alternate_segmentation(backend, reading, segmented)?;
         // ★ 文節位置の学習 (最優先): ユーザーが Shift で切り直した「切り方」を覚えていれば、
         //   読み全体一致でその境界を強制再適用する (2026-10 ユーザー要望「文節位置の学習」)。
         //   ヒント方式より強い = 本人が明示的に直した区切りを尊重する。
@@ -727,6 +750,41 @@ impl ConversionEngine {
             }
         }
         Ok(Some(segmented))
+    }
+
+    /// 文全体の「ん＋母音」代替読みを丸ごと再分割し、**文スコア最大の分割**を採る。
+    ///
+    /// 文節をまたぐ「ん｜母音」境界 (ご確認｜いただけ) を救うための処理。原文の分割を
+    /// 基準に、[`nn_alternate_readings`] が返す各代替 (ん+な行→ん+母音) を
+    /// `convert_segmented` し直し、[`sentence_score`] が **厳密に上回る** ものがあれば
+    /// そちらを採る (同点は原文維持 = 残念/案内 等の回帰を防ぐ)。代替が無ければ原文のまま。
+    #[cfg(feature = "akaza")]
+    fn pick_best_nn_alternate_segmentation(
+        &self,
+        backend: &LibakazaBackend,
+        reading: &str,
+        original: SegmentedConversion,
+    ) -> Result<SegmentedConversion> {
+        let alts = nn_alternate_readings(reading);
+        if alts.len() <= 1 {
+            return Ok(original); // ん+な行 が無い = 代替なし
+        }
+        let mut best = original;
+        let mut best_score = sentence_score(&best);
+        for alt in alts.iter().skip(1) {
+            let Ok(seg) = backend.convert_segmented(alt) else {
+                continue; // 代替変換失敗は無視 (原文維持)
+            };
+            if seg.is_empty() {
+                continue;
+            }
+            let score = sentence_score(&seg);
+            if score > best_score {
+                best_score = score;
+                best = seg;
+            }
+        }
+        Ok(best)
     }
 
     /// 各文節の読みに「ん+な行」があれば、「ん+母音」の代替読みも libakaza で変換し、
@@ -1493,6 +1551,37 @@ mod tests {
         assert!(
             sentence.contains(&"めーるたんいで".to_string()),
             "★ 文中の たんに→たんい も代替生成 (P2: これを segmented 変換にも適用する)"
+        );
+    }
+
+    /// ★ 文スコア = 各文節の選択候補 score 合計。異なる分割の比較に使う
+    /// (ご確認いただけ vs ご確認にただけ の境界選択)。
+    #[test]
+    fn sentence_score_sums_selected_candidate_scores() {
+        use super::super::{Segment, SegmentedConversion};
+        let seg = |reading: &str, surface: &str, score: i32| {
+            Segment::new(
+                reading,
+                vec![Candidate::new(surface, reading).with_score(score)],
+            )
+        };
+        // 文スコア = 100 + 200 + (-50) = 250
+        let s = SegmentedConversion::new(vec![
+            seg("ごかくにん", "ご確認", 100),
+            seg("いただけますと", "いただけますと", 200),
+            seg("さいわいです", "幸いです", -50),
+        ]);
+        assert_eq!(sentence_score(&s), 250);
+        // 空は 0。
+        assert_eq!(sentence_score(&SegmentedConversion::new(vec![])), 0);
+        // 「正しい境界」の方が高スコア = 採用される、を模した比較。
+        let wrong =
+            SegmentedConversion::new(vec![seg("ごかくにんにただけ", "ご確認にただけ", 90084)]);
+        let right =
+            SegmentedConversion::new(vec![seg("ごかくにんいただけ", "ご確認いただけ", 93581)]);
+        assert!(
+            sentence_score(&right) > sentence_score(&wrong),
+            "正しい境界 (いただけ) の方が文スコアが高い"
         );
     }
 
