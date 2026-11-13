@@ -179,6 +179,16 @@ PR #40 で `convert_k_best(reading, None, k=9)` に切替。各 `KBestPath` が�
 
 > 注: 落とし穴 #7「数字 0-9 は変換対象外」は **PR #92/#94 で方針変更済み**。現在は数字も記号と同じ統一処理で、入力中は composition に足し (Space で全角/漢数字に変換)、先頭は composition に入れて未確定にする (即挿入をやめた)。「数字キーで候補選択 (digit-select)」は廃止。
 
+### 11. 候補パネルの併記テキストは「表層文字列に混ぜず、別経路＋範囲記録」で描く
+
+候補行にスコアや出所バッジを添えるとき、**表層文字列に混ぜてはいけない**。混ぜると後からその部分だけに別フォント/色を付けられない (範囲が分からない)。
+
+- ❌ `panel_items` が `format!("{} {}", surface, score)` で item 文字列に混ぜる (スコア可視化 #196 初版)。→ score 部分の属性付与が不可能だった。
+- ✅ **構造化して別経路で渡す** (スコア美化 #197 / 出所バッジ #188): controller は `panel_items`(surface のみ) と `panel_scores(c, on) -> Option<Vec<i32>>` を別々に作る。`candidate_panel::build_attributed_string` が surface の後に併記しつつ **utf16 範囲を記録** (`score_ranges` / `badge_ranges`) → ループ後に `addAttributes_range` で**その範囲だけ**にフォント/色を付与する。
+- 透明化 UI 3種はすべて **既定 OFF の opt-in** (入力メニューのトグル＋`~/Library/Application Support/nuko-ime/` のマーカーファイル方式＝旧字体トグル #kyujitai と同型)。**表示専用で変換結果・順位・エンジンには一切影響しない**。
+- 現行の panel API: `set_candidates(items, selected, badges, scores)` / `set_candidates_segmented(items, selected, segs, focused, badges, scores)`。行の並び＝ `▶ 1. 私  200010(正=systemGreen/負=systemOrange, 小さい等幅数字)  学習(淡色)` = marker→番号→surface→score→badge。
+- 詳細・配色方針は memory [[nuko-ime-candidate-source-badge]]。
+
 ## 文節伸縮の仕様 (Shift+←→) — **右端だけを動かす**
 
 **確定した重要仕様 (ユーザー要望 2026-06-25)。変更するときは必ずこの方針を守ること。**
