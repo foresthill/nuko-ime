@@ -395,6 +395,12 @@ define_class!(
             self._toggle_kyujitai_impl();
         }
 
+        /// メニュー項目「候補にスコアを表示」のアクション (ON/OFF トグル)。
+        #[unsafe(method(nukoToggleScoreVisible:))]
+        fn nuko_toggle_score_visible(&self, _sender: Option<&AnyObject>) {
+            self._toggle_score_visible_impl();
+        }
+
         // 注意: 本 IME は **方式3 (handleEvent:) 単独**。方式1 (inputText:/
         // didCommandBySelector:) は実装しない。3 方式は排他で、混在は落とし穴 #9
         // (打てない/クラッシュ, PR #51/#52)。方式3 一本化は keyCode/修飾キーを得るため
@@ -494,6 +500,19 @@ impl NukoInputController {
             } else {
                 NSControlStateValueOff
             });
+
+            // 候補にスコアを表示 (= --explain のパネル版, #183 スコア透明化)
+            let score = NSString::from_str("候補にスコアを表示");
+            let score_item = menu.addItemWithTitle_action_keyEquivalent(
+                &score,
+                Some(sel!(nukoToggleScoreVisible:)),
+                &empty,
+            );
+            score_item.setState(if crate::state::candidate_score_visible() {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            });
         }
 
         // ── ④ 情報セクション ──
@@ -586,6 +605,27 @@ impl NukoInputController {
             .to_string()
         } else {
             "⬜️ 旧字体モード: OFF\n\n新字体のみを候補にします。".to_string()
+        };
+        self._present_learning(&text);
+    }
+
+    /// メニュー「候補にスコアを表示」: ON/OFF をトグルして結果をパネル表示する。
+    ///
+    /// ON のとき候補パネルの各行に libakaza/学習の score を併記する
+    /// (= `--explain` のパネル版、#183 スコア透明化)。表示専用で変換結果は変えない。
+    fn _toggle_score_visible_impl(&self) {
+        let on = crate::state::toggle_candidate_score_visible();
+        let text = if on {
+            concat!(
+                "✅ 候補にスコアを表示: ON\n\n",
+                "候補パネルの各行に score を併記します (例: 私  93581)。\n",
+                "値が大きいほど優先 = なぜその順かが見えます (--explain のパネル版)。\n\n",
+                "※ 表示専用。変換結果・順位は変わりません。\n",
+                "※ 次に変換したときから反映されます。",
+            )
+            .to_string()
+        } else {
+            "⬜️ 候補にスコアを表示: OFF\n\n候補は表層のみ表示します。".to_string()
         };
         self._present_learning(&text);
     }
@@ -1775,12 +1815,31 @@ impl NukoInputController {
     /// 現在の `state.candidates` を CustomPanel に流し、`client` の
     /// `firstRectForCharacterRange:actualRange:` で marked text の screen 座標を
     /// 取得してパネルを直下に配置する。
+    /// 候補パネルに出す表示文字列を作る。
+    ///
+    /// スコア表示トグル (`CANDIDATE_SCORE_VISIBLE`) が ON のときは各行に
+    /// `surface  score` を併記する (= `--explain` のパネル版、#183 スコア透明化)。
+    /// OFF (既定) では surface のみ = 従来表示。
+    fn panel_items(candidates: &CandidateList, score_on: bool) -> Vec<String> {
+        candidates
+            .iter()
+            .map(|x| {
+                if score_on {
+                    format!("{}  {}", x.surface, x.score)
+                } else {
+                    x.surface.clone()
+                }
+            })
+            .collect()
+    }
+
     fn show_candidate_panel(&self, client: &AnyObject) {
+        let score_on = crate::state::candidate_score_visible();
         let (snapshot, reading) = {
             let state = self.ivars().state.borrow();
             let reading = state.composition.clone();
             let snap = state.candidates.as_ref().map(|c| {
-                let items: Vec<String> = c.iter().map(|x| x.surface.clone()).collect();
+                let items = Self::panel_items(c, score_on);
                 (items, c.selected_index(), Self::panel_segments(&state))
             });
             (snap, reading)
@@ -1849,10 +1908,11 @@ impl NukoInputController {
     /// `set_candidates` を呼び直して再描画する (selected も同時に反映)。
     /// state borrow と panel borrow を別スコープに分けて RefCell の二重借用を回避。
     fn sync_panel_selection(&self, _line_number: usize) {
+        let score_on = crate::state::candidate_score_visible();
         let snapshot = {
             let state = self.ivars().state.borrow();
             state.candidates.as_ref().map(|c| {
-                let items: Vec<String> = c.iter().map(|x| x.surface.clone()).collect();
+                let items = Self::panel_items(c, score_on);
                 (items, c.selected_index(), Self::panel_segments(&state))
             })
         };
