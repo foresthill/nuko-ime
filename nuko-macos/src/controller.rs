@@ -1869,22 +1869,21 @@ impl NukoInputController {
     /// 現在の `state.candidates` を CustomPanel に流し、`client` の
     /// `firstRectForCharacterRange:actualRange:` で marked text の screen 座標を
     /// 取得してパネルを直下に配置する。
-    /// 候補パネルに出す表示文字列を作る。
+    /// 候補パネルに出す表示文字列 (surface) を作る。
     ///
-    /// スコア表示トグル (`CANDIDATE_SCORE_VISIBLE`) が ON のときは各行に
-    /// `surface  score` を併記する (= `--explain` のパネル版、#183 スコア透明化)。
-    /// OFF (既定) では surface のみ = 従来表示。
-    fn panel_items(candidates: &CandidateList, score_on: bool) -> Vec<String> {
-        candidates
-            .iter()
-            .map(|x| {
-                if score_on {
-                    format!("{}  {}", x.surface, x.score)
-                } else {
-                    x.surface.clone()
-                }
-            })
-            .collect()
+    /// スコアは文字列に混ぜず別経路 ([`Self::panel_scores`]) で渡す。こうすることで
+    /// パネル側がスコア部分だけに小フォント・色を付けられる (#183 スコア透明化の美化)。
+    fn panel_items(candidates: &CandidateList) -> Vec<String> {
+        candidates.iter().map(|x| x.surface.clone()).collect()
+    }
+
+    /// 候補パネルに併記するスコア列を作る (スコア表示トグル ON のときだけ `Some`)。
+    ///
+    /// items と同じ長さ・同じ並び。パネルは surface の後に小さい等幅数字で
+    /// 正=緑/負=オレンジ に色分けして添える (= `--explain` のパネル版、#183)。
+    /// OFF (既定) は `None` = 併記無し。表示専用でエンジン・順位には一切影響しない。
+    fn panel_scores(candidates: &CandidateList, score_on: bool) -> Option<Vec<i32>> {
+        score_on.then(|| candidates.iter().map(|x| x.score).collect())
     }
 
     fn show_candidate_panel(&self, client: &AnyObject) {
@@ -1894,7 +1893,8 @@ impl NukoInputController {
             let reading = state.composition.clone();
             let badge_on = crate::state::candidate_source_badge_enabled();
             let snap = state.candidates.as_ref().map(|c| {
-                let items = Self::panel_items(c, score_on);
+                let items = Self::panel_items(c);
+                let scores = Self::panel_scores(c, score_on);
                 let badges: Option<Vec<String>> = badge_on.then(|| {
                     c.iter()
                         .map(|x| Self::source_badge(x.source).to_string())
@@ -1905,11 +1905,12 @@ impl NukoInputController {
                     c.selected_index(),
                     Self::panel_segments(&state),
                     badges,
+                    scores,
                 )
             });
             (snap, reading)
         };
-        let Some((items, selected, seg_info, badges)) = snapshot else {
+        let Some((items, selected, seg_info, badges, scores)) = snapshot else {
             return;
         };
         // 単語登録ヒント: 今の読みが「直前に別読みで出した語」の登録対象なら、
@@ -1927,10 +1928,12 @@ impl NukoInputController {
             if let Some(panel) = panel {
                 panel.set_registration_hint(hint.clone());
                 let badges = badges.as_deref();
+                let scores = scores.as_deref();
                 if let Some((segs, focused)) = &seg_info {
-                    panel.set_candidates_segmented(&items, selected, segs, *focused, badges);
+                    panel
+                        .set_candidates_segmented(&items, selected, segs, *focused, badges, scores);
                 } else {
-                    panel.set_candidates(&items, selected, badges);
+                    panel.set_candidates(&items, selected, badges, scores);
                 }
                 let visible = panel.show_at(position);
                 debug_log(&format!(
@@ -1979,7 +1982,8 @@ impl NukoInputController {
             let state = self.ivars().state.borrow();
             let badge_on = crate::state::candidate_source_badge_enabled();
             state.candidates.as_ref().map(|c| {
-                let items = Self::panel_items(c, score_on);
+                let items = Self::panel_items(c);
+                let scores = Self::panel_scores(c, score_on);
                 let badges: Option<Vec<String>> = badge_on.then(|| {
                     c.iter()
                         .map(|x| Self::source_badge(x.source).to_string())
@@ -1990,10 +1994,11 @@ impl NukoInputController {
                     c.selected_index(),
                     Self::panel_segments(&state),
                     badges,
+                    scores,
                 )
             })
         };
-        let Some((items, selected, seg_info, badges)) = snapshot else {
+        let Some((items, selected, seg_info, badges, scores)) = snapshot else {
             return;
         };
         debug_log(&format!("sync_panel_selection: selected={selected}"));
@@ -2001,10 +2006,13 @@ impl NukoInputController {
             if let Some(panel) = panel {
                 if panel.is_visible() {
                     let badges = badges.as_deref();
+                    let scores = scores.as_deref();
                     if let Some((segs, focused)) = &seg_info {
-                        panel.set_candidates_segmented(&items, selected, segs, *focused, badges);
+                        panel.set_candidates_segmented(
+                            &items, selected, segs, *focused, badges, scores,
+                        );
                     } else {
-                        panel.set_candidates(&items, selected, badges);
+                        panel.set_candidates(&items, selected, badges, scores);
                     }
                 }
             }
