@@ -1680,6 +1680,16 @@ impl NukoInputController {
                         }
                     }
                 });
+                // フレーズ予測 (#187 Step③): 複数文節の確定を定型句として記録 (常時ON・
+                // オプトイン不要)。次回 Space 変換時に前方一致で候補へ出す土台 (Step④)。
+                // datetime は上の is_datetime_commit ガードで既に除外済み。単一文節・短い語は
+                // note_phrase_commit 内のゲートで弾く (= Layer 0 に任せる)。
+                crate::state::note_phrase_commit(
+                    reading.as_str(),
+                    decision.commit_text.as_str(),
+                    seg_observations.len(),
+                );
+
                 // ①② を **即反映**: 確定のたびに観察ログから訂正選好を再生成して
                 // 稼働エンジンへ適用する。これで「選んだら次から上位」が手動 relearn
                 // 無しで効く (ユーザー報告「5回選んでも治らない」の修正)。

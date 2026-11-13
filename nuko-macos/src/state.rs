@@ -1,7 +1,7 @@
 use nuko_core::conversion::{CandidateList, ConversionContext, SegmentedConversion};
 use nuko_core::learning::{
-    extract_corrections, prune_for_cap, CorrectionStore, ObservationLog, OBS_CAP_HIGH_WATERMARK,
-    OBS_CAP_KEEP_RECENT_COMMITS,
+    extract_corrections, prune_for_cap, should_record_phrase, CorrectionStore, ObservationLog,
+    PhraseStore, OBS_CAP_HIGH_WATERMARK, OBS_CAP_KEEP_RECENT_COMMITS,
 };
 use nuko_core::prelude::*;
 use objc2::MainThreadMarker;
@@ -288,6 +288,54 @@ where
     F: FnOnce(&ObservationLog) -> R,
 {
     OBSERVATION_LOG.with(f)
+}
+
+// --- フレーズ予測ストア (#187 Step③) ---
+//
+// Layer 0/1/2 と違い **常時ON** (オプトイン不要)。確定した定型句 (複数文節・一定長以上)
+// を「読み全体 → 表層全体」で覚え、次回 Space 変換時に前方一致で候補へ出す (Step④)。
+// 個人データ・端末内のみ・非共有 (docs/LEARNING_ARCHITECTURE.md §1.5 プライバシー境界)。
+// 冪等な count 更新のみ = レビュー不要の完全自動学習 (churn を生まない)。
+thread_local! {
+    static PHRASE_STORE: RefCell<PhraseStore> = RefCell::new(build_phrase_store());
+}
+
+fn build_phrase_store() -> PhraseStore {
+    let Some(dir) = nuko_app_support_dir() else {
+        return PhraseStore::new();
+    };
+    match PhraseStore::load(dir.join("phrases.json")) {
+        Ok(store) => {
+            tracing::info!(count = store.len(), "フレーズ予測ストア (#187) を load");
+            store
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "phrases.json load 失敗、空で継続");
+            PhraseStore::new()
+        }
+    }
+}
+
+/// 確定した文をフレーズとして記録する (#187 Step③)。
+///
+/// [`should_record_phrase`] のゲート (複数文節・一定長以上・読み≠表層) を満たすときだけ
+/// 記録し、`phrases.json` に即保存する。**常時ON** (オプトイン不要)。
+/// datetime 等の一過性表層は呼び出し側 (controller) で既に除外済み。
+pub fn note_phrase_commit(reading: &str, surface: &str, segment_count: usize) {
+    if !should_record_phrase(reading, surface, segment_count) {
+        return;
+    }
+    PHRASE_STORE.with(|cell| {
+        let mut store = cell.borrow_mut();
+        if !store.record(reading, surface) {
+            return;
+        }
+        if let Some(dir) = nuko_app_support_dir() {
+            if let Err(e) = store.save(dir.join("phrases.json")) {
+                tracing::warn!(error = %e, "phrases.json save 失敗 (in-memory のみ保持)");
+            }
+        }
+    });
 }
 
 // 直近の確定を **最大 2 件** in-memory で保持する (新しいものが末尾)。
