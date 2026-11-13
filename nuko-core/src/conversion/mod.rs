@@ -14,6 +14,8 @@ mod segment;
 pub use candidate::{Candidate, CandidateList, CandidateSource};
 pub use context::ConversionContext;
 pub use datetime::datetime_candidates;
-pub use engine::{nn_alternate_readings, sentence_score, ConversionEngine};
+pub use engine::{
+    nn_alternate_readings, sentence_score, vowel_boundary_alternate_readings, ConversionEngine,
+};
 pub use kyujitai::{kyujitai_variant, to_kyujitai};
 pub use segment::{Segment, SegmentedConversion};

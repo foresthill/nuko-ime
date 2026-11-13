@@ -140,6 +140,61 @@ pub fn nn_alternate_readings(reading: &str) -> Vec<String> {
     out
 }
 
+/// 「ん＋母音」境界を回復する代替読みを生成する（**文全体比較用・広め**、原文は含めない）。
+///
+/// 2 種類の崩れを両方カバーする:
+/// 1. **ん＋な行 → ん＋母音**（`nn`打ち: `にんに`→`にんい`）。`gokakuninn…` のように ん を
+///    二重 n で明示したが、続く母音が な行に固定された崩れ。
+/// 2. **な行 → ん＋母音**（**単一 n 打ち**: `にに`→`にんい`）。`gokakunin…` のように ん を
+///    単一 n で打ち、直後の母音と結合して な行に潰れた崩れ（＝ん が消える）。これは #192
+///    の `nn_alternate_readings`（パターン1 のみ）では救えなかった本命ケース。
+///
+/// いずれも libakaza + [`sentence_score`] の **strict->** で選別する前提なので、ここでは
+/// 候補を広めに出してよい（正しさは文スコアが守る＝残念/案内/私の名前 等は原文が高スコアで不変）。
+/// 位置ごとに 1 箇所だけ変換し、`MAX` で総数を抑えて perf と組合せ爆発を防ぐ。
+#[must_use]
+pub fn vowel_boundary_alternate_readings(reading: &str) -> Vec<String> {
+    const NA_ROW: [(char, char); 5] = [
+        ('な', 'あ'),
+        ('に', 'い'),
+        ('ぬ', 'う'),
+        ('ね', 'え'),
+        ('の', 'お'),
+    ];
+    const MAX: usize = 8; // 1 確定あたりの代替変換回数の上限（perf 保護）
+
+    let chars: Vec<char> = reading.chars().collect();
+    let mut out: Vec<String> = Vec::new();
+    for i in 0..chars.len() {
+        if out.len() >= MAX {
+            break;
+        }
+        let Some(&(_, vowel)) = NA_ROW.iter().find(|(na, _)| *na == chars[i]) else {
+            continue;
+        };
+        if i >= 1 && chars[i - 1] == 'ん' {
+            // パターン1: ん＋な行 → ん＋母音（な行を母音に置換）
+            let mut alt = chars.clone();
+            alt[i] = vowel;
+            let s: String = alt.into_iter().collect();
+            if s != reading && !out.contains(&s) {
+                out.push(s);
+            }
+        } else {
+            // パターン2: な行 → ん＋母音（単一 n 崩れ回復。ん を挿入し母音に）
+            let mut alt: Vec<char> = chars[..i].to_vec();
+            alt.push('ん');
+            alt.push(vowel);
+            alt.extend_from_slice(&chars[i + 1..]);
+            let s: String = alt.into_iter().collect();
+            if s != reading && !out.contains(&s) {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
 /// 文スコア = 各文節の**選択中候補**の score 合計 (i64 で桁あふれ回避)。
 ///
 /// 異なる分割 (原文 vs ん+母音代替) を比較するための指標。score は同一 libakaza
@@ -755,9 +810,10 @@ impl ConversionEngine {
     /// 文全体の「ん＋母音」代替読みを丸ごと再分割し、**文スコア最大の分割**を採る。
     ///
     /// 文節をまたぐ「ん｜母音」境界 (ご確認｜いただけ) を救うための処理。原文の分割を
-    /// 基準に、[`nn_alternate_readings`] が返す各代替 (ん+な行→ん+母音) を
-    /// `convert_segmented` し直し、[`sentence_score`] が **厳密に上回る** ものがあれば
-    /// そちらを採る (同点は原文維持 = 残念/案内 等の回帰を防ぐ)。代替が無ければ原文のまま。
+    /// 基準に、[`vowel_boundary_alternate_readings`] が返す各代替 — **ん+な行→ん+母音**
+    /// (nn打ち にんに) と **な行→ん+母音** (単一n打ち にに) の両方 — を `convert_segmented`
+    /// し直し、[`sentence_score`] が **厳密に上回る** ものがあればそちらを採る
+    /// (同点は原文維持 = 残念/案内/私の名前 等の回帰を防ぐ)。代替が無ければ原文のまま。
     #[cfg(feature = "akaza")]
     fn pick_best_nn_alternate_segmentation(
         &self,
@@ -765,13 +821,15 @@ impl ConversionEngine {
         reading: &str,
         original: SegmentedConversion,
     ) -> Result<SegmentedConversion> {
-        let alts = nn_alternate_readings(reading);
-        if alts.len() <= 1 {
-            return Ok(original); // ん+な行 が無い = 代替なし
+        // 広め生成: ん+な行→ん+母音 (nn打ち) と な行→ん+母音 (単一n打ち) の両方。
+        // 原文は含まないので skip 不要。
+        let alts = vowel_boundary_alternate_readings(reading);
+        if alts.is_empty() {
+            return Ok(original); // な行 が無い = 代替なし
         }
         let mut best = original;
         let mut best_score = sentence_score(&best);
-        for alt in alts.iter().skip(1) {
+        for alt in &alts {
             let Ok(seg) = backend.convert_segmented(alt) else {
                 continue; // 代替変換失敗は無視 (原文維持)
             };
@@ -1552,6 +1610,30 @@ mod tests {
             sentence.contains(&"めーるたんいで".to_string()),
             "★ 文中の たんに→たんい も代替生成 (P2: これを segmented 変換にも適用する)"
         );
+    }
+
+    /// ★ 単一n崩れ (にに) も ん+母音代替を生成する (whole-sentence 用の広い生成)。
+    /// これが本命: #192 の nn_alternate_readings (にんに のみ) では救えなかった にに を救う。
+    #[test]
+    fn vowel_boundary_generates_single_n_recovery() {
+        // 単一n: ごかくににただけ (にに) → ごかくにんいただけ (に→んい) を生成する。
+        let alts = vowel_boundary_alternate_readings("ごかくににただけますとさいわいです");
+        assert!(
+            alts.contains(&"ごかくにんいただけますとさいわいです".to_string()),
+            "★ 単一n崩れ にに→にんい を生成 (本命): got {alts:?}"
+        );
+        // nn打ち: ごかくにんにただけ (にんに) → ごかくにんいただけ も生成 (パターン1)。
+        let alts2 = vowel_boundary_alternate_readings("ごかくにんにただけますとさいわいです");
+        assert!(
+            alts2.contains(&"ごかくにんいただけますとさいわいです".to_string()),
+            "★ nn打ち にんに→にんい も生成: got {alts2:?}"
+        );
+        // な行が無ければ代替なし (perf: 余計な変換を走らせない)。
+        assert!(vowel_boundary_alternate_readings("あいうえお").is_empty());
+        // 原文は含めない (呼び出し側が原文を基準に持つ)。
+        assert!(!vowel_boundary_alternate_readings("にほん").contains(&"にほん".to_string()));
+        // 上限 (MAX=8) を超えない。
+        assert!(vowel_boundary_alternate_readings("なにぬねのなにぬねのなにぬねの").len() <= 8);
     }
 
     /// ★ 文スコア = 各文節の選択候補 score 合計。異なる分割の比較に使う
