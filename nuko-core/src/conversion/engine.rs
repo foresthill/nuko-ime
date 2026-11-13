@@ -767,10 +767,11 @@ impl ConversionEngine {
         //   直らない」)。ローマ字 nn+母音 は `ん+な行` に固定されるため、**文節をまたぐ**
         //   「ご確認(…にん)｜いただけ」の境界は、文節内だけ見る merge_nn_alternates では
         //   救えない (ん が前文節末・い が次文節頭)。そこで **文全体の読み** に ん+な行→
-        //   ん+母音 の代替を当て、各代替を丸ごと再分割して **文スコア (選択候補 score 合計)
-        //   が最大の分割** を採る。= flat convert() が既にやっている「両読みを libakaza に
-        //   変換させ LM にスコアで選ばせる」(残念/案内 は代替の方が低スコアで自然に守られる)
-        //   を、segmented にも文単位で拡張したもの。アポストロフィ不要で ATOK 等と同じ挙動。
+        //   ん+母音 (および な行→ん+母音) の代替を当て、**flat 変換の文全体最良スコアが原文を
+        //   上回る読み** だけを採って再分割する。= flat convert() が既にやっている「両読みを
+        //   libakaza に変換させ LM にスコアで選ばせる」(残念/案内/クリーンな方で は原文の方が
+        //   高スコアで自然に守られる) を、segmented の読み選択に流用したもの。
+        //   アポストロフィ不要で ATOK 等と同じ挙動。
         segmented = self.pick_best_nn_alternate_segmentation(backend, reading, segmented)?;
         // ★ 文節位置の学習 (最優先): ユーザーが Shift で切り直した「切り方」を覚えていれば、
         //   読み全体一致でその境界を強制再適用する (2026-10 ユーザー要望「文節位置の学習」)。
@@ -807,13 +808,23 @@ impl ConversionEngine {
         Ok(Some(segmented))
     }
 
-    /// 文全体の「ん＋母音」代替読みを丸ごと再分割し、**文スコア最大の分割**を採る。
+    /// 文全体の「ん＋母音」代替読みのうち **flat 変換の文全体最良スコアが原文を上回る**
+    /// 読みがあれば、その読みで再分割した結果を採る。
     ///
-    /// 文節をまたぐ「ん｜母音」境界 (ご確認｜いただけ) を救うための処理。原文の分割を
+    /// 文節をまたぐ「ん｜母音」境界 (ご確認｜いただけ) を救うための処理。原文の読みを
     /// 基準に、[`vowel_boundary_alternate_readings`] が返す各代替 — **ん+な行→ん+母音**
-    /// (nn打ち にんに) と **な行→ん+母音** (単一n打ち にに) の両方 — を `convert_segmented`
-    /// し直し、[`sentence_score`] が **厳密に上回る** ものがあればそちらを採る
-    /// (同点は原文維持 = 残念/案内/私の名前 等の回帰を防ぐ)。代替が無ければ原文のまま。
+    /// (nn打ち にんに) と **な行→ん+母音** (単一n打ち にに) の両方 — の採否を決める。
+    ///
+    /// 判定指標は **flat 変換 ([`LibakazaBackend::convert`]) の文全体 最良候補スコア**
+    /// (= libakaza Viterbi の最良パススコア) を読みごとに比べる。各代替で原文 flat 最良を
+    /// **厳密に上回る** もののうち最高スコアの読みを選び、それで `convert_segmented` し直す。
+    /// どれも超えなければ原文の分割を維持する (残念/案内/私の名前 等の回帰を防ぐ)。
+    ///
+    /// 旧実装は文節スコア合計 ([`sentence_score`]) で判定していたが、これは文全体の正しさの
+    /// 近似にならず「くりーんなほうで→クリーン阿呆で」のように **正当な ん+な を書き換える
+    /// 誤採用** を招いた (2026-11 実機)。flat は両読みを同じ土俵で比較でき、
+    /// 「クリーンな方で 95414 > クリーン阿呆で 94746」「ご確認いただけ 93581 > にただけ 90084」
+    /// と正しく分離できる。
     #[cfg(feature = "akaza")]
     fn pick_best_nn_alternate_segmentation(
         &self,
@@ -827,22 +838,37 @@ impl ConversionEngine {
         if alts.is_empty() {
             return Ok(original); // な行 が無い = 代替なし
         }
-        let mut best = original;
-        let mut best_score = sentence_score(&best);
+        // flat 変換の「文全体 最良候補スコア」。候補は降順だが念のため max を取る。
+        let flat_best = |r: &str| -> Option<i64> {
+            backend
+                .convert(r)
+                .ok()?
+                .iter()
+                .map(|c| i64::from(c.score))
+                .max()
+        };
+        let Some(orig_best) = flat_best(reading) else {
+            return Ok(original); // 原文 flat が取れない = 判定不能、原文維持
+        };
+        // 閾値を原文スコアから開始し、厳密に上回る代替だけを採る (同点は原文維持)。
+        let mut best_alt: Option<&String> = None;
+        let mut best_alt_score = orig_best;
         for alt in &alts {
-            let Ok(seg) = backend.convert_segmented(alt) else {
-                continue; // 代替変換失敗は無視 (原文維持)
-            };
-            if seg.is_empty() {
+            let Some(score) = flat_best(alt) else {
                 continue;
-            }
-            let score = sentence_score(&seg);
-            if score > best_score {
-                best_score = score;
-                best = seg;
+            };
+            if score > best_alt_score {
+                best_alt_score = score;
+                best_alt = Some(alt);
             }
         }
-        Ok(best)
+        let Some(alt) = best_alt else {
+            return Ok(original); // どの代替も原文 flat を超えない = 原文維持
+        };
+        match backend.convert_segmented(alt) {
+            Ok(seg) if !seg.is_empty() => Ok(seg),
+            _ => Ok(original), // 代替の再分割失敗は原文維持
+        }
     }
 
     /// 各文節の読みに「ん+な行」があれば、「ん+母音」の代替読みも libakaza で変換し、
@@ -2128,6 +2154,48 @@ mod tests {
         assert!(
             !onna.iter().any(|c| c.surface == "おんあ"),
             "おんあ はノイズなので候補に出してはいけない"
+        );
+    }
+
+    /// ★ 回帰 (2026-11 実機「くりーんなほうで→クリーン阿呆で」): 文全体の ん+母音 代替は
+    /// **flat 最良スコアで採否を決める**。正当な ん+な (くりーんな=クリーンな) を書き換えて
+    /// 阿呆(あほう) を採ってはいけない。同時に単一n の ご確認いただけ は救えること。
+    ///
+    /// 実行: `cargo test -p nuko-core --release --features akaza vowel_boundary_segmented -- --ignored --nocapture`
+    #[cfg(feature = "akaza")]
+    #[test]
+    #[ignore = "実機モデルが要る"]
+    fn vowel_boundary_segmented_keeps_legit_nn_na() {
+        let home = std::env::var("HOME").expect("HOME");
+        let model = format!("{home}/Library/Application Support/nuko-ime/akaza-model");
+        let engine = ConversionEngine::with_libakaza(&model).unwrap();
+        if !engine.has_libakaza() {
+            eprintln!("モデル未配置のためスキップ: {model}");
+            return;
+        }
+        let joined = |r: &str| -> String {
+            engine
+                .convert_segmented(r)
+                .unwrap()
+                .map(|s| {
+                    s.segments
+                        .iter()
+                        .filter_map(|seg| seg.surface())
+                        .collect::<String>()
+                })
+                .unwrap_or_default()
+        };
+        // 正当な ん+な は書き換えない: クリーン阿呆で になってはいけない。
+        let kurin = joined("くりーんなほうで");
+        assert!(
+            !kurin.contains("阿呆"),
+            "★ 正当な ん+な を阿呆に書き換えてはいけない (実機: {kurin})"
+        );
+        // 単一n の ご確認いただけ は救える (に→んい で ご確認いただけ)。
+        let gokakunin = joined("ごかくににただけますとさいわいです");
+        assert!(
+            gokakunin.contains("ご確認いただけ"),
+            "★ 単一n の ご確認いただけ は救えるべき (実機: {gokakunin})"
         );
     }
 
