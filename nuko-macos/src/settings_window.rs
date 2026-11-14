@@ -16,9 +16,17 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSComboBox, NSMenu,
-    NSMenuItem, NSPopUpButton, NSTextField, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSMenuItem, NSPopUpButton, NSScrollView, NSTableColumn, NSTableView, NSTableViewDataSource,
+    NSTextField, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+
+thread_local! {
+    /// マイ辞書ビューア (NSTableView) の表示データ (読み, 表層)。
+    /// データソース (`SettingsTarget`) が参照し、`refresh_dict_list` が更新 + reloadData する。
+    static DICT_ROWS: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
 // 設定窓ボタンの **安定した** target。
 //
@@ -33,6 +41,43 @@ define_class!(
     struct SettingsTarget;
 
     unsafe impl NSObjectProtocol for SettingsTarget {}
+
+    // マイ辞書ビューア (NSTableView) のデータ供給 (#103)。cell-based。
+    // 行データは DICT_ROWS (thread_local) から読む。選択の扱いはボタン側 (selectedRow) に
+    // 任せるので delegate は実装しない (objc2 面を最小化)。
+    unsafe impl NSTableViewDataSource for SettingsTarget {
+        #[unsafe(method(numberOfRowsInTableView:))]
+        fn number_of_rows(&self, _tv: &NSTableView) -> isize {
+            DICT_ROWS.with(|r| r.borrow().len() as isize)
+        }
+
+        #[unsafe(method(tableView:objectValueForTableColumn:row:))]
+        fn object_value(
+            &self,
+            _tv: &NSTableView,
+            col: Option<&NSTableColumn>,
+            row: isize,
+        ) -> *mut NSString {
+            // objc2 0.6 のメソッド戻り値は Encode 必須なので *mut で返し、
+            // autorelease_return で参照カウントを AppKit 側に委ねる (セル描画のたびに呼ばれる)。
+            let text: Option<String> = DICT_ROWS.with(|r| {
+                let rows = r.borrow();
+                let (reading, surface) = rows.get(usize::try_from(row).ok()?)?;
+                let want_reading = col
+                    .map(|c| c.identifier().to_string() == "reading")
+                    .unwrap_or(true);
+                Some(if want_reading {
+                    reading.clone()
+                } else {
+                    surface.clone()
+                })
+            });
+            match text {
+                Some(t) => Retained::autorelease_return(NSString::from_str(&t)),
+                None => std::ptr::null_mut(),
+            }
+        }
+    }
 
     // 窓が閉じたら (✕ / 閉じる どちらでも) IME を background agent (.Accessory) に戻す
     // = dock アイコンを消す。
@@ -61,6 +106,17 @@ define_class!(
         #[unsafe(method(nukoForgetLearning:))]
         fn forget_learning(&self, _s: Option<&AnyObject>) {
             crate::state::forget_learning_from_window();
+        }
+        /// マイ辞書ビューア「削除」: 選択行の (読み,表層) を削除して即反映 (#103)。
+        #[unsafe(method(nukoDeleteDictEntry:))]
+        fn delete_dict(&self, _s: Option<&AnyObject>) {
+            crate::state::delete_selected_dict_entry_from_window();
+        }
+        /// マイ辞書ビューア「編集」: 選択行を登録欄に読み込み、編集モードにする (#103)。
+        /// 直して「辞書に登録」を押すと元エントリを置き換える。
+        #[unsafe(method(nukoEditDictEntry:))]
+        fn edit_dict(&self, _s: Option<&AnyObject>) {
+            crate::state::edit_selected_dict_entry_from_window();
         }
         /// プロバイダ選択が変わったら「現在のキー」表示をそのプロバイダのものに更新。
         #[unsafe(method(nukoProviderChanged:))]
@@ -101,7 +157,9 @@ impl SettingsTarget {
 // OpenRouter の API キー (sk-or-v1-… 約73文字) が 1 行で全部見える幅
 // (狭いとスクロールして一部しか見えず「気持ち悪い」とユーザー報告 2026-10)。
 const W: f64 = 720.0;
-const H: f64 = 530.0;
+// マイ辞書ビューア (#103) のテーブル領域を上部に足したぶん 530 → 740 に拡張。
+// 既存要素は下寄せ (origin bottom-left) の絶対座標なので不変、増えた上部 (y 520〜732) に置く。
+const H: f64 = 740.0;
 const PAD: f64 = 20.0;
 const FIELD_W: f64 = W - PAD * 2.0;
 
@@ -126,6 +184,8 @@ pub struct SettingsWindow {
     model_combo: Retained<NSComboBox>,
     reading_field: Retained<NSTextField>,
     surface_field: Retained<NSTextField>,
+    /// マイ辞書ビューアの一覧テーブル (#103)。選択行は `selected_dict_entry` が返す。
+    dict_table: Retained<NSTableView>,
     status: Retained<NSTextField>,
     /// 表示前の activation policy (閉じたら戻す)。
     prev_policy: Cell<Option<NSApplicationActivationPolicy>>,
@@ -324,6 +384,65 @@ impl SettingsWindow {
             forget.setAction(Some(sel!(nukoForgetLearning:)));
         }
 
+        // ── マイ辞書ビューア (登録済み一覧) セクション (#103、上部の増設領域) ──
+        let dict_list_h = make_label(
+            mtm,
+            "【 マイ辞書（登録済み一覧）。行を選んで 編集 / 削除 】",
+            NSRect::new(NSPoint::new(PAD, 712.0), NSSize::new(420.0, 18.0)),
+        );
+        let dict_edit = NSButton::new(mtm);
+        dict_edit.setTitle(&NSString::from_str("編集"));
+        dict_edit.setFrame(NSRect::new(
+            NSPoint::new(W - PAD - 230.0, 708.0),
+            NSSize::new(110.0, 26.0),
+        ));
+        unsafe {
+            dict_edit.setTarget(Some(save_target));
+            dict_edit.setAction(Some(sel!(nukoEditDictEntry:)));
+        }
+        let dict_delete = NSButton::new(mtm);
+        dict_delete.setTitle(&NSString::from_str("削除"));
+        dict_delete.setFrame(NSRect::new(
+            NSPoint::new(W - PAD - 110.0, 708.0),
+            NSSize::new(110.0, 26.0),
+        ));
+        unsafe {
+            dict_delete.setTarget(Some(save_target));
+            dict_delete.setAction(Some(sel!(nukoDeleteDictEntry:)));
+        }
+        // スクロール可能なテーブル (読み / 表層 の 2 列、cell-based、単一選択)。
+        let dict_scroll = NSScrollView::new(mtm);
+        dict_scroll.setFrame(NSRect::new(
+            NSPoint::new(PAD, 556.0),
+            NSSize::new(FIELD_W, 150.0),
+        ));
+        dict_scroll.setHasVerticalScroller(true);
+        let dict_table = NSTableView::new(mtm);
+        let col_reading = NSTableColumn::initWithIdentifier(
+            NSTableColumn::alloc(mtm),
+            &NSString::from_str("reading"),
+        );
+        col_reading.setWidth(220.0);
+        col_reading
+            .headerCell()
+            .setStringValue(&NSString::from_str("読み"));
+        let col_surface = NSTableColumn::initWithIdentifier(
+            NSTableColumn::alloc(mtm),
+            &NSString::from_str("surface"),
+        );
+        col_surface.setWidth(FIELD_W - 240.0);
+        col_surface
+            .headerCell()
+            .setStringValue(&NSString::from_str("表層"));
+        dict_table.addTableColumn(&col_reading);
+        dict_table.addTableColumn(&col_surface);
+        dict_table.setUsesAlternatingRowBackgroundColors(true);
+        dict_table.setAllowsMultipleSelection(false);
+        unsafe {
+            dict_table.setDataSource(Some(ProtocolObject::from_ref(&*target)));
+        }
+        dict_scroll.setDocumentView(Some(&dict_table));
+
         let close = NSButton::new(mtm);
         close.setTitle(&NSString::from_str("閉じる"));
         close.setFrame(NSRect::new(
@@ -359,6 +478,7 @@ impl SettingsWindow {
             &*dict_h,
             &*reading_label,
             &*surface_label,
+            &*dict_list_h,
             &*status,
         ] {
             content.addSubview(v);
@@ -375,6 +495,9 @@ impl SettingsWindow {
         content.addSubview(&byok_save);
         content.addSubview(&dict_add);
         content.addSubview(&forget);
+        content.addSubview(&dict_edit);
+        content.addSubview(&dict_delete);
+        content.addSubview(&dict_scroll);
         content.addSubview(&close);
         window.setContentView(Some(&content));
 
@@ -389,6 +512,7 @@ impl SettingsWindow {
             model_combo,
             reading_field,
             surface_field,
+            dict_table,
             status,
             prev_policy: Cell::new(None),
             _target: target,
@@ -431,6 +555,8 @@ impl SettingsWindow {
         self.model_combo
             .setStringValue(&NSString::from_str(model_prefill));
         self.status.setStringValue(&NSString::from_str(""));
+        // マイ辞書一覧を最新の user_dict.json から読み直して表示 (#103)。
+        self.refresh_dict_list();
         self.window.center();
         // Cmd+V 等を有効化 (設定窓にメニューバーが無いとペーストできないため)。
         Self::install_edit_menu(mtm);
@@ -555,6 +681,30 @@ impl SettingsWindow {
             .setStringValue(&NSString::from_str(reading));
         self.surface_field.setStringValue(&NSString::from_str(""));
         // 表層欄にキーボードフォーカスを移す (読みは入力済みなので単語を打てる)。
+        self.window.makeFirstResponder(Some(&self.surface_field));
+    }
+
+    /// マイ辞書ビューア (#103): 登録済み一覧を読み直してテーブルを再描画する。
+    /// `show` 時と、登録/編集/削除の直後に呼ぶ。
+    pub fn refresh_dict_list(&self) {
+        let rows = crate::state::user_dict_entries();
+        DICT_ROWS.with(|r| *r.borrow_mut() = rows);
+        self.dict_table.reloadData();
+    }
+
+    /// マイ辞書ビューアで選択中の行の (読み, 表層)。未選択なら None。
+    pub fn selected_dict_entry(&self) -> Option<(String, String)> {
+        let row = self.dict_table.selectedRow();
+        let idx = usize::try_from(row).ok()?;
+        DICT_ROWS.with(|r| r.borrow().get(idx).cloned())
+    }
+
+    /// 読み欄・表層欄の両方を設定する (マイ辞書ビューアの「編集」で使う)。
+    pub fn set_dict_fields(&self, reading: &str, surface: &str) {
+        self.reading_field
+            .setStringValue(&NSString::from_str(reading));
+        self.surface_field
+            .setStringValue(&NSString::from_str(surface));
         self.window.makeFirstResponder(Some(&self.surface_field));
     }
 }

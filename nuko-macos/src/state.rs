@@ -1432,6 +1432,8 @@ fn query_key_state(provider: &str) -> String {
 
 /// 設定ウィンドウを閉じる (activation policy を元に戻して IME を background へ)。
 pub fn close_settings(mtm: MainThreadMarker) {
+    // 編集モードを持ち越さない (#103)。
+    EDITING_ORIGINAL.with(|c| *c.borrow_mut() = None);
     SETTINGS_WINDOW.with(|cell| {
         if let Some(win) = cell.borrow().as_ref() {
             win.close(mtm);
@@ -1439,7 +1441,15 @@ pub fn close_settings(mtm: MainThreadMarker) {
     });
 }
 
+thread_local! {
+    /// マイ辞書ビューアの「編集」で選択した元エントリ (読み, 表層)。#103。
+    /// セットされている間に「辞書に登録」を押すと、元を削除してから新しい値で登録＝置換。
+    /// 登録/削除後・ウィンドウクローズ時にクリアする。
+    static EDITING_ORIGINAL: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
+}
+
 /// 設定ウィンドウの「辞書に登録」: 読み＋表層を稼働中エンジンへ追加＋保存する (即反映)。
+/// 編集モード (EDITING_ORIGINAL) 時は元エントリを削除してから追加＝置換 (#103)。
 pub fn add_dict_entry_from_window() {
     SETTINGS_WINDOW.with(|cell| {
         let w = cell.borrow();
@@ -1454,21 +1464,97 @@ pub fn add_dict_entry_from_window() {
             win.set_status("⚠️ 読みと表層の両方を入力してください");
             return;
         }
+        // 編集モード: 「編集」で選んだ元エントリがあれば、それを削除してから追加＝置換。
+        // 元と同一 (読み/表層とも不変) なら削除もスキップ (単なる再登録＝重複防止)。
+        let editing = EDITING_ORIGINAL.with(|c| c.borrow_mut().take());
+        let is_edit = editing.is_some();
         // 稼働中エンジンのユーザー辞書に追加＋保存 (user_dict.json)。CLI と違い即反映。
         let result = with_engine_mut(|engine| {
             let ud = engine.dictionary_mut().user_dictionary_mut();
+            if let Some((old_reading, old_surface)) = &editing {
+                if (old_reading.as_str(), old_surface.as_str()) != (reading, surface) {
+                    let _ = ud.remove(old_reading, old_surface);
+                }
+            }
             ud.add(nuko_core::dictionary::UserEntry::new(surface, reading))?;
             ud.save()
         });
         match result {
             Ok(()) => {
                 win.clear_dict_fields();
+                win.refresh_dict_list();
+                let verb = if is_edit { "更新" } else { "登録" };
                 win.set_status(&format!(
-                    "✅ 「{reading}」→「{surface}」を登録しました（即反映）"
+                    "✅ 「{reading}」→「{surface}」を{verb}しました（即反映）"
                 ));
             }
             Err(e) => win.set_status(&format!("⚠️ 登録失敗: {e}")),
         }
+    });
+}
+
+/// マイ辞書ビューア (#103): 登録済み全エントリを (読み, 表層) で読み昇順に返す。
+pub fn user_dict_entries() -> Vec<(String, String)> {
+    with_engine(|engine| {
+        let mut rows: Vec<(String, String)> = engine
+            .dictionary()
+            .user_dictionary()
+            .all_entries()
+            .into_iter()
+            .map(|e| (e.reading, e.surface))
+            .collect();
+        rows.sort();
+        rows
+    })
+}
+
+/// マイ辞書ビューア「削除」: 選択行の (読み, 表層) を削除して即反映する (#103)。
+pub fn delete_selected_dict_entry_from_window() {
+    SETTINGS_WINDOW.with(|cell| {
+        let w = cell.borrow();
+        let Some(win) = w.as_ref() else {
+            return;
+        };
+        let Some((reading, surface)) = win.selected_dict_entry() else {
+            win.set_status("⚠️ 削除する行を一覧で選んでください");
+            return;
+        };
+        let removed = with_engine_mut(|engine| {
+            let ud = engine.dictionary_mut().user_dictionary_mut();
+            let r = ud.remove(&reading, &surface).unwrap_or(false);
+            if r {
+                let _ = ud.save();
+            }
+            r
+        });
+        // 削除したら編集モードは解除 (選択が消えるため)。
+        EDITING_ORIGINAL.with(|c| *c.borrow_mut() = None);
+        win.refresh_dict_list();
+        if removed {
+            win.set_status(&format!("🗑 「{reading}」→「{surface}」を削除しました"));
+        } else {
+            win.set_status("… 該当エントリが見つかりませんでした");
+        }
+    });
+}
+
+/// マイ辞書ビューア「編集」: 選択行を登録欄に読み込み、編集モードにする (#103)。
+/// 直して「辞書に登録」を押すと元エントリを置き換える。
+pub fn edit_selected_dict_entry_from_window() {
+    SETTINGS_WINDOW.with(|cell| {
+        let w = cell.borrow();
+        let Some(win) = w.as_ref() else {
+            return;
+        };
+        let Some((reading, surface)) = win.selected_dict_entry() else {
+            win.set_status("⚠️ 編集する行を一覧で選んでください");
+            return;
+        };
+        win.set_dict_fields(&reading, &surface);
+        EDITING_ORIGINAL.with(|c| *c.borrow_mut() = Some((reading.clone(), surface.clone())));
+        win.set_status(&format!(
+            "✏️ 「{reading}」→「{surface}」を編集中。直して『辞書に登録』で更新します"
+        ));
     });
 }
 
