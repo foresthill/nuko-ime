@@ -9,6 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::time::Instant;
 
 use crate::candidate_panel::CustomCandidatePanel;
+use crate::dict_window::DictWindow;
 use crate::learning_panel::LearningStatusPanel;
 use crate::settings_window::SettingsWindow;
 
@@ -477,20 +478,6 @@ pub fn take_pending_reg_reading() -> Option<String> {
     PENDING_REG_READING.with(|c| c.borrow_mut().take())
 }
 
-/// 読みを事前入力して設定ウィンドウ (単語登録セクション) を開く。
-///
-/// 「入力中に『この読みで単語登録』を選ぶ → 読み欄に読みが入った状態で開き、
-/// 単語だけ打てば登録できる」ための導線。従来は設定を開いて読みを手打ちし直す
-/// 必要があった (= 手間)。
-pub fn show_settings_with_reading(mtm: MainThreadMarker, reading: &str) {
-    show_settings(mtm);
-    SETTINGS_WINDOW.with(|cell| {
-        if let Some(win) = cell.borrow().as_ref() {
-            win.set_reading_prefill(reading);
-        }
-    });
-}
-
 /// 単語登録: 稼働エンジンのユーザー辞書に `(reading → surface)` を追加し保存する。
 ///
 /// ユーザー辞書候補は変換で最優先 (USER_DICT_BOOST) になるので、登録後は
@@ -853,6 +840,124 @@ fn finish_ai_dreaming(mtm: MainThreadMarker, result: std::result::Result<String,
 // BYOK 設定ウィンドウ (アプリ全体で 1 つ)。
 thread_local! {
     static SETTINGS_WINDOW: RefCell<Option<SettingsWindow>> = const { RefCell::new(None) };
+}
+
+// マイ辞書ウィンドウ (#103 再設計、BYOK 設定とは独立)。アプリ全体で 1 つ。
+thread_local! {
+    static DICT_WINDOW: RefCell<Option<DictWindow>> = const { RefCell::new(None) };
+}
+
+/// マイ辞書ウィンドウを前面に表示する (初回は生成)。
+pub fn show_dict_window(mtm: MainThreadMarker) {
+    show_dict_window_impl(mtm, None);
+}
+
+/// マイ辞書ウィンドウを読み事前入力つきで開く (メニュー「📝「<読み>」を単語登録…」から)。
+pub fn show_dict_window_with_reading(mtm: MainThreadMarker, reading: &str) {
+    show_dict_window_impl(mtm, Some(reading));
+}
+
+fn show_dict_window_impl(mtm: MainThreadMarker, reading: Option<&str>) {
+    EDITING_ORIGINAL.with(|c| *c.borrow_mut() = None); // 新規表示は編集モード解除
+    DICT_WINDOW.with(|cell| {
+        let mut w = cell.borrow_mut();
+        if w.is_none() {
+            *w = Some(DictWindow::new(mtm));
+        }
+        if let Some(win) = w.as_ref() {
+            win.show(mtm, reading);
+        }
+    });
+}
+
+/// マイ辞書「辞書に追加 / 更新」: 読み+表層を登録。編集モードなら元エントリを置換 (#103)。
+pub fn dict_add_from_window() {
+    DICT_WINDOW.with(|cell| {
+        let w = cell.borrow();
+        let Some(win) = w.as_ref() else {
+            return;
+        };
+        let reading = win.reading_value();
+        let surface = win.surface_value();
+        let reading = reading.trim();
+        let surface = surface.trim();
+        if reading.is_empty() || surface.is_empty() {
+            win.set_status("⚠️ 読みと表層の両方を入力してください");
+            return;
+        }
+        // 編集モード: 「選択を編集」で選んだ元を削除してから追加＝置換。同一なら削除スキップ。
+        let editing = EDITING_ORIGINAL.with(|c| c.borrow_mut().take());
+        let is_edit = editing.is_some();
+        let result = with_engine_mut(|engine| {
+            let ud = engine.dictionary_mut().user_dictionary_mut();
+            if let Some((old_r, old_s)) = &editing {
+                if (old_r.as_str(), old_s.as_str()) != (reading, surface) {
+                    let _ = ud.remove(old_r, old_s);
+                }
+            }
+            ud.add(nuko_core::dictionary::UserEntry::new(surface, reading))?;
+            ud.save()
+        });
+        match result {
+            Ok(()) => {
+                win.clear_fields();
+                win.refresh();
+                let verb = if is_edit { "更新" } else { "追加" };
+                win.set_status(&format!(
+                    "✅ 「{reading}」→「{surface}」を{verb}しました（即反映）"
+                ));
+            }
+            Err(e) => win.set_status(&format!("⚠️ 登録失敗: {e}")),
+        }
+    });
+}
+
+/// マイ辞書「選択を編集」: 選択行を読み/表層欄に読み込み、編集モードにする (#103)。
+pub fn dict_edit_selected() {
+    DICT_WINDOW.with(|cell| {
+        let w = cell.borrow();
+        let Some(win) = w.as_ref() else {
+            return;
+        };
+        let Some((reading, surface)) = win.selected_entry() else {
+            win.set_status("⚠️ 編集する行を一覧で選んでください");
+            return;
+        };
+        win.set_fields(&reading, &surface);
+        EDITING_ORIGINAL.with(|c| *c.borrow_mut() = Some((reading.clone(), surface.clone())));
+        win.set_status(&format!(
+            "✏️ 「{reading}」→「{surface}」を編集中。直して『辞書に追加 / 更新』で置き換えます"
+        ));
+    });
+}
+
+/// マイ辞書「選択を削除」: 選択行を user_dict.json から削除して即反映する (#103)。
+pub fn dict_delete_selected() {
+    DICT_WINDOW.with(|cell| {
+        let w = cell.borrow();
+        let Some(win) = w.as_ref() else {
+            return;
+        };
+        let Some((reading, surface)) = win.selected_entry() else {
+            win.set_status("⚠️ 削除する行を一覧で選んでください");
+            return;
+        };
+        let removed = with_engine_mut(|engine| {
+            let ud = engine.dictionary_mut().user_dictionary_mut();
+            let r = ud.remove(&reading, &surface).unwrap_or(false);
+            if r {
+                let _ = ud.save();
+            }
+            r
+        });
+        EDITING_ORIGINAL.with(|c| *c.borrow_mut() = None);
+        win.refresh();
+        if removed {
+            win.set_status(&format!("🗑 「{reading}」→「{surface}」を削除しました"));
+        } else {
+            win.set_status("… 該当エントリが見つかりませんでした");
+        }
+    });
 }
 
 /// 設定ウィンドウを前面に表示する (初回は生成)。ボタンの target は窓が内部で保持する
@@ -1448,52 +1553,7 @@ thread_local! {
     static EDITING_ORIGINAL: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
 }
 
-/// 設定ウィンドウの「辞書に登録」: 読み＋表層を稼働中エンジンへ追加＋保存する (即反映)。
-/// 編集モード (EDITING_ORIGINAL) 時は元エントリを削除してから追加＝置換 (#103)。
-pub fn add_dict_entry_from_window() {
-    SETTINGS_WINDOW.with(|cell| {
-        let w = cell.borrow();
-        let Some(win) = w.as_ref() else {
-            return;
-        };
-        let reading = win.reading_value();
-        let surface = win.surface_value();
-        let reading = reading.trim();
-        let surface = surface.trim();
-        if reading.is_empty() || surface.is_empty() {
-            win.set_status("⚠️ 読みと表層の両方を入力してください");
-            return;
-        }
-        // 編集モード: 「編集」で選んだ元エントリがあれば、それを削除してから追加＝置換。
-        // 元と同一 (読み/表層とも不変) なら削除もスキップ (単なる再登録＝重複防止)。
-        let editing = EDITING_ORIGINAL.with(|c| c.borrow_mut().take());
-        let is_edit = editing.is_some();
-        // 稼働中エンジンのユーザー辞書に追加＋保存 (user_dict.json)。CLI と違い即反映。
-        let result = with_engine_mut(|engine| {
-            let ud = engine.dictionary_mut().user_dictionary_mut();
-            if let Some((old_reading, old_surface)) = &editing {
-                if (old_reading.as_str(), old_surface.as_str()) != (reading, surface) {
-                    let _ = ud.remove(old_reading, old_surface);
-                }
-            }
-            ud.add(nuko_core::dictionary::UserEntry::new(surface, reading))?;
-            ud.save()
-        });
-        match result {
-            Ok(()) => {
-                win.clear_dict_fields();
-                win.refresh_dict_list();
-                let verb = if is_edit { "更新" } else { "登録" };
-                win.set_status(&format!(
-                    "✅ 「{reading}」→「{surface}」を{verb}しました（即反映）"
-                ));
-            }
-            Err(e) => win.set_status(&format!("⚠️ 登録失敗: {e}")),
-        }
-    });
-}
-
-/// マイ辞書ビューア (#103): 登録済み全エントリを (読み, 表層) で読み昇順に返す。
+/// マイ辞書ウィンドウ (#103): 登録済み全エントリを (読み, 表層) で読み昇順に返す。
 pub fn user_dict_entries() -> Vec<(String, String)> {
     with_engine(|engine| {
         let mut rows: Vec<(String, String)> = engine
@@ -1506,56 +1566,6 @@ pub fn user_dict_entries() -> Vec<(String, String)> {
         rows.sort();
         rows
     })
-}
-
-/// マイ辞書ビューア「削除」: 選択行の (読み, 表層) を削除して即反映する (#103)。
-pub fn delete_selected_dict_entry_from_window() {
-    SETTINGS_WINDOW.with(|cell| {
-        let w = cell.borrow();
-        let Some(win) = w.as_ref() else {
-            return;
-        };
-        let Some((reading, surface)) = win.selected_dict_entry() else {
-            win.set_status("⚠️ 削除する行を一覧で選んでください");
-            return;
-        };
-        let removed = with_engine_mut(|engine| {
-            let ud = engine.dictionary_mut().user_dictionary_mut();
-            let r = ud.remove(&reading, &surface).unwrap_or(false);
-            if r {
-                let _ = ud.save();
-            }
-            r
-        });
-        // 削除したら編集モードは解除 (選択が消えるため)。
-        EDITING_ORIGINAL.with(|c| *c.borrow_mut() = None);
-        win.refresh_dict_list();
-        if removed {
-            win.set_status(&format!("🗑 「{reading}」→「{surface}」を削除しました"));
-        } else {
-            win.set_status("… 該当エントリが見つかりませんでした");
-        }
-    });
-}
-
-/// マイ辞書ビューア「編集」: 選択行を登録欄に読み込み、編集モードにする (#103)。
-/// 直して「辞書に登録」を押すと元エントリを置き換える。
-pub fn edit_selected_dict_entry_from_window() {
-    SETTINGS_WINDOW.with(|cell| {
-        let w = cell.borrow();
-        let Some(win) = w.as_ref() else {
-            return;
-        };
-        let Some((reading, surface)) = win.selected_dict_entry() else {
-            win.set_status("⚠️ 編集する行を一覧で選んでください");
-            return;
-        };
-        win.set_dict_fields(&reading, &surface);
-        EDITING_ORIGINAL.with(|c| *c.borrow_mut() = Some((reading.clone(), surface.clone())));
-        win.set_status(&format!(
-            "✏️ 「{reading}」→「{surface}」を編集中。直して『辞書に登録』で更新します"
-        ));
-    });
 }
 
 /// 設定ウィンドウの「この学習を忘れる」: 誤学習を観察ログから除去して即反映する。
