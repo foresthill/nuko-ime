@@ -1,6 +1,6 @@
 //! 学習マネージャー
 
-use super::frequency::FrequencyEntry;
+use super::frequency::{FrequencyEntry, LearningStrength, MEDIUM_STEP, OVERTAKE_MARGIN};
 use crate::conversion::{Candidate, ConversionContext};
 use crate::error::{NukoError, Result};
 use parking_lot::RwLock;
@@ -18,6 +18,8 @@ pub struct LearningManager {
     path: Option<std::path::PathBuf>,
     /// 変更フラグ
     dirty: Arc<RwLock<bool>>,
+    /// 学習の強さ (選択時にスコアをどれだけ上げるか)。既定 Strong。
+    strength: LearningStrength,
 }
 
 impl LearningManager {
@@ -27,6 +29,7 @@ impl LearningManager {
             frequency_data: Arc::new(RwLock::new(HashMap::new())),
             path: None,
             dirty: Arc::new(RwLock::new(false)),
+            strength: LearningStrength::default(),
         })
     }
 
@@ -39,6 +42,7 @@ impl LearningManager {
                 frequency_data: Arc::new(RwLock::new(HashMap::new())),
                 path: Some(path.to_path_buf()),
                 dirty: Arc::new(RwLock::new(false)),
+                strength: LearningStrength::default(),
             });
         }
 
@@ -57,6 +61,7 @@ impl LearningManager {
             frequency_data: Arc::new(RwLock::new(map)),
             path: Some(path.to_path_buf()),
             dirty: Arc::new(RwLock::new(false)),
+            strength: LearningStrength::default(),
         })
     }
 
@@ -95,6 +100,17 @@ impl LearningManager {
         self.path.is_some()
     }
 
+    /// 学習の強さを設定する (選択時にスコアをどれだけ上げるか)。
+    pub fn set_strength(&mut self, strength: LearningStrength) {
+        self.strength = strength;
+    }
+
+    /// 現在の学習の強さ。
+    #[must_use]
+    pub fn strength(&self) -> LearningStrength {
+        self.strength
+    }
+
     /// 変換結果を記録
     pub fn record(&mut self, candidate: &Candidate, _context: &ConversionContext) -> Result<()> {
         let mut data = self.frequency_data.write();
@@ -111,6 +127,38 @@ impl LearningManager {
 
         *self.dirty.write() = true;
         Ok(())
+    }
+
+    /// 学習の強さに応じて、選んだ候補のスコアを引き上げる (`record` の後に呼ぶ)。
+    ///
+    /// `rival_top` は**同じ読みで選んだ候補以外の最大“合成”スコア** (libakaza /
+    /// Layer2 込み) を渡す。strength 別:
+    /// - `Weak`: 何もしない (従来どおり `record` の +10 のみ)。
+    /// - `Medium`: 固定ステップ ([`MEDIUM_STEP`]) だけブースト (数回で逆転)。
+    /// - `Strong`: `rival_top` を恒久的に追い越す (1 回でトップ)。
+    ///
+    /// いずれも**単調** (ブーストは下げない) なので「選んだのに順位が戻る」ことがない。
+    pub fn apply_selection_boost(&mut self, candidate: &Candidate, rival_top: Option<i32>) {
+        if self.strength == LearningStrength::Weak {
+            return;
+        }
+        let mut data = self.frequency_data.write();
+        let Some(entries) = data.get_mut(&candidate.reading) else {
+            return;
+        };
+        let Some(entry) = entries.iter_mut().find(|e| e.surface == candidate.surface) else {
+            return;
+        };
+        match self.strength {
+            LearningStrength::Weak => {}
+            LearningStrength::Medium => entry.add_boost(MEDIUM_STEP),
+            LearningStrength::Strong => {
+                if let Some(top) = rival_top {
+                    entry.boost_to_at_least(top, OVERTAKE_MARGIN);
+                }
+            }
+        }
+        *self.dirty.write() = true;
     }
 
     /// 学習データから候補を取得
@@ -193,5 +241,41 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         // スコアが増加していることを確認
         assert!(candidates[0].score > 1000);
+    }
+
+    #[test]
+    fn strong_overtakes_layer2_backed_rival_in_one_selection() {
+        // 実機の「様 が Layer2 で底上げされた 用(~300k) に勝てない」を再現し、
+        // Strong の追い越しで 1 回の選択で逆転することを確認する。
+        let mut manager = LearningManager::new().unwrap();
+        let ctx = ConversionContext::default();
+        let sama = Candidate::new("様", "よう");
+
+        manager.record(&sama, &ctx).unwrap(); // Layer0 のみ ~200_010
+        let before = manager.get_candidates("よう", &ctx).unwrap()[0].score;
+        assert!(before < 300_691, "追い越し前は rival(300_691) に負けている");
+
+        // rival(用) の合成スコアを渡して追い越し (Strong 既定)。
+        manager.apply_selection_boost(&sama, Some(300_691));
+        let after = manager.get_candidates("よう", &ctx).unwrap()[0].score;
+        assert!(after > 300_691, "1 回で rival を追い越す (after={after})");
+
+        // 単調: もう一度同じ rival で適用しても下がらない。
+        manager.apply_selection_boost(&sama, Some(300_691));
+        let again = manager.get_candidates("よう", &ctx).unwrap()[0].score;
+        assert_eq!(after, again, "再適用で順位が戻らない (単調)");
+    }
+
+    #[test]
+    fn weak_strength_does_not_boost() {
+        let mut manager = LearningManager::new().unwrap();
+        manager.set_strength(super::LearningStrength::Weak);
+        let ctx = ConversionContext::default();
+        let c = Candidate::new("様", "よう");
+        manager.record(&c, &ctx).unwrap();
+        let before = manager.get_candidates("よう", &ctx).unwrap()[0].score;
+        manager.apply_selection_boost(&c, Some(300_691)); // Weak は無視
+        let after = manager.get_candidates("よう", &ctx).unwrap()[0].score;
+        assert_eq!(before, after, "Weak はブーストしない (従来どおり)");
     }
 }

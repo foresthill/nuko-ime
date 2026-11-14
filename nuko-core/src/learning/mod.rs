@@ -15,6 +15,7 @@ pub use dreaming::{
     build_prompt, digest_observations, merge_proposals, parse_proposal, DreamProposal,
     DreamProvider, MockProvider, ObservationDigest, ProposedPreference,
 };
+pub use frequency::LearningStrength;
 pub use manager::LearningManager;
 pub use observation::{
     filter_out_reading, prune_for_cap, ObservationEvent, ObservationLog, OBS_CAP_HIGH_WATERMARK,

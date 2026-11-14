@@ -1136,6 +1136,25 @@ impl ConversionEngine {
             return Ok(());
         }
         self.learning.record(candidate, context)?;
+
+        // 学習の強さに応じて「追い越しブースト」を積む (#183 スコア可視化の次段)。
+        // Strong のときは、同じ読みの**他候補の最大“合成”スコア** (libakaza/Layer2 込み)
+        // を再変換で求め、それを恒久的に上回るまで Layer0 を引き上げる。これで Layer2 で
+        // 底上げされた rival (例 `よう→用` ~300k) にも 1 回の選択で勝てる。Weak なら skip。
+        if self.learning.strength() != crate::learning::LearningStrength::Weak {
+            let rival_top = self
+                .convert(&candidate.reading, context)
+                .ok()
+                .and_then(|cands| {
+                    cands
+                        .iter()
+                        .filter(|c| c.surface != candidate.surface)
+                        .map(|c| c.score)
+                        .max()
+                });
+            self.learning.apply_selection_boost(candidate, rival_top);
+        }
+
         // 学習データの永続化が設定されていれば自動 save。失敗は warn にとどめ
         // commit 自体は成功扱い (= 学習はメモリには載った)。
         if self.learning.has_path() {
