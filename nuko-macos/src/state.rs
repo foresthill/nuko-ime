@@ -458,6 +458,39 @@ pub fn pending_registration_for(reading: &str) -> Option<String> {
     registration_candidate().and_then(|(r, s)| if r == reading { Some(s) } else { None })
 }
 
+// メニュー構築時 (composition がまだ在る瞬間) に「現在の読み」を退避する。
+// メニュー項目クリック時には composition が確定済みで消えているため、
+// クリック時はここから読みを取り出して登録フォームに事前入力する。
+thread_local! {
+    static PENDING_REG_READING: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// メニュー構築時に現在の読みを退避する (空なら None クリア)。
+pub fn set_pending_reg_reading(reading: Option<String>) {
+    PENDING_REG_READING.with(|c| {
+        *c.borrow_mut() = reading.filter(|r| !r.is_empty());
+    });
+}
+
+/// 退避した「現在の読み」を取り出す (一度きり)。
+pub fn take_pending_reg_reading() -> Option<String> {
+    PENDING_REG_READING.with(|c| c.borrow_mut().take())
+}
+
+/// 読みを事前入力して設定ウィンドウ (単語登録セクション) を開く。
+///
+/// 「入力中に『この読みで単語登録』を選ぶ → 読み欄に読みが入った状態で開き、
+/// 単語だけ打てば登録できる」ための導線。従来は設定を開いて読みを手打ちし直す
+/// 必要があった (= 手間)。
+pub fn show_settings_with_reading(mtm: MainThreadMarker, reading: &str) {
+    show_settings(mtm);
+    SETTINGS_WINDOW.with(|cell| {
+        if let Some(win) = cell.borrow().as_ref() {
+            win.set_reading_prefill(reading);
+        }
+    });
+}
+
 /// 単語登録: 稼働エンジンのユーザー辞書に `(reading → surface)` を追加し保存する。
 ///
 /// ユーザー辞書候補は変換で最優先 (USER_DICT_BOOST) になるので、登録後は

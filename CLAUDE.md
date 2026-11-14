@@ -259,6 +259,18 @@ PR #40 で `convert_k_best(reading, None, k=9)` に切替。各 `KBestPath` が�
 
 個人学習は**共有しない**、集合知は**有益な分だけアップデートで配布**、AI(dreaming)は**意図推論**——この振り分けは心の構造のメタファで整理できる。長期の設計思想は [`docs/LEARNING_ARCHITECTURE.md` §1.5](docs/LEARNING_ARCHITECTURE.md)（長期記憶）。このCLAUDE.md（短期記憶）には運用規約だけ置き、思想は docs 側を正とする。
 
+## 単語登録（ユーザー辞書）は既に在る — 新規に作らない
+
+「候補に無い語をどう教えるか」は **順位問題でなく網羅問題**（追い越し #201 では解けない＝ブースト対象が無い）。ここは**単語登録＝ユーザー辞書**の担当で、機構は**既に全部そろっている**。新しい登録系を作る前に必ずこれを使う/直す。
+
+- 実機が読む辞書は **`~/Library/Application Support/nuko-ime/user_dict.json` だけ**（起動時 `setup_user_dictionary` で load、`UserDictionary`、`USER_DICT_BOOST` で登録語は**変換1位**）。`nuko dict`（`nuko-cli/src/main.rs`）も同ファイルを編集。
+- ⚠️ **`user.dict` は孤児**：`nuko-cli/src/bin/dict.rs` だけが書き込み、IME は読まない。ここに登録しても効かない（将来整理）。
+- 登録導線は2つ:
+  1. **設定ウィンドウ**【単語登録 / 学習の編集（読み→表層）】: 読み欄・表層欄・「辞書に登録」。即 `user_dict.json` に反映。IME 自前ウィンドウでも打てる（API キー欄と同系の `editable_field`）。
+  2. **メニュー「単語登録:「A」→「B」」(Tab)**: 直近2確定から「1つ前の読み→直前の表層」を提案（`registration_candidate`）。例『こまや→駒屋(誤)→こまたに→駒谷(正)』直後に登録。
+  3. **メニュー「📝「<読み>」を単語登録…」(入力中のみ)**: いま入力中の読みを**事前入力**して設定の登録セクションを開く（表層だけ打てば済む＝「読みを打ち直す手間」を解消）。読みは composition 確定で消えるので**メニュー構築時に退避**して使う（`set_pending_reg_reading`/`take_pending_reg_reading`→`show_settings_with_reading`→`set_reading_prefill`）。
+- 「`け→家` が出ない」系は**この単語登録で一発**（`USER_DICT_BOOST` で即1位）。静的辞書 `system.rs` への個別追記で散らさない（グローバル規約「個別対応は破綻する」）。
+
 ## モデル配布の戦略
 
 - 現状: 各開発者が `make all` でローカル生成

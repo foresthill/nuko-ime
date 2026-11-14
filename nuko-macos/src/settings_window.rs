@@ -545,4 +545,16 @@ impl SettingsWindow {
         self.reading_field.setStringValue(&NSString::from_str(""));
         self.surface_field.setStringValue(&NSString::from_str(""));
     }
+
+    /// 単語登録セクションの「読み」欄を事前入力し、「表層」欄へフォーカスする。
+    ///
+    /// 入力中に「この読みで単語登録」から開いたときに使う。読みが既に入っている
+    /// ので、ユーザーは単語 (表層) だけ打って「辞書に登録」すれば済む。
+    pub fn set_reading_prefill(&self, reading: &str) {
+        self.reading_field
+            .setStringValue(&NSString::from_str(reading));
+        self.surface_field.setStringValue(&NSString::from_str(""));
+        // 表層欄にキーボードフォーカスを移す (読みは入力済みなので単語を打てる)。
+        self.window.makeFirstResponder(Some(&self.surface_field));
+    }
 }
