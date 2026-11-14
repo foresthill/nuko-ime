@@ -337,6 +337,22 @@ define_class!(
             self._open_settings_impl();
         }
 
+        /// メニュー項目「📝「<読み>」を単語登録…」のアクション。
+        ///
+        /// メニュー構築時に退避しておいた現在の読みを取り出し、設定ウィンドウの
+        /// 単語登録セクションを **読み事前入力・表層欄フォーカス** で開く。読みを
+        /// 打ち直す手間を無くす導線。
+        #[unsafe(method(nukoRegisterCurrentReading:))]
+        fn nuko_register_current_reading(&self, _sender: Option<&AnyObject>) {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            match crate::state::take_pending_reg_reading() {
+                Some(reading) => crate::state::show_settings_with_reading(mtm, &reading),
+                None => crate::state::show_settings(mtm),
+            }
+        }
+
         /// 設定ウィンドウ「BYOK を保存」ボタンのアクション。
         #[unsafe(method(nukoSaveSettings:))]
         fn nuko_save_settings(&self, _sender: Option<&AnyObject>) {
@@ -445,6 +461,18 @@ impl NukoInputController {
         // 「1つ前の読み → 直前の語」を提案する。未確定の composition に依存しない
         // ので、メニューを開いた瞬間に確定が走っても壊れない。
         // 例: こまや→駒屋(違う) → こまたに→駒谷(正解) の後に「単語登録:こまや→駒谷」。
+        // 入力中の読みがあれば「この読みで単語登録」を出す (発見性 + 読み事前入力)。
+        // メニュー項目クリック時には composition が確定済みで消えるため、今の読みを
+        // ここ (メニュー構築時) で退避しておき、クリック時に取り出して事前入力する。
+        let comp_reading = self.ivars().state.borrow().composition.clone();
+        crate::state::set_pending_reg_reading(if comp_reading.is_empty() {
+            None
+        } else {
+            Some(comp_reading.clone())
+        });
+        let comp_reg_ns = (!comp_reading.is_empty())
+            .then(|| NSString::from_str(&format!("📝「{comp_reading}」を単語登録…")));
+
         let reg = crate::state::registration_candidate();
         let reg_title = match &reg {
             Some((reading, surface)) => format!("単語登録:「{reading}」→「{surface}」"),
@@ -457,6 +485,14 @@ impl NukoInputController {
         let settings = NSString::from_str("⚙️ BYOK 設定…（APIキー/モデル）");
         let ai_log = NSString::from_str("📊 AI ログを見る…（コスト/送受信）");
         unsafe {
+            // 入力中の読みがあるときだけ「📝「<読み>」を単語登録…」を先頭に出す。
+            if let Some(ref t) = comp_reg_ns {
+                let _ = menu.addItemWithTitle_action_keyEquivalent(
+                    t,
+                    Some(sel!(nukoRegisterCurrentReading:)),
+                    &empty,
+                );
+            }
             let _ = menu.addItemWithTitle_action_keyEquivalent(
                 &reg_ns,
                 Some(sel!(nukoRegisterWord:)),
