@@ -41,7 +41,7 @@
 [GitHub Releases](https://github.com/foresthill/nuko-ime/releases) から
 **署名 + 公証済み（Developer ID）**のプレビュー版を入手できます:
 
-1. `NukoIME-v0.1.11-macos.zip` を展開 → `NukoIME.app` を `~/Library/Input Methods/` に置く
+1. `NukoIME-v0.1.12-macos.zip` を展開 → `NukoIME.app` を `~/Library/Input Methods/` に置く
 2. 変換モデルを配置(これが無いと変換品質が落ちる。内容は v0.1.3〜同一なので直近の
    モデル同梱版から取得):
    ```bash
