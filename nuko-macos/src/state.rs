@@ -261,7 +261,7 @@ thread_local! {
 }
 
 /// `~/Library/Application Support/nuko-ime/` を返す (HOME 取得失敗時 None)。
-fn nuko_app_support_dir() -> Option<std::path::PathBuf> {
+pub(crate) fn nuko_app_support_dir() -> Option<std::path::PathBuf> {
     let home = std::env::var("HOME").ok()?;
     Some(
         std::path::PathBuf::from(home)
