@@ -1,4 +1,4 @@
-//! ぬこIME 設定ウィンドウ (BYOK 鍵/モデル/プロバイダ + 単語登録)。
+//! ぬこIME 設定ウィンドウ (BYOK 鍵/モデル/プロバイダ 専用)。
 //!
 //! # IME 窓のフォーカス問題と対策
 //! IME は通常 background agent なので、窓を出しても「アクティブなアプリ」にならず
@@ -7,7 +7,9 @@
 //! `activate` し、閉じたら元の policy に戻す ([`SettingsWindow::show`] /
 //! [`SettingsWindow::close`])。
 //!
-//! 2 セクション: 【BYOK】(provider/key/model) と 【単語登録】(読み/表層 → 即反映)。
+//! この窓は **BYOK（AI学習の鍵）専用** にする (provider/key/model のみ)。単語登録・
+//! マイ辞書は「📚 マイ辞書」ウィンドウ ([`crate::dict_window`])、誤学習を忘れる機能も
+//! そこへ移設済み (#103 / 2026-11 ユーザー要望「BYOK に辞書・学習削除があるのは変」)。
 
 use std::cell::Cell;
 
@@ -52,11 +54,6 @@ define_class!(
         fn save(&self, _s: Option<&AnyObject>) {
             crate::state::save_settings();
         }
-        /// 「この学習を忘れる」(誤学習を観察ログから除去して即反映)。
-        #[unsafe(method(nukoForgetLearning:))]
-        fn forget_learning(&self, _s: Option<&AnyObject>) {
-            crate::state::forget_learning_from_window();
-        }
         /// プロバイダ選択が変わったら「現在のキー」表示をそのプロバイダのものに更新。
         #[unsafe(method(nukoProviderChanged:))]
         fn provider_changed(&self, _s: Option<&AnyObject>) {
@@ -96,7 +93,7 @@ impl SettingsTarget {
 // OpenRouter の API キー (sk-or-v1-… 約73文字) が 1 行で全部見える幅
 // (狭いとスクロールして一部しか見えず「気持ち悪い」とユーザー報告 2026-10)。
 const W: f64 = 720.0;
-const H: f64 = 530.0;
+const H: f64 = 400.0;
 const PAD: f64 = 20.0;
 const FIELD_W: f64 = W - PAD * 2.0;
 
@@ -119,8 +116,6 @@ pub struct SettingsWindow {
     current_key_label: Retained<NSTextField>,
     /// モデル選択 (実 API から取得した一覧 + 自由入力可の NSComboBox)。
     model_combo: Retained<NSComboBox>,
-    reading_field: Retained<NSTextField>,
-    surface_field: Retained<NSTextField>,
     status: Retained<NSTextField>,
     /// 表示前の activation policy (閉じたら戻す)。
     prev_policy: Cell<Option<NSApplicationActivationPolicy>>,
@@ -189,18 +184,18 @@ impl SettingsWindow {
         let active_label = make_label(
             mtm,
             "AI学習: —",
-            NSRect::new(NSPoint::new(PAD, 502.0), NSSize::new(380.0, 18.0)),
+            NSRect::new(NSPoint::new(PAD, 372.0), NSSize::new(380.0, 18.0)),
         );
         // 同じ行の右寄り: AI 接続ステータス (🟢/🔴)。右端に🔄更新ボタン。
         let conn_label = make_label(
             mtm,
             "接続: —",
-            NSRect::new(NSPoint::new(PAD + 390.0, 502.0), NSSize::new(190.0, 18.0)),
+            NSRect::new(NSPoint::new(PAD + 390.0, 372.0), NSSize::new(190.0, 18.0)),
         );
         let refresh_status = NSButton::new(mtm);
         refresh_status.setTitle(&NSString::from_str("🔄 更新"));
         refresh_status.setFrame(NSRect::new(
-            NSPoint::new(W - PAD - 90.0, 498.0),
+            NSPoint::new(W - PAD - 90.0, 368.0),
             NSSize::new(90.0, 24.0),
         ));
         unsafe {
@@ -208,15 +203,15 @@ impl SettingsWindow {
             refresh_status.setAction(Some(sel!(nukoRefreshAiStatus:)));
         }
 
-        // ── BYOK セクション ──
-        let byok_h = make_label(mtm, "【 BYOK（AI学習の鍵）】", row(476.0, 18.0));
+        // ── BYOK セクション (この窓はこれ専用) ──
+        let byok_h = make_label(mtm, "【 BYOK（AI学習の鍵）】", row(346.0, 18.0));
         // プロバイダ選択ドロップダウン (0=Anthropic / 1=OpenRouter / 2=Ollama)。
         // チェックボックスより「それぞれに鍵を持てる」ことが直感的 (ユーザー要望 2026-10)。
-        let provider_label = make_label(mtm, "プロバイダ:", row(454.0, 16.0));
+        let provider_label = make_label(mtm, "プロバイダ:", row(324.0, 16.0));
         let provider_popup = {
             let p = NSPopUpButton::initWithFrame_pullsDown(
                 NSPopUpButton::alloc(mtm),
-                NSRect::new(NSPoint::new(PAD + 90.0, 450.0), NSSize::new(280.0, 26.0)),
+                NSRect::new(NSPoint::new(PAD + 90.0, 320.0), NSSize::new(280.0, 26.0)),
                 false,
             );
             p.addItemWithTitle(&NSString::from_str("Anthropic（claude 直）"));
@@ -234,22 +229,22 @@ impl SettingsWindow {
         let base_url_label = make_label(
             mtm,
             "Ollama ベースURL（例 http://localhost:11435/v1。既定は 11434）:",
-            row(424.0, 16.0),
+            row(294.0, 16.0),
         );
-        let ollama_base_url_field = editable_field(mtm, row(400.0, 24.0));
-        let key_label = make_label(mtm, "API キー（平文入力・保存後クリア）:", row(374.0, 16.0));
-        let key_field = editable_field(mtm, row(350.0, 24.0));
+        let ollama_base_url_field = editable_field(mtm, row(270.0, 24.0));
+        let key_label = make_label(mtm, "API キー（平文入力・保存後クリア）:", row(244.0, 16.0));
+        let key_field = editable_field(mtm, row(220.0, 24.0));
         // 選択プロバイダに保存済みのキーを伏せ字で常時表示 (保存後も残るので「空に見える」を解消)。
-        let current_key_label = make_label(mtm, "現在のキー: —", row(324.0, 16.0));
+        let current_key_label = make_label(mtm, "現在のキー: —", row(194.0, 16.0));
         let model_label = make_label(
             mtm,
             "モデル（「モデル取得」で最新一覧を取得。入力して絞り込み可）:",
-            row(300.0, 16.0),
+            row(170.0, 16.0),
         );
         // モデルは実 API から取得した一覧 + 自由入力の NSComboBox (ID 推測を避ける)。
         let model_combo = NSComboBox::new(mtm);
         model_combo.setFrame(NSRect::new(
-            NSPoint::new(PAD, 276.0),
+            NSPoint::new(PAD, 146.0),
             NSSize::new(FIELD_W - 140.0, 26.0),
         ));
         model_combo.setUsesSingleLineMode(true);
@@ -257,7 +252,7 @@ impl SettingsWindow {
         let fetch_models = NSButton::new(mtm);
         fetch_models.setTitle(&NSString::from_str("モデル取得"));
         fetch_models.setFrame(NSRect::new(
-            NSPoint::new(PAD + FIELD_W - 130.0, 275.0),
+            NSPoint::new(PAD + FIELD_W - 130.0, 145.0),
             NSSize::new(130.0, 28.0),
         ));
         unsafe {
@@ -267,7 +262,7 @@ impl SettingsWindow {
         let byok_save = NSButton::new(mtm);
         byok_save.setTitle(&NSString::from_str("BYOK を保存"));
         byok_save.setFrame(NSRect::new(
-            NSPoint::new(PAD, 244.0),
+            NSPoint::new(PAD, 114.0),
             NSSize::new(150.0, 30.0),
         ));
         unsafe {
@@ -279,7 +274,7 @@ impl SettingsWindow {
         let ai_test = NSButton::new(mtm);
         ai_test.setTitle(&NSString::from_str("AI接続テスト"));
         ai_test.setFrame(NSRect::new(
-            NSPoint::new(PAD + 160.0, 244.0),
+            NSPoint::new(PAD + 160.0, 114.0),
             NSSize::new(160.0, 30.0),
         ));
         unsafe {
@@ -287,37 +282,10 @@ impl SettingsWindow {
             ai_test.setAction(Some(sel!(nukoAiTest:)));
         }
 
-        // ── 学習を忘れる セクション (読み → 表層) ──
-        // 単語登録・マイ辞書は独立した「📚 マイ辞書」ウィンドウ (dict_window.rs) に移設 (#103)。
-        // ここに残すのは「誤学習 (頻度/訂正) を忘れる」学習管理機能のみ。
-        let dict_h = make_label(
-            mtm,
-            "【 学習を忘れる（読み → 表層。表層を空にするとその読みを全部忘れる）】",
-            row(222.0, 18.0),
-        );
-        let reading_label = make_label(mtm, "読み（かな）:", row(198.0, 16.0));
-        let reading_field = editable_field(mtm, row(172.0, 24.0));
-        let surface_label = make_label(
-            mtm,
-            "表層（空＝その読みの学習を全部忘れる）:",
-            row(144.0, 16.0),
-        );
-        let surface_field = editable_field(mtm, row(118.0, 24.0));
-        let forget = NSButton::new(mtm);
-        forget.setTitle(&NSString::from_str("この学習を忘れる"));
-        forget.setFrame(NSRect::new(
-            NSPoint::new(PAD, 82.0),
-            NSSize::new(200.0, 30.0),
-        ));
-        unsafe {
-            forget.setTarget(Some(save_target));
-            forget.setAction(Some(sel!(nukoForgetLearning:)));
-        }
-
         let close = NSButton::new(mtm);
         close.setTitle(&NSString::from_str("閉じる"));
         close.setFrame(NSRect::new(
-            NSPoint::new(W - PAD - 100.0, 82.0),
+            NSPoint::new(W - PAD - 100.0, 74.0),
             NSSize::new(100.0, 30.0),
         ));
         unsafe {
@@ -333,7 +301,7 @@ impl SettingsWindow {
         let status = make_label(
             mtm,
             "",
-            NSRect::new(NSPoint::new(PAD, 30.0), NSSize::new(FIELD_W, 40.0)),
+            NSRect::new(NSPoint::new(PAD, 24.0), NSSize::new(FIELD_W, 40.0)),
         );
         status.setUsesSingleLineMode(false);
 
@@ -346,9 +314,6 @@ impl SettingsWindow {
             &*key_label,
             &*current_key_label,
             &*model_label,
-            &*dict_h,
-            &*reading_label,
-            &*surface_label,
             &*status,
         ] {
             content.addSubview(v);
@@ -360,10 +325,7 @@ impl SettingsWindow {
         content.addSubview(&model_combo);
         content.addSubview(&fetch_models);
         content.addSubview(&ai_test);
-        content.addSubview(&reading_field);
-        content.addSubview(&surface_field);
         content.addSubview(&byok_save);
-        content.addSubview(&forget);
         content.addSubview(&close);
         window.setContentView(Some(&content));
 
@@ -376,8 +338,6 @@ impl SettingsWindow {
             key_field,
             current_key_label,
             model_combo,
-            reading_field,
-            surface_field,
             status,
             prev_policy: Cell::new(None),
             _target: target,
@@ -509,16 +469,6 @@ impl SettingsWindow {
         }
     }
 
-    /// 読み欄の現在値。
-    pub fn reading_value(&self) -> String {
-        self.reading_field.stringValue().to_string()
-    }
-
-    /// 表層欄の現在値。
-    pub fn surface_value(&self) -> String {
-        self.surface_field.stringValue().to_string()
-    }
-
     /// ステータス行を更新する。
     pub fn set_status(&self, s: &str) {
         self.status.setStringValue(&NSString::from_str(s));
@@ -527,11 +477,5 @@ impl SettingsWindow {
     /// キー欄をクリアする。
     pub fn clear_key(&self) {
         self.key_field.setStringValue(&NSString::from_str(""));
-    }
-
-    /// 単語登録の入力欄をクリアする。
-    pub fn clear_dict_fields(&self) {
-        self.reading_field.setStringValue(&NSString::from_str(""));
-        self.surface_field.setStringValue(&NSString::from_str(""));
     }
 }

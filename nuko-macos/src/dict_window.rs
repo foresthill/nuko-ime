@@ -30,7 +30,7 @@ thread_local! {
 }
 
 const W: f64 = 720.0;
-const H: f64 = 480.0;
+const H: f64 = 640.0;
 const PAD: f64 = 20.0;
 const FIELD_W: f64 = W - PAD * 2.0;
 
@@ -107,6 +107,11 @@ define_class!(
         fn delete(&self, _s: Option<&AnyObject>) {
             crate::state::dict_delete_selected();
         }
+        /// 「この学習を忘れる」: 誤学習 (頻度/訂正) を観察ログから除去して即反映 (BYOK 窓から移設)。
+        #[unsafe(method(nukoDictForget:))]
+        fn forget(&self, _s: Option<&AnyObject>) {
+            crate::state::forget_learning_from_window();
+        }
     }
 );
 
@@ -127,6 +132,10 @@ pub struct DictWindow {
     reading_field: Retained<NSTextField>,
     surface_field: Retained<NSTextField>,
     dict_table: Retained<NSTableView>,
+    /// 「学習を忘れる」セクションの読み欄 (単語登録の読み欄とは別物)。
+    forget_reading_field: Retained<NSTextField>,
+    /// 「学習を忘れる」セクションの表層欄 (空＝その読みを全部忘れる)。
+    forget_surface_field: Retained<NSTextField>,
     status: Retained<NSTextField>,
     /// ボタン/データソースの安定 target (保持し続ける)。
     _target: Retained<DictTarget>,
@@ -158,13 +167,13 @@ impl DictWindow {
         let header = make_label(
             mtm,
             "【 マイ辞書（登録した単語の一覧）】行を選んで 編集 / 削除",
-            NSRect::new(NSPoint::new(PAD, 448.0), NSSize::new(FIELD_W - 120.0, 18.0)),
+            NSRect::new(NSPoint::new(PAD, 608.0), NSSize::new(FIELD_W - 120.0, 18.0)),
         );
 
         // スクロール可能なテーブル (読み / 表層 の 2 列、cell-based、単一選択)。
         let dict_scroll = NSScrollView::new(mtm);
         dict_scroll.setFrame(NSRect::new(
-            NSPoint::new(PAD, 232.0),
+            NSPoint::new(PAD, 392.0),
             NSSize::new(FIELD_W, 208.0),
         ));
         dict_scroll.setHasVerticalScroller(true);
@@ -195,15 +204,15 @@ impl DictWindow {
         dict_scroll.setDocumentView(Some(&dict_table));
 
         // 追加/編集用の入力欄 (一覧のすぐ下＝同じ動線)。
-        let reading_label = make_label(mtm, "読み（かな）:", row(206.0, 16.0));
-        let reading_field = editable_field(mtm, row(180.0, 24.0));
-        let surface_label = make_label(mtm, "表層（変換後の語）:", row(152.0, 16.0));
-        let surface_field = editable_field(mtm, row(126.0, 24.0));
+        let reading_label = make_label(mtm, "読み（かな）:", row(366.0, 16.0));
+        let reading_field = editable_field(mtm, row(340.0, 24.0));
+        let surface_label = make_label(mtm, "表層（変換後の語）:", row(312.0, 16.0));
+        let surface_field = editable_field(mtm, row(286.0, 24.0));
 
         let add = NSButton::new(mtm);
         add.setTitle(&NSString::from_str("辞書に追加 / 更新"));
         add.setFrame(NSRect::new(
-            NSPoint::new(PAD, 82.0),
+            NSPoint::new(PAD, 242.0),
             NSSize::new(170.0, 30.0),
         ));
         unsafe {
@@ -213,7 +222,7 @@ impl DictWindow {
         let edit = NSButton::new(mtm);
         edit.setTitle(&NSString::from_str("選択を編集"));
         edit.setFrame(NSRect::new(
-            NSPoint::new(PAD + 180.0, 82.0),
+            NSPoint::new(PAD + 180.0, 242.0),
             NSSize::new(130.0, 30.0),
         ));
         unsafe {
@@ -223,7 +232,7 @@ impl DictWindow {
         let delete = NSButton::new(mtm);
         delete.setTitle(&NSString::from_str("選択を削除"));
         delete.setFrame(NSRect::new(
-            NSPoint::new(PAD + 320.0, 82.0),
+            NSPoint::new(PAD + 320.0, 242.0),
             NSSize::new(130.0, 30.0),
         ));
         unsafe {
@@ -231,10 +240,37 @@ impl DictWindow {
             delete.setAction(Some(sel!(nukoDictDelete:)));
         }
 
+        // ── 学習を忘れる セクション (BYOK 窓から移設 #103) ──
+        // マイ辞書の「削除」は自分が登録した語を消す。こちらは IME が勝手に学習した
+        // 誤変換 (頻度/訂正) を忘れる = 別機能なので、専用の読み/表層欄を持つ。
+        let forget_header = make_label(
+            mtm,
+            "【 学習を忘れる（IMEが覚えた誤変換を戻す。表層を空にするとその読みを全部忘れる）】",
+            row(200.0, 18.0),
+        );
+        let forget_reading_label = make_label(mtm, "忘れたい読み（かな）:", row(176.0, 16.0));
+        let forget_reading_field = editable_field(mtm, row(150.0, 24.0));
+        let forget_surface_label = make_label(
+            mtm,
+            "表層（空＝その読みの学習を全部忘れる）:",
+            row(122.0, 16.0),
+        );
+        let forget_surface_field = editable_field(mtm, row(96.0, 24.0));
+        let forget = NSButton::new(mtm);
+        forget.setTitle(&NSString::from_str("この学習を忘れる"));
+        forget.setFrame(NSRect::new(
+            NSPoint::new(PAD, 52.0),
+            NSSize::new(200.0, 30.0),
+        ));
+        unsafe {
+            forget.setTarget(Some(btn_target));
+            forget.setAction(Some(sel!(nukoDictForget:)));
+        }
+
         let close = NSButton::new(mtm);
         close.setTitle(&NSString::from_str("閉じる"));
         close.setFrame(NSRect::new(
-            NSPoint::new(W - PAD - 100.0, 444.0),
+            NSPoint::new(W - PAD - 100.0, 604.0),
             NSSize::new(100.0, 26.0),
         ));
         unsafe {
@@ -247,11 +283,19 @@ impl DictWindow {
         let status = make_label(
             mtm,
             "",
-            NSRect::new(NSPoint::new(PAD, 30.0), NSSize::new(FIELD_W, 40.0)),
+            NSRect::new(NSPoint::new(PAD, 8.0), NSSize::new(FIELD_W, 40.0)),
         );
         status.setUsesSingleLineMode(false);
 
-        for v in [&*header, &*reading_label, &*surface_label, &*status] {
+        for v in [
+            &*header,
+            &*reading_label,
+            &*surface_label,
+            &*forget_header,
+            &*forget_reading_label,
+            &*forget_surface_label,
+            &*status,
+        ] {
             content.addSubview(v);
         }
         content.addSubview(&dict_scroll);
@@ -260,6 +304,9 @@ impl DictWindow {
         content.addSubview(&add);
         content.addSubview(&edit);
         content.addSubview(&delete);
+        content.addSubview(&forget_reading_field);
+        content.addSubview(&forget_surface_field);
+        content.addSubview(&forget);
         content.addSubview(&close);
         window.setContentView(Some(&content));
 
@@ -268,6 +315,8 @@ impl DictWindow {
             reading_field,
             surface_field,
             dict_table,
+            forget_reading_field,
+            forget_surface_field,
             status,
             _target: target,
         }
@@ -334,6 +383,24 @@ impl DictWindow {
     pub fn clear_fields(&self) {
         self.reading_field.setStringValue(&NSString::from_str(""));
         self.surface_field.setStringValue(&NSString::from_str(""));
+    }
+
+    /// 「学習を忘れる」読み欄の現在値。
+    pub fn forget_reading_value(&self) -> String {
+        self.forget_reading_field.stringValue().to_string()
+    }
+
+    /// 「学習を忘れる」表層欄の現在値 (空＝その読みを全部忘れる)。
+    pub fn forget_surface_value(&self) -> String {
+        self.forget_surface_field.stringValue().to_string()
+    }
+
+    /// 「学習を忘れる」入力欄をクリアする。
+    pub fn clear_forget_fields(&self) {
+        self.forget_reading_field
+            .setStringValue(&NSString::from_str(""));
+        self.forget_surface_field
+            .setStringValue(&NSString::from_str(""));
     }
 
     pub fn set_status(&self, s: &str) {
