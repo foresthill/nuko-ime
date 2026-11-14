@@ -6,6 +6,7 @@
 mod candidate_panel;
 mod commit;
 mod controller;
+mod dict_window;
 mod learning_panel;
 mod settings_window;
 mod state;
