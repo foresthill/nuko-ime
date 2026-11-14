@@ -339,17 +339,24 @@ define_class!(
 
         /// メニュー項目「📝「<読み>」を単語登録…」のアクション。
         ///
-        /// メニュー構築時に退避しておいた現在の読みを取り出し、設定ウィンドウの
-        /// 単語登録セクションを **読み事前入力・表層欄フォーカス** で開く。読みを
-        /// 打ち直す手間を無くす導線。
+        /// メニュー構築時に退避しておいた現在の読みを取り出し、**マイ辞書ウィンドウ**を
+        /// 読み事前入力・表層欄フォーカスで開く (#103 再設計で設定窓から独立)。
         #[unsafe(method(nukoRegisterCurrentReading:))]
         fn nuko_register_current_reading(&self, _sender: Option<&AnyObject>) {
             let Some(mtm) = MainThreadMarker::new() else {
                 return;
             };
             match crate::state::take_pending_reg_reading() {
-                Some(reading) => crate::state::show_settings_with_reading(mtm, &reading),
-                None => crate::state::show_settings(mtm),
+                Some(reading) => crate::state::show_dict_window_with_reading(mtm, &reading),
+                None => crate::state::show_dict_window(mtm),
+            }
+        }
+
+        /// メニュー項目「📚 マイ辞書（単語の登録・一覧）…」のアクション。
+        #[unsafe(method(nukoOpenDict:))]
+        fn nuko_open_dict(&self, _sender: Option<&AnyObject>) {
+            if let Some(mtm) = MainThreadMarker::new() {
+                crate::state::show_dict_window(mtm);
             }
         }
 
@@ -359,10 +366,10 @@ define_class!(
             crate::state::save_settings();
         }
 
-        /// 設定ウィンドウ「辞書に登録」ボタンのアクション。
+        /// マイ辞書ウィンドウ「辞書に追加 / 更新」ボタンのアクション (#103)。
         #[unsafe(method(nukoAddDictEntry:))]
         fn nuko_add_dict_entry(&self, _sender: Option<&AnyObject>) {
-            crate::state::add_dict_entry_from_window();
+            crate::state::dict_add_from_window();
         }
 
         /// 設定ウィンドウ「閉じる」ボタンのアクション (policy を戻して background へ)。
@@ -479,6 +486,7 @@ impl NukoInputController {
             None => "単語登録…（使い方を表示）".to_string(),
         };
         let reg_ns = NSString::from_str(&reg_title);
+        let dict_ns = NSString::from_str("📚 マイ辞書（単語の登録・一覧）…");
         let show = NSString::from_str("学習状況を見る…");
         let relearn = NSString::from_str("学習を今すぐ研ぎ直す");
         let dream_ai = NSString::from_str("🤖 AIで学習を研ぎ直す（BYOK）");
@@ -496,6 +504,12 @@ impl NukoInputController {
             let _ = menu.addItemWithTitle_action_keyEquivalent(
                 &reg_ns,
                 Some(sel!(nukoRegisterWord:)),
+                &empty,
+            );
+            // マイ辞書ウィンドウ (登録一覧＋追加/編集/削除。BYOK とは独立 #103)。
+            let _ = menu.addItemWithTitle_action_keyEquivalent(
+                &dict_ns,
+                Some(sel!(nukoOpenDict:)),
                 &empty,
             );
             let _ = menu.addItemWithTitle_action_keyEquivalent(
