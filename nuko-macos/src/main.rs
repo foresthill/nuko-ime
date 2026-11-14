@@ -21,7 +21,60 @@ use tracing::info;
 // controller.rs で定義される NukoInputController をインポート
 use controller::NukoInputController;
 
+/// panic を `~/Library/Application Support/nuko-ime/panic.log` に自己記録する hook。
+///
+/// IME の stderr はどこにも出ず、release は `strip` + `panic = "abort"` なので、
+/// クラッシュしても従来は原因 (file:line) が一切残らなかった。だが
+/// - `set_hook` は `panic = "abort"` でも **abort の直前に必ず走る**、
+/// - `Location`(file:line) は `#[track_caller]` 由来で **strip 後も残る**、
+/// - panic メッセージも payload から取れる、
+///
+/// ため、release のまま全 panic を追記記録できる。これで「毎日1回落ちるが原因
+/// 不明」を「次の1回で正確な発生箇所が出る」に変える。クラッシュ自体は止めない
+/// (それは原因特定後の別対応)。
+fn install_panic_logger() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(dir) = state::nuko_app_support_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            let loc = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "<unknown location>".to_string());
+            let msg = info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".to_string());
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let thread = std::thread::current()
+                .name()
+                .unwrap_or("<unnamed>")
+                .to_string();
+            let line = format!("[unix:{ts}] thread '{thread}' panicked at {loc}:\n  {msg}\n");
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("panic.log"))
+            {
+                let _ = f.write_all(line.as_bytes());
+                let _ = f.flush();
+            }
+        }
+        // 既定 hook (stderr 出力) も残す。
+        prev(info);
+    }));
+}
+
 fn main() {
+    // 何よりも先に panic logger を入れる (以降の初期化で落ちても記録する)。
+    install_panic_logger();
+
     // ログ初期化
     tracing_subscriber::fmt()
         .with_env_filter("nuko=debug,info")
