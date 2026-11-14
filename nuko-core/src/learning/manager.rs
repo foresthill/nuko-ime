@@ -134,7 +134,7 @@ impl LearningManager {
     /// `rival_top` は**同じ読みで選んだ候補以外の最大“合成”スコア** (libakaza /
     /// Layer2 込み) を渡す。strength 別:
     /// - `Weak`: 何もしない (従来どおり `record` の +10 のみ)。
-    /// - `Medium`: 固定ステップ ([`MEDIUM_STEP`]) だけブースト (数回で逆転)。
+    /// - `Medium`: 固定ステップ (`MEDIUM_STEP`) だけブースト (数回で逆転)。
     /// - `Strong`: `rival_top` を恒久的に追い越す (1 回でトップ)。
     ///
     /// いずれも**単調** (ブーストは下げない) なので「選んだのに順位が戻る」ことがない。

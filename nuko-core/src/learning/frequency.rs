@@ -10,7 +10,7 @@ use std::time::SystemTime;
 /// そこで「上げ幅」をユーザー設定にする。設計判断は docs/LEARNING_ARCHITECTURE.md §1.6:
 /// - **減衰する recency ボーナスは不採用**(「さっき上に出たのに戻ってる!?」= 非単調で混乱)。
 /// - 採用 = **追い越し(恒久・単調)**: 選んだら今のトップより上へ恒久的に引き上げる
-///   ([`FrequencyEntry::boost_to_at_least`])。スコアは選択時だけ上がる = 下がらない。
+///   (`FrequencyEntry::boost_to_at_least`)。スコアは選択時だけ上がる = 下がらない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LearningStrength {
