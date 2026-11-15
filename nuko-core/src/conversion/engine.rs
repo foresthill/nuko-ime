@@ -680,6 +680,9 @@ impl ConversionEngine {
             );
         }
 
+        // 記号の代表 1 つを page 1 (2 位) に引き上げる (①規則クラス、下記 fn 参照)。
+        boost_representative_symbol(&mut candidates);
+
         // 単語登録 (ユーザー辞書) の候補は最優先で 1 位に出す。
         for c in candidates.iter_mut() {
             if c.source == CandidateSource::User {
@@ -1182,6 +1185,51 @@ impl ConversionEngine {
     }
 }
 
+/// 記号の「代表 1 つ」を page 1 (= 2 位) に引き上げる (①規則クラス)。
+///
+/// # 背景 (2026-11、実測)
+/// 記号 (まる→◯ / さんかく→△ / ほし→★ 等) は静的辞書で素スコア ~100。libakaza 候補は
+/// `LIBAKAZA_PRIORITY_BOOST` (+100_000) で 94_000〜99_000 に並ぶため、記号は常にその下
+/// ＝ 2 ページ目送りになり「◯ が出てこない」とユーザーに見える (まる で ◯ は 11 位だった)。
+///
+/// # 方針
+/// その読みの **代表記号 (= `pos=="記号"` のうち最大スコア = 静的辞書の先頭 i==0) だけ** を
+/// 「非記号の最大スコア − 1」へ引き上げ、#1 (通常の漢字/かな) は動かさず #2 に出す。
+///
+/// # 設計上の性質
+/// - #1 は不変 → 下/右 のような常用漢字の 1 位は維持される (回帰しない)。
+/// - 異体字 (● ◎ 〇 ▲ ☆ 等) は据え置き (2 ページ目のまま)。学習が後段で実選択を浮かせる。
+/// - 非記号候補が無い/低い (libakaza OFF 等) ときは代表が自然に上位なので無変化。
+/// - ユーザー辞書/訂正ブーストはこの後段に乗るので、それらは引き続き記号を上回れる。
+fn boost_representative_symbol(candidates: &mut CandidateList) {
+    let is_symbol = |c: &Candidate| c.pos.as_deref() == Some("記号");
+    let rep_score = candidates
+        .iter()
+        .filter(|c| is_symbol(c))
+        .map(|c| c.score)
+        .max();
+    let max_real = candidates
+        .iter()
+        .filter(|c| !is_symbol(c))
+        .map(|c| c.score)
+        .max();
+    let (Some(rep_score), Some(max_real)) = (rep_score, max_real) else {
+        return;
+    };
+    let target = max_real.saturating_sub(1);
+    if rep_score >= target {
+        return;
+    }
+    // 最大スコアの記号 1 件だけを引き上げる (異体字は触らない)。
+    let mut boosted = false;
+    for c in candidates.iter_mut() {
+        if !boosted && is_symbol(c) && c.score == rep_score {
+            c.score = target;
+            boosted = true;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1202,6 +1250,59 @@ mod tests {
         // かなそのまま、カタカナの候補は必ず含まれる
         assert!(candidates.iter().any(|c| c.surface == "にほん"));
         assert!(candidates.iter().any(|c| c.surface == "ニホン"));
+    }
+
+    /// 記号ブースト: 代表記号 1 つだけが「非記号の最大 − 1」= 2 位に上がり、
+    /// #1 (漢字) は不変、異体字 (●) は据え置き。(B / 2026-11)
+    #[test]
+    fn test_symbol_boost_puts_representative_second() {
+        let sym =
+            |s: &str, score: i32| Candidate::new(s, "まる").with_score(score).with_pos("記号");
+        let mut list = CandidateList::new();
+        list.push(
+            Candidate::new("丸", "まる")
+                .with_score(98932)
+                .with_pos("名詞"),
+        );
+        list.push(sym("○", 100)); // 代表 (最大スコアの記号)
+        list.push(sym("●", 99)); // 異体字
+        list.push(Candidate::new("まる", "まる").with_score(-100)); // かな (pos None)
+
+        boost_representative_symbol(&mut list);
+
+        let score = |surface: &str| list.iter().find(|c| c.surface == surface).unwrap().score;
+        assert_eq!(score("○"), 98931, "代表は 非記号最大(98932)-1 = 2 位");
+        assert_eq!(score("丸"), 98932, "#1 の漢字は不変");
+        assert_eq!(score("●"), 99, "異体字は据え置き");
+
+        list.sort_by_score();
+        let order: Vec<&str> = list.iter().map(|c| c.surface.as_str()).collect();
+        assert_eq!(order[0], "丸", "漢字が 1 位のまま");
+        assert_eq!(order[1], "○", "代表記号が 2 位 (page 1 に出る)");
+    }
+
+    /// 記号しか無い (= libakaza OFF 等で非記号が無い) ときは代表を触らない。
+    #[test]
+    fn test_symbol_boost_noop_without_real_candidate() {
+        let mut list = CandidateList::new();
+        list.push(Candidate::new("○", "まる").with_score(100).with_pos("記号"));
+        list.push(Candidate::new("●", "まる").with_score(99).with_pos("記号"));
+        boost_representative_symbol(&mut list);
+        assert_eq!(list.iter().find(|c| c.surface == "○").unwrap().score, 100);
+    }
+
+    /// 代表が既に非記号より上なら引き下げない (単調性)。
+    #[test]
+    fn test_symbol_boost_noop_when_already_top() {
+        let mut list = CandidateList::new();
+        list.push(Candidate::new("○", "まる").with_score(500).with_pos("記号"));
+        list.push(
+            Candidate::new("丸", "まる")
+                .with_score(100)
+                .with_pos("名詞"),
+        );
+        boost_representative_symbol(&mut list);
+        assert_eq!(list.iter().find(|c| c.surface == "○").unwrap().score, 500);
     }
 
     /// ★ フレーズ予測 (#187)。確定済みの定型句が、末尾ん (= 単一 n で打てる) の
