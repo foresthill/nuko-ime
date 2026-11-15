@@ -161,6 +161,12 @@ impl CandidateList {
         &self.candidates
     }
 
+    /// 全候補を可変スライスで取得 (登録語の最優先固定など、
+    /// 「最大値を見てから持ち上げる」二段走査が要る整形用)。
+    pub fn all_mut(&mut self) -> &mut [Candidate] {
+        &mut self.candidates
+    }
+
     /// イテレータを取得
     pub fn iter(&self) -> impl Iterator<Item = &Candidate> {
         self.candidates.iter()

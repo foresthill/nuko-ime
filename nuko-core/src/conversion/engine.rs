@@ -343,6 +343,75 @@ pub fn apply_segment_frequency(
     }
 }
 
+/// 文節ごとに **単語登録 (ユーザー辞書)** を適用する。
+///
+/// flat の [`ConversionEngine::convert`] は辞書 lookup で `source=User` の候補を得て
+/// `USER_DICT_BOOST` を足し 1 位にするが、`convert_segmented` は未適用だったため
+/// 「け→家 を登録しても**文中**では出ない」バグがあった (2026-11 ユーザー報告)。
+/// #178 (Layer0)・#184 (segmented スコア) と同型の「flat にあって segmented に無い」漏れ。
+///
+/// 各文節の読みに一致する登録語を **注入** (libakaza k-best に無くても出す) し、
+/// [`pin_user_dict_top`] で他候補の最大より上に固定して「登録語は 1 位」を保証する。
+/// 固定ブーストでなく相対持ち上げにするのは、Layer0 頻度 (確定回数で上限なく伸びる)
+/// に負けないため (下記 fn のコメント参照)。
+#[cfg(feature = "akaza")]
+fn apply_segment_user_dict(
+    segmented: &mut super::SegmentedConversion,
+    dictionary: &DictionaryManager,
+) {
+    for seg in &mut segmented.segments {
+        let seg_reading = seg.reading.clone();
+        let entries = dictionary.user_dictionary().lookup(&seg_reading);
+        if entries.is_empty() {
+            continue;
+        }
+        let mut surfaces: Vec<String> = Vec::with_capacity(entries.len());
+        for e in entries {
+            surfaces.push(e.surface.clone());
+            // libakaza k-best に無い登録語は注入する (無ければ文中で出ない)。
+            if !seg.candidates.iter().any(|c| c.surface == e.surface) {
+                seg.candidates.push(
+                    Candidate::new(&e.surface, &seg_reading)
+                        .with_score(e.score.saturating_add(USER_DICT_BOOST))
+                        .with_source(CandidateSource::User),
+                );
+            }
+        }
+        pin_user_dict_top(&mut seg.candidates, &surfaces);
+        seg.candidates.sort_by_key(|c| std::cmp::Reverse(c.score));
+        seg.select(0);
+    }
+}
+
+/// 登録語 (ユーザー辞書) の `surfaces` を、同じ候補リスト内の他のどの候補より
+/// 確実に上へ固定する (= 変換 1 位)。
+///
+/// Layer0 頻度は確定回数で上限なく伸びる (`200_000 + count*50`) ため、固定値の
+/// `USER_DICT_BOOST` だけだと「何度も確定したかな」に負け得る
+/// (2026-11 ユーザー報告「け→家 を登録したのに文中で け が 1 位」: け×5=200_250 >
+/// 家 登録 200_200)。そこで固定ブーストでなく **「登録語以外の最大 + 1」** へ持ち上げ、
+/// 頻度の大小に依らず 1 位を保証する。`surfaces` が空なら完全に無変化。
+/// flat ([`ConversionEngine::convert`]) と segmented 両方から呼び、挙動を一致させる。
+fn pin_user_dict_top(cands: &mut [Candidate], surfaces: &[String]) {
+    if surfaces.is_empty() {
+        return;
+    }
+    let is_user = |c: &Candidate| surfaces.iter().any(|s| s == &c.surface);
+    let max_other = cands
+        .iter()
+        .filter(|c| !is_user(c))
+        .map(|c| c.score)
+        .max()
+        .unwrap_or(0);
+    let floor = max_other.saturating_add(1);
+    for c in cands.iter_mut() {
+        if is_user(c) {
+            c.score = c.score.max(floor);
+            c.source = CandidateSource::User;
+        }
+    }
+}
+
 /// 変換エンジン
 pub struct ConversionEngine {
     /// 辞書マネージャー
@@ -734,6 +803,18 @@ impl ConversionEngine {
             super::kyujitai::append_kyujitai_variants(&mut candidates);
         }
 
+        // 単語登録 (ユーザー辞書) は Layer0 頻度にも勝って常に 1 位にする (登録語=1位)。
+        // 上の USER_DICT_BOOST (固定値) だけだと「何度も確定したかな」に負けるため、
+        // 他候補の最大を見て確実に上へ固定する。登録が無ければ無変化。segmented と同方式。
+        let user_surfaces: Vec<String> = self
+            .dictionary
+            .user_dictionary()
+            .lookup(reading)
+            .into_iter()
+            .map(|c| c.surface)
+            .collect();
+        pin_user_dict_top(candidates.all_mut(), &user_surfaces);
+
         // スコア順にソート
         candidates.sort_by_score();
 
@@ -802,6 +883,11 @@ impl ConversionEngine {
         // libakaza の既定順が永遠に勝っていた (2026-11「砲→方 / 用→様 が勝てない」)。
         // 観察ログ opt-in に依存しない常時 ON 経路なので、未オプトインでも「直したら次回勝つ」。
         apply_segment_frequency(&mut segmented, &self.learning);
+        // 単語登録 (ユーザー辞書): **文節ごとに** 登録語を注入して最優先にする。
+        // flat の convert() は辞書 lookup で source=User 候補に USER_DICT_BOOST を足して
+        // 1 位にするが、convert_segmented は未適用だったため「け→家 を登録しても文中では
+        // 出ない」バグがあった (2026-11 ユーザー報告)。Layer0 の後に置き、登録語を最優先に。
+        apply_segment_user_dict(&mut segmented, &self.dictionary);
         // 旧字体モード: 各文節の候補に旧字体版を追加 (OFF 既定なら無変化)。
         if self.kyujitai_mode {
             for seg in &mut segmented.segments {
@@ -1487,6 +1573,101 @@ mod tests {
         assert!(
             !segmented.corrections_applied,
             "★ 学習が無ければ corrections_applied は立たない"
+        );
+    }
+
+    /// ★ 単語登録 (ユーザー辞書) は **文中 (segmented)** でも最優先で出る (2026-11 け→家 バグ)。
+    /// libakaza の文節候補に無い登録語を注入し、USER_DICT_BOOST で 1 位にする。
+    #[cfg(feature = "akaza")]
+    #[test]
+    fn segment_user_dict_injects_and_ranks_first() {
+        use crate::conversion::{Segment, SegmentedConversion};
+        use crate::dictionary::{DictionaryManager, UserEntry};
+
+        let mut dict = DictionaryManager::new().unwrap();
+        dict.user_dictionary_mut()
+            .add(UserEntry::new("家", "け"))
+            .unwrap();
+
+        let cand = |s: &str, r: &str, score: i32| {
+            Candidate::new(s, r)
+                .with_score(score)
+                .with_source(CandidateSource::System)
+        };
+        // libakaza の「け」文節候補に 家 は無い (毛/け のみ) ケース。
+        let mut segmented = SegmentedConversion::new(vec![Segment::new(
+            "け",
+            vec![cand("毛", "け", 99_900), cand("け", "け", -90)],
+        )]);
+
+        apply_segment_user_dict(&mut segmented, &dict);
+
+        assert_eq!(
+            segmented.segments[0].surface(),
+            Some("家"),
+            "★ 登録語 家 を注入して 1 位 (文中でも効く)"
+        );
+    }
+
+    /// ★★ 回帰ガード (2026-11-15、け→家): Layer0 頻度は確定回数で上限なく伸びる
+    /// (`200_000 + count*50`) ので、固定ブースト (USER_DICT_BOOST+base=200_200) だけだと
+    /// 「5 回確定したかな け (200_250)」に登録語 家 が負けていた (ユーザー報告「登録したのに
+    /// 文中で け が 1 位」)。相対持ち上げ (他候補の最大+1) で頻度に依らず登録語を 1 位にする。
+    #[cfg(feature = "akaza")]
+    #[test]
+    fn segment_user_dict_beats_layer0_frequency() {
+        use crate::conversion::{Segment, SegmentedConversion};
+        use crate::dictionary::{DictionaryManager, UserEntry};
+
+        let mut dict = DictionaryManager::new().unwrap();
+        dict.user_dictionary_mut()
+            .add(UserEntry::new("家", "け"))
+            .unwrap();
+
+        let cand = |s: &str, r: &str, score: i32| {
+            Candidate::new(s, r)
+                .with_score(score)
+                .with_source(CandidateSource::Learned)
+        };
+        // け が Layer0 頻度で 200_250 (×5 相当) = USER_DICT base+boost(200_200) より上。
+        let mut segmented = SegmentedConversion::new(vec![Segment::new(
+            "け",
+            vec![cand("け", "け", 200_250), cand("毛", "け", 200_037)],
+        )]);
+
+        apply_segment_user_dict(&mut segmented, &dict);
+
+        assert_eq!(
+            segmented.segments[0].surface(),
+            Some("家"),
+            "★ 登録語 家 は Layer0 頻度 (け 200_250) にも勝って 1 位"
+        );
+    }
+
+    /// ★ 登録が無い読みでは無変化 (回帰ゼロ)。
+    #[cfg(feature = "akaza")]
+    #[test]
+    fn segment_user_dict_noop_without_entry() {
+        use crate::conversion::{Segment, SegmentedConversion};
+        use crate::dictionary::DictionaryManager;
+
+        let dict = DictionaryManager::new().unwrap();
+        let cand = |s: &str, r: &str, score: i32| {
+            Candidate::new(s, r)
+                .with_score(score)
+                .with_source(CandidateSource::System)
+        };
+        let mut segmented = SegmentedConversion::new(vec![Segment::new(
+            "け",
+            vec![cand("毛", "け", 99_900), cand("け", "け", -90)],
+        )]);
+
+        apply_segment_user_dict(&mut segmented, &dict);
+
+        assert_eq!(
+            segmented.segments[0].surface(),
+            Some("毛"),
+            "★ 登録なしは既定 毛 のまま"
         );
     }
 
