@@ -90,6 +90,9 @@ enum Commands {
         /// 提案を corrections.toml にマージして保存する (プロバイダ指定時のみ有効)
         #[arg(long)]
         apply: bool,
+        /// 過去の dreaming 実行履歴を表示して終了する (他の引数は無視)
+        #[arg(long)]
+        history: bool,
     },
     /// BYOK 設定: API キーを Keychain に保存/確認/削除する
     Config {
@@ -238,7 +241,14 @@ fn main() -> Result<()> {
             provider,
             model,
             apply,
-        } => cmd_dream(max_readings, provider.as_deref(), model.as_deref(), apply),
+            history,
+        } => cmd_dream(
+            max_readings,
+            provider.as_deref(),
+            model.as_deref(),
+            apply,
+            history,
+        ),
         Commands::Config { action } => cmd_config(action),
         Commands::Models { provider, base_url } => cmd_models(&provider, base_url.as_deref()),
         Commands::AiTest {
@@ -1093,8 +1103,21 @@ fn cmd_dream(
     provider: Option<&str>,
     model: Option<&str>,
     apply: bool,
+    history: bool,
 ) -> Result<()> {
     let dir = nuko_data_dir()?;
+
+    // --history: 過去の実行履歴を表示して終了 (推論しない)。
+    if history {
+        let runs = nuko_core::learning::dream_history::read_all(&dir);
+        print!(
+            "{}",
+            nuko_core::learning::dream_history::format_text(&runs, 50)
+        );
+        println!();
+        return Ok(());
+    }
+
     let obs = ObservationLog::new(true, dir.join("observations.jsonl"));
     let events = obs.read_all().unwrap_or_default();
     let store = CorrectionStore::load(dir.join("corrections.toml")).unwrap_or_default();
@@ -1114,6 +1137,12 @@ fn cmd_dream(
     // enabled かつ provider 設定済みなら実行、でなければ dry-run。
     // → IME メニューは引数なし `nuko dream --apply` で ai.toml 駆動の実 dream ができる。
     let cfg = crate::openrouter::DreamConfig::load(dir.join("ai.toml")).unwrap_or_default();
+    // 履歴記録用: 実際に使われるモデルを ai.toml と同じ規則で解決する
+    // (--model 未指定なら ai.toml の model。build_dream_provider と同一ロジック)。
+    let resolved_model = model
+        .map(String::from)
+        .or_else(|| cfg.model.clone())
+        .unwrap_or_default();
     let effective_provider: Option<String> = provider
         .map(String::from)
         .or_else(|| cfg.enabled.then(|| cfg.provider.clone()).flatten());
@@ -1161,7 +1190,8 @@ fn cmd_dream(
         );
     }
 
-    if apply && !report.added.is_empty() {
+    let saved = apply && !report.added.is_empty();
+    if saved {
         merged.save(dir.join("corrections.toml"))?;
         println!(
             "{} corrections.toml に保存しました。NukoIME 再起動で反映されます。",
@@ -1173,6 +1203,30 @@ fn cmd_dream(
             "注:".dimmed()
         );
     }
+
+    // dreaming 実行履歴を追記 (透明性: いつ・何がどう反映されたか。手動実行時のみ積まれる)。
+    nuko_core::learning::dream_history::record(
+        &dir,
+        &nuko_core::learning::dream_history::DreamRun {
+            time: nuko_core::ai_log::now_iso(),
+            provider: provider.name().to_string(),
+            model: resolved_model.clone(),
+            observations_total: events.len(),
+            readings_summarized: digest.readings.len(),
+            proposed: proposal.proposals.len(),
+            added: report
+                .added
+                .iter()
+                .map(|p| nuko_core::learning::dream_history::DreamAdded {
+                    reading: p.reading.clone(),
+                    prefer: p.prefer.clone(),
+                })
+                .collect(),
+            skipped_identity: report.skipped_identity.len(),
+            skipped_existing: report.skipped_existing.len(),
+            applied: saved,
+        },
+    );
     Ok(())
 }
 

@@ -131,6 +131,17 @@ pub fn ai_log_text() -> String {
     s
 }
 
+/// dreaming (Layer 3) の実行履歴を人間可読テキストにまとめる (パネル表示用)。
+///
+/// メニュー「dreaming の履歴を見る」用: いつ・何がどう学習へ反映されたかを新しい順に返す。
+pub fn dreaming_history_text() -> String {
+    let Some(dir) = nuko_app_support_dir() else {
+        return nuko_core::learning::dream_history::format_text(&[], 50);
+    };
+    let runs = nuko_core::learning::dream_history::read_all(&dir);
+    nuko_core::learning::dream_history::format_text(&runs, 50)
+}
+
 /// メニューのヘッダに出す 1 行サマリ (例: "ぬこIME ・ 学習 42 選好 ・ 観察 1200 件（ON）")。
 ///
 /// `learning_status_text` と同じデータ源を参照するが、メニュー項目タイトル用に 1 行へ圧縮する。

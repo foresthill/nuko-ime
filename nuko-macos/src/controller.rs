@@ -392,6 +392,12 @@ define_class!(
             self._present_learning(&crate::state::ai_log_text());
         }
 
+        /// メニュー項目「🧠 dreaming の履歴を見る…」のアクション。
+        #[unsafe(method(nukoShowDreamHistory:))]
+        fn nuko_show_dream_history(&self, _sender: Option<&AnyObject>) {
+            self._present_learning(&crate::state::dreaming_history_text());
+        }
+
         /// メニュー項目「単語登録:…」のアクション。
         #[unsafe(method(nukoRegisterWord:))]
         fn nuko_register_word(&self, _sender: Option<&AnyObject>) {
@@ -492,6 +498,7 @@ impl NukoInputController {
         let dream_ai = NSString::from_str("🤖 AIで学習を研ぎ直す（BYOK）");
         let settings = NSString::from_str("⚙️ BYOK 設定…（APIキー/モデル）");
         let ai_log = NSString::from_str("📊 AI ログを見る…（コスト/送受信）");
+        let dream_log = NSString::from_str("🧠 dreaming の履歴を見る…（学習の変化）");
         unsafe {
             // 入力中の読みがあるときだけ「📝「<読み>」を単語登録…」を先頭に出す。
             if let Some(ref t) = comp_reg_ns {
@@ -538,6 +545,12 @@ impl NukoInputController {
             let _ = menu.addItemWithTitle_action_keyEquivalent(
                 &ai_log,
                 Some(sel!(nukoShowAiLog:)),
+                &empty,
+            );
+            // dreaming 実行履歴 (いつ・何がどう学習へ反映されたか。#183 透明性)。
+            let _ = menu.addItemWithTitle_action_keyEquivalent(
+                &dream_log,
+                Some(sel!(nukoShowDreamHistory:)),
                 &empty,
             );
         }
