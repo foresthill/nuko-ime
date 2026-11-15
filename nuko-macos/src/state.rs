@@ -1568,20 +1568,23 @@ pub fn user_dict_entries() -> Vec<(String, String)> {
     })
 }
 
-/// 設定ウィンドウの「この学習を忘れる」: 誤学習を観察ログから除去して即反映する。
+/// マイ辞書ウィンドウの「この学習を忘れる」: 誤学習を観察ログから除去して即反映する。
 ///
 /// 読み欄は必須、表層欄は任意 (空なら「その読みの学習を全部忘れる」/ 入れると
 /// 「その読み→その表層」だけ忘れる)。観察ログを書き直し → 訂正選好を再抽出して保存 →
 /// 稼働エンジンへ再読込するので、CLI `learn forget` と違い **再起動不要で即反映**。
 /// 決定論的な除去なので再学習でも戻らない (durable)。
+///
+/// マイ辞書の「削除」(自分が登録した語を消す) とは別物: こちらは IME が勝手に学習した
+/// 誤変換を戻す。BYOK 設定窓から移設 (#103 / 2026-11 ユーザー要望)。
 pub fn forget_learning_from_window() {
-    SETTINGS_WINDOW.with(|cell| {
+    DICT_WINDOW.with(|cell| {
         let w = cell.borrow();
         let Some(win) = w.as_ref() else {
             return;
         };
-        let reading = win.reading_value();
-        let surface = win.surface_value();
+        let reading = win.forget_reading_value();
+        let surface = win.forget_surface_value();
         let reading = reading.trim();
         let surface = surface.trim();
         if reading.is_empty() {
@@ -1624,7 +1627,7 @@ pub fn forget_learning_from_window() {
         let _ = store.save(dir.join("corrections.toml"));
         with_engine_mut(|engine| engine.set_corrections(store));
 
-        win.clear_dict_fields();
+        win.clear_forget_fields();
         win.set_status(&format!(
             "✅ 読み「{reading}」{}の学習を忘れました（観察 {removed} 件除去・即反映）",
             surface_opt.map(|s| format!("→「{s}」")).unwrap_or_default()
