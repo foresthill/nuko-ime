@@ -3,6 +3,7 @@
 //! ユーザーの入力パターンを学習し、変換精度を向上させます。
 
 pub mod correction;
+pub mod dream_history;
 pub mod dreaming;
 mod frequency;
 mod manager;
