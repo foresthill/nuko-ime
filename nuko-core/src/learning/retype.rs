@@ -94,7 +94,8 @@ impl RetypeStore {
     ///
     /// ゲート (いずれかに該当すれば記録しない → `false`):
     /// - 読み・誤・正のどれかが空
-    /// - 正 == 読み (かな素通りへの訂正は選好にしない。恒等は [`extract_corrections`] も弾く)
+    /// - 正 == 読み (かな素通りへの訂正は選好にしない。恒等は
+    ///   [`extract_corrections`](super::extract_corrections) も弾く)
     /// - 正 == 誤 (実際の打ち直しでない)
     ///
     /// **supersede**: 同じ読みで「以前 prefer にしていた表層」を今回 avoid (= 誤) として
