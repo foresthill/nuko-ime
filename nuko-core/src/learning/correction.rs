@@ -149,6 +149,19 @@ impl CorrectionStore {
         out
     }
 
+    /// 読みキーで選好を upsert する(打ち直し訂正を既存 corrections へ重ねる用)。
+    ///
+    /// 同じ `reading` の既存選好は**すべて置き換える** (最新の明示訂正が勝つ)。
+    /// 追加後は reading 昇順 (同点は prefer 昇順) で安定させ、`corrections.toml` を
+    /// churn-free に保つ。観察ログ opt-in が OFF のユーザーで、手編集/既存の
+    /// corrections.toml を尊重しつつ打ち直し分だけを畳み込むために使う。
+    pub fn upsert(&mut self, pref: Preference) {
+        self.preferences.retain(|p| p.reading != pref.reading);
+        self.preferences.push(pref);
+        self.preferences
+            .sort_by(|a, b| a.reading.cmp(&b.reading).then(a.prefer.cmp(&b.prefer)));
+    }
+
     /// 選好が無いか。
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -538,5 +551,38 @@ mod tests {
     fn load_missing_returns_empty() {
         let store = CorrectionStore::load("/nonexistent/nuko/corrections.toml").unwrap();
         assert!(store.is_empty());
+    }
+
+    /// ★ upsert: 既存選好は保ちつつ、同じ読みは置き換える (打ち直しの畳み込み用)。
+    #[test]
+    fn upsert_replaces_same_reading_keeps_others() {
+        let mut store =
+            extract_corrections(&[commit("きしゃ", "記者"), commit("きしゃ", "記者")], 2);
+        assert_eq!(store.len(), 1);
+        // 別読みを upsert → 両方残る。
+        store.upsert(Preference {
+            reading: "いしみね".into(),
+            prefer: "石峰".into(),
+            weight: 5,
+            seen: 0,
+        });
+        assert_eq!(store.len(), 2);
+        // 同じ読みを別表層で upsert → 置き換わる (件数不変・最新が勝つ)。
+        store.upsert(Preference {
+            reading: "いしみね".into(),
+            prefer: "石峯".into(),
+            weight: 5,
+            seen: 0,
+        });
+        assert_eq!(store.len(), 2);
+        assert_eq!(store.preferred("いしみね").map(|(s, _)| s), Some("石峯"));
+        assert_eq!(store.preferred("きしゃ").map(|(s, _)| s), Some("記者"));
+        // reading 昇順で安定 (いしみね < きしゃ)。
+        let readings: Vec<&str> = store
+            .preferences
+            .iter()
+            .map(|p| p.reading.as_str())
+            .collect();
+        assert_eq!(readings, vec!["いしみね", "きしゃ"]);
     }
 }

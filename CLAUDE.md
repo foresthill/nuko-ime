@@ -255,6 +255,15 @@ PR #40 で `convert_k_best(reading, None, k=9)` に切替。各 `KBestPath` が�
 - **検証手順の定石**: ① 誤変換を見たら `nuko convert <読み> --libakaza --personal --explain`（#183、`--release` 必須）で内訳を撮る → ② 失敗ケースをユニットテスト化（旧 `add` で落ちることを実測）→ ③ `max` 等の修正後に before/after を再度 `--explain` で実測。推測で辞書/スコアを弄らない。
 - 残件（③ 降格 / 文脈）: `そこ(×28 底 > ×27 そこ)` は count どおりで `max` では覆らない。降格機構 or `context_hash` が要る。詳細と設計思想は [`docs/LEARNING_ARCHITECTURE.md` §1.6（スコア透明化）/ §個人重みの合成](docs/LEARNING_ARCHITECTURE.md) を正とする。
 
+### 打ち直し訂正は「常時ON」で捉える（観察ログ opt-in と独立） (retype.json / PR #211)
+
+「誤変換を同じ読みで別の表層へ打ち直す」= 最も痛い瞬間＝最大の学習機会（森岡さん 2026-11-15）。**検知** `note_commit_detect_correction`（[state.rs](nuko-macos/src/state.rs)）は以前から常時動いていたが、**記録先が観察ログ（Layer 1, opt-in 既定 OFF）だけ**だったので、既定ユーザーでは打ち直しを丸ごと捨てていた（=「把捉されてない感」の正体）。
+
+- **根治**: 常時ONの `RetypeStore`（`retype.json`、`phrase.rs` と同クラス＝ローカル・非共有）に `(読み, 誤, 正)` を溜める（[retype.rs](nuko-core/src/learning/retype.rs)）。`as_correction_events()`→既存 `extract_corrections`→`CorrectionStore` へ畳み込む。**新しい変換層は足さない**（flat `convert` / segmented `apply_segment_corrections` は既に CorrectionStore を消費。#178/#184 の両経路再配線トラップを回避）。
+- **降格は決定的**: `CORRECTION_BOOST=300_000 > Layer0 200_000`。実測（`--release` 実機モデル・temp HOME）: `いしみね` が baseline 石嶺→打ち直し後 **石峰 score=394825** で1位（石嶺 −1486 / 石峯 −5128）。これが残件③「打ち直し＝間違い降格の決定的機構」の解。
+- **配線は state.rs/CLI のみ（controller.rs = IMK 境界は不触）**: 記録は controller が既に呼ぶ `note_commit_detect_correction` の中、反映は `auto_relearn_after_commit`（観察 OFF でも打ち直しがあれば既存 corrections を尊重して upsert）/ `setup_corrections`（起動時畳み込み）/ `relearn_now`（観察∪打ち直し）。**忘れる**（設定窓＋`nuko learn forget`）も retype.json を purge（でないと次の確定で復活）。
+- 設計思想は [`docs/LEARNING_ARCHITECTURE.md`](docs/LEARNING_ARCHITECTURE.md)（個人重みの合成）を正とする。残: `×N`（打ち直し回数）をビューアに出す v2 / 文中の複数文節打ち直し（whole-reading 選好の既存制約）。
+
 ### 設計思想: 学習4層 ↔ 心の構造（意識/個人的無意識/集合的無意識/超意識）
 
 個人学習は**共有しない**、集合知は**有益な分だけアップデートで配布**、AI(dreaming)は**意図推論**——この振り分けは心の構造のメタファで整理できる。長期の設計思想は [`docs/LEARNING_ARCHITECTURE.md` §1.5](docs/LEARNING_ARCHITECTURE.md)（長期記憶）。このCLAUDE.md（短期記憶）には運用規約だけ置き、思想は docs 側を正とする。

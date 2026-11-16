@@ -11,7 +11,7 @@ use colored::*;
 use nuko_core::learning::dreaming::{
     build_prompt, digest_observations, merge_proposals, parse_proposal, DreamProvider, MockProvider,
 };
-use nuko_core::learning::{extract_corrections, CorrectionStore, ObservationLog};
+use nuko_core::learning::{extract_corrections, CorrectionStore, ObservationLog, RetypeStore};
 use nuko_core::prelude::*;
 use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
@@ -645,8 +645,17 @@ fn learn_forget(dir: &Path, reading: &str, surface: Option<&str>) -> Result<()> 
 
     // 読み一致 (surface 指定時はさらに表層/訂正後一致) を除去 (GUI と共用の純粋関数)。
     let kept = filter_out_reading(&events, reading, surface);
+    let obs_removed = before - kept.len();
 
-    let removed = before - kept.len();
+    // 打ち直しストア (retype.json, 常時ON) からも忘れる (opt-in OFF ユーザーの打ち直しは
+    // ここにしか無い)。IME 本体の設定窓「この学習を忘れる」と同じ挙動。
+    let mut retype = RetypeStore::load(dir.join("retype.json"))?;
+    let retype_removed = retype.forget(reading, surface);
+    if retype_removed > 0 {
+        retype.save(dir.join("retype.json"))?;
+    }
+
+    let removed = obs_removed + retype_removed;
     if removed == 0 {
         println!(
             "{} 読み「{}」{}の学習は見つかりませんでした。",
@@ -657,17 +666,22 @@ fn learn_forget(dir: &Path, reading: &str, surface: Option<&str>) -> Result<()> 
         return Ok(());
     }
 
-    // 観察ログを書き直し → 訂正選好を再抽出して保存 (durable)。
-    obs.rewrite(&kept)?;
-    let store = extract_corrections(&kept, 2);
+    // 観察ログを書き直し (削れた時だけ) → 残った観察 ∪ 残った打ち直し から再抽出・保存 (durable)。
+    if obs_removed > 0 {
+        obs.rewrite(&kept)?;
+    }
+    let mut all = kept;
+    all.extend(retype.as_correction_events());
+    let store = extract_corrections(&all, 2);
     store.save(dir.join("corrections.toml"))?;
 
     println!(
-        "{} 読み「{}」{}の学習を忘れました (観察 {} 件除去、選好 {} 件に再構築)。",
+        "{} 読み「{}」{}の学習を忘れました (観察 {} 件・打ち直し {} 件除去、選好 {} 件に再構築)。",
         "✅".green(),
         reading.yellow(),
         surface.map(|s| format!("→「{s}」")).unwrap_or_default(),
-        removed.to_string().yellow(),
+        obs_removed.to_string().yellow(),
+        retype_removed.to_string().yellow(),
         store.len().to_string().yellow()
     );
     println!(

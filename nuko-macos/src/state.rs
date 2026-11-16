@@ -1,7 +1,7 @@
 use nuko_core::conversion::{CandidateList, ConversionContext, SegmentedConversion};
 use nuko_core::learning::{
-    extract_corrections, prune_for_cap, should_record_phrase, CorrectionStore, ObservationLog,
-    PhraseStore, OBS_CAP_HIGH_WATERMARK, OBS_CAP_KEEP_RECENT_COMMITS,
+    extract_corrections, prune_for_cap, should_record_phrase, CorrectionStore, ObservationEvent,
+    ObservationLog, PhraseStore, RetypeStore, OBS_CAP_HIGH_WATERMARK, OBS_CAP_KEEP_RECENT_COMMITS,
 };
 use nuko_core::prelude::*;
 use objc2::MainThreadMarker;
@@ -350,6 +350,77 @@ pub fn note_phrase_commit(reading: &str, surface: &str, segment_count: usize) {
     });
 }
 
+// --- 打ち直し訂正ストア (retype.json) ---
+//
+// フレーズ予測と同じく **常時ON** (オプトイン不要)。誤変換を同じ読みで別の表層へ
+// 打ち直したとき (= 最大の学習機会) を `retype.json` に溜め、変換の訂正選好
+// (CorrectionStore) へ畳み込む。観察ログ (Layer 1, opt-in 既定 OFF) とは独立なので、
+// **既定ユーザーでも「打ち直した語は次から正が勝つ」**。個人データ・端末内のみ・非共有。
+// 詳細: nuko_core::learning::retype。
+thread_local! {
+    static RETYPE_STORE: RefCell<RetypeStore> = RefCell::new(build_retype_store());
+}
+
+fn build_retype_store() -> RetypeStore {
+    let Some(dir) = nuko_app_support_dir() else {
+        return RetypeStore::new();
+    };
+    match RetypeStore::load(dir.join("retype.json")) {
+        Ok(store) => {
+            tracing::info!(
+                count = store.len(),
+                "打ち直し訂正ストア (retype.json) を load"
+            );
+            store
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "retype.json load 失敗、空で継続");
+            RetypeStore::new()
+        }
+    }
+}
+
+/// 打ち直し訂正を 1 件記録する (常時ON・オプトイン不要)。
+///
+/// `note_commit_detect_correction` が打ち直しを検知したときに呼ぶ。記録できたら
+/// `retype.json` へ即保存する。`avoid`(誤)/`prefer`(正) が空・恒等などは
+/// [`RetypeStore::record`] のゲートで弾く。
+pub fn note_retype_correction(reading: &str, avoid: &str, prefer: &str) {
+    RETYPE_STORE.with(|cell| {
+        let mut store = cell.borrow_mut();
+        if !store.record(reading, avoid, prefer) {
+            return;
+        }
+        if let Some(dir) = nuko_app_support_dir() {
+            if let Err(e) = store.save(dir.join("retype.json")) {
+                tracing::warn!(error = %e, "retype.json save 失敗 (in-memory のみ保持)");
+            }
+        }
+    });
+}
+
+/// 打ち直しストアを `Correction` イベント列へ変換する (extract_corrections に食わせる用)。
+fn retype_correction_events() -> Vec<ObservationEvent> {
+    RETYPE_STORE.with(|cell| cell.borrow().as_correction_events())
+}
+
+/// 打ち直しストアから特定の読み (+任意で正の表層) を忘れる。除去件数を返す。
+///
+/// 観察ログ側の `filter_out_reading` と対。忘れる操作 (設定窓 / `nuko learn forget`) で
+/// 打ち直し学習も確実に消す (でないと次の確定で corrections へ復活してしまう)。
+fn forget_retype(reading: &str, surface: Option<&str>) -> usize {
+    RETYPE_STORE.with(|cell| {
+        let mut store = cell.borrow_mut();
+        let removed = store.forget(reading, surface);
+        if removed > 0 {
+            if let Some(dir) = nuko_app_support_dir() {
+                let _ = store.save(dir.join("retype.json"));
+            }
+        }
+        removed
+    })
+}
+
 // 直近の確定を **最大 2 件** in-memory で保持する (新しいものが末尾)。
 // 完全に揮発性 (プロセス内のみ・永続化しない)。
 // - ② 打ち直し検知: 直前 (末尾) と同じ読み・別表層なら訂正。
@@ -370,7 +441,7 @@ pub fn note_commit_detect_correction(
     surface: &str,
     window: std::time::Duration,
 ) -> Option<String> {
-    RECENT_COMMITS.with(|cell| {
+    let correction = RECENT_COMMITS.with(|cell| {
         let mut v = cell.borrow_mut();
         let correction = match v.last() {
             Some((r, s, t)) if r == reading && s != surface && t.elapsed() <= window => {
@@ -385,7 +456,15 @@ pub fn note_commit_detect_correction(
             v.drain(0..start);
         }
         correction
-    })
+    });
+
+    // 打ち直しを検知したら、観察ログ opt-in と**独立に**常時ON で記録する
+    // (RECENT_COMMITS の借用外で呼ぶ: 別の thread_local なので安全だが明示的に分ける)。
+    // = 「最も痛い瞬間＝最大の学習機会」を既定ユーザーでも取りこぼさない。
+    if let Some(prev_surface) = &correction {
+        note_retype_correction(reading, prev_surface, surface);
+    }
+    correction
 }
 
 /// 単語登録の候補 `(読み, 表層)` を返す。
@@ -426,40 +505,61 @@ pub fn registration_candidate() -> Option<(String, String)> {
 /// **オプトイン無効 (観察ログ無効) のときは何もしない** — 観察が空なので relearn
 /// すると既存 corrections を消してしまうため。決定論なので churn は生まない。
 pub fn auto_relearn_after_commit() {
-    // 観察ログが有効なときだけ (無効なら既存 corrections を壊さない)。
-    if !with_observation(ObservationLog::is_enabled) {
+    let obs_enabled = with_observation(ObservationLog::is_enabled);
+    let retype_events = retype_correction_events();
+    // 観察ログ無効 **かつ** 打ち直しも無いなら何もしない (既存 corrections を壊さない)。
+    // = 従来の early-return を保ちつつ、打ち直しがあるときだけ opt-in 無しでも反映する。
+    if !obs_enabled && retype_events.is_empty() {
         return;
     }
     let Some(dir) = nuko_app_support_dir() else {
         return;
     };
-    let log = ObservationLog::new(true, dir.join("observations.jsonl"));
-    let Ok(events) = log.read_all() else {
-        return;
-    };
-    let store = extract_corrections(&events, MIN_SEEN);
-    let _ = store.save(dir.join("corrections.toml"));
+    let corrections_path = dir.join("corrections.toml");
 
-    // 観察ログが肥大化したら「学習を壊さない範囲で」間引く (毎確定で全件読むコストと
-    // ディスク増加を抑える)。correction 全件 + 現在の選好読みの commit 全件 + 直近の
-    // 非選好 commit を残す。間引き後に再抽出した corrections が元と完全一致する時だけ
-    // 書き戻す = 学習は絶対に変わらない。縮みが小さい時は書き直さない (thrash 防止)。
-    if events.len() > OBS_CAP_HIGH_WATERMARK {
-        const MIN_SHRINK: usize = 2_000;
-        let keep_readings: std::collections::BTreeSet<String> = store
-            .preferences
-            .iter()
-            .map(|p| p.reading.clone())
-            .collect();
-        let pruned = prune_for_cap(&events, &keep_readings, OBS_CAP_KEEP_RECENT_COMMITS);
-        if pruned.len() + MIN_SHRINK <= events.len()
-            && extract_corrections(&pruned, MIN_SEEN) == store
-        {
-            let _ = log.rewrite(&pruned);
+    if obs_enabled {
+        // 観察ログ ∪ 打ち直し から決定論的に再生成 (従来挙動に打ち直しを畳み込む)。
+        let log = ObservationLog::new(true, dir.join("observations.jsonl"));
+        let Ok(events) = log.read_all() else {
+            return;
+        };
+        let mut all = events.clone();
+        all.extend(retype_events.iter().cloned());
+        let store = extract_corrections(&all, MIN_SEEN);
+        let _ = store.save(&corrections_path);
+
+        // 観察ログが肥大化したら「学習を壊さない範囲で」間引く。correction 全件 + 現在の
+        // 選好読みの commit 全件 + 直近の非選好 commit を残す。間引き後に (打ち直しも
+        // 畳み込んで) 再抽出した corrections が元と完全一致する時だけ書き戻す = 学習は
+        // 絶対に変わらない。縮みが小さい時は書き直さない (thrash 防止)。
+        if events.len() > OBS_CAP_HIGH_WATERMARK {
+            const MIN_SHRINK: usize = 2_000;
+            let keep_readings: std::collections::BTreeSet<String> = store
+                .preferences
+                .iter()
+                .map(|p| p.reading.clone())
+                .collect();
+            let pruned = prune_for_cap(&events, &keep_readings, OBS_CAP_KEEP_RECENT_COMMITS);
+            let mut pruned_all = pruned.clone();
+            pruned_all.extend(retype_events.iter().cloned());
+            if pruned.len() + MIN_SHRINK <= events.len()
+                && extract_corrections(&pruned_all, MIN_SEEN) == store
+            {
+                let _ = log.rewrite(&pruned);
+            }
         }
-    }
 
-    with_engine_mut(|engine| engine.set_corrections(store));
+        with_engine_mut(|engine| engine.set_corrections(store));
+    } else {
+        // 観察 OFF・打ち直しあり: 既存 corrections.toml (手編集/RELEARN結果) を尊重しつつ、
+        // 打ち直し分だけ upsert する (手編集を壊さない)。
+        let mut store = CorrectionStore::load(&corrections_path).unwrap_or_default();
+        for p in extract_corrections(&retype_events, MIN_SEEN).preferences {
+            store.upsert(p);
+        }
+        let _ = store.save(&corrections_path);
+        with_engine_mut(|engine| engine.set_corrections(store));
+    }
 }
 
 /// 指定の読みに対する単語登録候補の表層を返す (候補ウィンドウの Tab ヒント/登録用)。
@@ -674,6 +774,21 @@ fn setup_corrections(engine: &mut ConversionEngine) {
     if let Err(e) = engine.load_corrections(&corrections_path) {
         tracing::warn!(error = %e, "corrections.toml load 失敗 (選好なしで継続)");
     }
+    // 打ち直し訂正 (retype.json, 常時ON) を既存 corrections に畳み込む。観察 opt-in の
+    // 有無に依らず「打ち直した語は正が勝つ」を起動時から効かせる。既存 corrections.toml
+    // (手編集/RELEARN結果) は尊重し、打ち直し分だけ upsert する。
+    let retype_events = retype_correction_events();
+    if !retype_events.is_empty() {
+        let mut store = CorrectionStore::load(&corrections_path).unwrap_or_default();
+        for p in extract_corrections(&retype_events, MIN_SEEN).preferences {
+            store.upsert(p);
+        }
+        tracing::info!(
+            count = store.len(),
+            "打ち直し訂正を corrections へ畳み込み (起動時)"
+        );
+        engine.set_corrections(store);
+    }
     // 文節位置の学習 (ユーザーが Shift で切り直した切り方) を load する。
     if let Err(e) = engine.load_segmentations(dir.join("segmentations.toml")) {
         tracing::warn!(error = %e, "segmentations.toml load 失敗 (文節学習なしで継続)");
@@ -713,7 +828,10 @@ pub fn relearn_now() -> nuko_core::error::Result<usize> {
     let corrections_path = dir.join("corrections.toml");
     let log = ObservationLog::new(true, dir.join("observations.jsonl"));
     let events = log.read_all()?;
-    let store = extract_corrections(&events, MIN_SEEN);
+    // 観察ログ ∪ 打ち直し (retype.json, 常時ON) から訂正選好を再生成する。
+    let mut all = events;
+    all.extend(retype_correction_events());
+    let store = extract_corrections(&all, MIN_SEEN);
     let count = store.len();
     store.save(&corrections_path)?;
     with_engine_mut(|engine| engine.load_corrections(&corrections_path))?;
@@ -1621,7 +1739,10 @@ pub fn forget_learning_from_window() {
         };
         let before = events.len();
         let kept = nuko_core::learning::filter_out_reading(&events, reading, surface_opt);
-        let removed = before - kept.len();
+        let obs_removed = before - kept.len();
+        // 打ち直しストア (retype.json, opt-in OFF ユーザーの打ち直しはここにしか無い) も忘れる。
+        let retype_removed = forget_retype(reading, surface_opt);
+        let removed = obs_removed + retype_removed;
         if removed == 0 {
             win.set_status(&format!(
                 "… 読み「{reading}」{}の学習は見つかりませんでした",
@@ -1629,18 +1750,22 @@ pub fn forget_learning_from_window() {
             ));
             return;
         }
-        // 観察ログ書き直し → 訂正選好を再抽出して保存 → 稼働エンジンへ即反映。
-        if let Err(e) = log.rewrite(&kept) {
-            win.set_status(&format!("⚠️ 観察ログの書き直しに失敗: {e}"));
-            return;
+        // 観察ログ書き直し (削れた時だけ) → 残った観察 ∪ 残った打ち直し から再抽出 → 即反映。
+        if obs_removed > 0 {
+            if let Err(e) = log.rewrite(&kept) {
+                win.set_status(&format!("⚠️ 観察ログの書き直しに失敗: {e}"));
+                return;
+            }
         }
-        let store = extract_corrections(&kept, MIN_SEEN);
+        let mut all = kept;
+        all.extend(retype_correction_events());
+        let store = extract_corrections(&all, MIN_SEEN);
         let _ = store.save(dir.join("corrections.toml"));
         with_engine_mut(|engine| engine.set_corrections(store));
 
         win.clear_forget_fields();
         win.set_status(&format!(
-            "✅ 読み「{reading}」{}の学習を忘れました（観察 {removed} 件除去・即反映）",
+            "✅ 読み「{reading}」{}の学習を忘れました（観察 {obs_removed} 件・打ち直し {retype_removed} 件除去・即反映）",
             surface_opt.map(|s| format!("→「{s}」")).unwrap_or_default()
         ));
     });
