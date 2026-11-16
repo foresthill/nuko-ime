@@ -9,6 +9,7 @@ mod frequency;
 mod manager;
 pub mod observation;
 pub mod phrase;
+pub mod retype;
 pub mod segmentation;
 
 pub use correction::{extract_corrections, CorrectionStore, Preference};
@@ -23,4 +24,5 @@ pub use observation::{
     OBS_CAP_KEEP_RECENT_COMMITS,
 };
 pub use phrase::{should_record_phrase, PhraseEntry, PhraseStore, MIN_PHRASE_READING_CHARS};
+pub use retype::{RetypeEntry, RetypeStore};
 pub use segmentation::{ranges_from_segment_readings, SegmentationEntry, SegmentationStore};
