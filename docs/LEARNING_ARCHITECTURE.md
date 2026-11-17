@@ -297,10 +297,11 @@ flowchart TD
 - Layer 3 の diff 可視化 UI の置き場(メニューバー? 設定アプリ?)
 - persona/文体プロファイル(memory: BYOK+persona)を Layer 2/3 のどこに載せるか
 - macOS 以外への移植時のデータ可搬性
-- **③ 誤学習の降格**: count 拮抗時に間違い側を下げる決定的機構（count 上限／対数スケール／打ち直しでデクリメント）。`そこ(×27)` を `底(×28)` に勝たせたい等。過度な一般化で常用語を壊さない範囲で（→ over-generalization の教訓）
+- **③ 誤学習の降格**: count 拮抗時に間違い側を下げる決定的機構（count 上限／対数スケール／打ち直しでデクリメント）。`そこ(×27)` を `底(×28)` に勝たせたい等。過度な一般化で常用語を壊さない範囲で（→ over-generalization の教訓）。**打ち直しがある場合はこの降格を [打ち直し訂正メカニズム](RETYPE_CORRECTION.md) が担う**（誤を同読み・別表層で打ち直すと正が訂正 bias で決定的に 1 位。PR #211）。count 拮抗のうち「打ち直しが無い」ケースだけが残件。
 - **文脈学習**: `context_hash` を実際に埋める（前文節・後続語での選好切替）。現状どこも null
 
 ## 参照
+- 具体メカニズム: [`RETYPE_CORRECTION.md`](RETYPE_CORRECTION.md)（打ち直し訂正・検証手順つき）
 - 倫理・戦略: [`AI_AGENT_FOUNDATION.md`](AI_AGENT_FOUNDATION.md)
 - フレームワーク: [`FUTURE_FEATURES.md` §8](FUTURE_FEATURES.md)、訂正イベント学習 §5.4
 - 現行実装: `nuko-core/src/learning/`(`LearningManager` / `FrequencyEntry`)
