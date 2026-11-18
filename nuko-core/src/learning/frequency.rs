@@ -167,6 +167,27 @@ mod tests {
         );
     }
 
+    /// ★ 公式の pin（実行可能ドキュメント・コメント乖離の防止）。
+    ///
+    /// `score() = 200_000 + count*10 − 減衰 + boost`。**乗数や基準値を変えると
+    /// ここが赤くなる**ので、コメント/ドキュメントに書いた数値が実装と食い違ったまま
+    /// 放置されない (2026-11、engine.rs のコメントが `count*50` と誤記されていた再発防止。
+    /// 詳細は docs/CODE_COMMENT_DISCIPLINE.md)。
+    #[test]
+    fn score_formula_is_pinned_count_times_10() {
+        // 生成直後: count=1, boost=0, last_used=now なので減衰 0。
+        let mut e = FrequencyEntry::new("ねこ", "ねこ");
+        assert_eq!(e.score(), 200_010, "count=1 → 200_000 + 1*10");
+        for _ in 0..4 {
+            e.increment(); // increment は last_used も now に更新するので減衰は 0 のまま
+        }
+        assert_eq!(
+            e.score(),
+            200_050,
+            "count=5 → 200_000 + 5*10 (= 200_050)。×50 なら 200_250 になるが、それは誤り"
+        );
+    }
+
     #[test]
     fn test_score_grows_with_count() {
         let mut entry = FrequencyEntry::new("進行", "しんこう");

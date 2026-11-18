@@ -386,10 +386,11 @@ fn apply_segment_user_dict(
 /// 登録語 (ユーザー辞書) の `surfaces` を、同じ候補リスト内の他のどの候補より
 /// 確実に上へ固定する (= 変換 1 位)。
 ///
-/// Layer0 頻度は確定回数で上限なく伸びる (`200_000 + count*50`) ため、固定値の
-/// `USER_DICT_BOOST` だけだと「何度も確定したかな」に負け得る
-/// (2026-11 ユーザー報告「け→家 を登録したのに文中で け が 1 位」: け×5=200_250 >
-/// 家 登録 200_200)。そこで固定ブーストでなく **「登録語以外の最大 + 1」** へ持ち上げ、
+/// Layer0 頻度は確定のたび伸び (`200_000 + count*10`)、さらに追い越し boost が
+/// 単調に積まれる ([`FrequencyEntry::score`]) ため、固定値の `USER_DICT_BOOST` だけだと
+/// 「何度も確定したかな」に負け得る (2026-11 ユーザー報告「け→家 を登録したのに文中で
+/// け が 1 位」: 高頻度＋boost で伸びた け が固定ブーストの 家 を超えた)。
+/// そこで固定ブーストでなく **「登録語以外の最大 + 1」** へ持ち上げ、
 /// 頻度の大小に依らず 1 位を保証する。`surfaces` が空なら完全に無変化。
 /// flat ([`ConversionEngine::convert`]) と segmented 両方から呼び、挙動を一致させる。
 fn pin_user_dict_top(cands: &mut [Candidate], surfaces: &[String]) {
@@ -1609,10 +1610,12 @@ mod tests {
         );
     }
 
-    /// ★★ 回帰ガード (2026-11-15、け→家): Layer0 頻度は確定回数で上限なく伸びる
-    /// (`200_000 + count*50`) ので、固定ブースト (USER_DICT_BOOST+base=200_200) だけだと
-    /// 「5 回確定したかな け (200_250)」に登録語 家 が負けていた (ユーザー報告「登録したのに
-    /// 文中で け が 1 位」)。相対持ち上げ (他候補の最大+1) で頻度に依らず登録語を 1 位にする。
+    /// ★★ 回帰ガード (2026-11-15、け→家): Layer0 頻度は確定のたび伸び
+    /// (`200_000 + count*10`)、追い越し boost も積まれるので、固定ブースト
+    /// (USER_DICT_BOOST+base=200_200) だけだと「高頻度＋boost で伸びたかな け」に
+    /// 登録語 家 が負けていた (ユーザー報告「登録したのに文中で け が 1 位」)。
+    /// 相対持ち上げ (他候補の最大+1) で頻度に依らず登録語を 1 位にする。
+    /// (下の 200_250 は「USER_DICT base 200_200 を超えた高 Layer0」の代表入力値。)
     #[cfg(feature = "akaza")]
     #[test]
     fn segment_user_dict_beats_layer0_frequency() {
@@ -1629,7 +1632,7 @@ mod tests {
                 .with_score(score)
                 .with_source(CandidateSource::Learned)
         };
-        // け が Layer0 頻度で 200_250 (×5 相当) = USER_DICT base+boost(200_200) より上。
+        // け の Layer0 が 200_250 (高頻度＋追い越し boost) = USER_DICT base+boost(200_200) より上。
         let mut segmented = SegmentedConversion::new(vec![Segment::new(
             "け",
             vec![cand("け", "け", 200_250), cand("毛", "け", 200_037)],
