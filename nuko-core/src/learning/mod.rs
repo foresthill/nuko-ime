@@ -3,6 +3,7 @@
 //! ユーザーの入力パターンを学習し、変換精度を向上させます。
 
 pub mod correction;
+pub mod date_format;
 pub mod dream_history;
 pub mod dreaming;
 mod frequency;
@@ -13,6 +14,7 @@ pub mod retype;
 pub mod segmentation;
 
 pub use correction::{extract_corrections, CorrectionStore, Preference};
+pub use date_format::{DateFormatEntry, DateFormatStore};
 pub use dreaming::{
     build_prompt, digest_observations, merge_proposals, parse_proposal, DreamProposal,
     DreamProvider, MockProvider, ObservationDigest, ProposedPreference,

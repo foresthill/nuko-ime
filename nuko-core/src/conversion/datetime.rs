@@ -43,6 +43,71 @@ pub fn is_datetime_surface(reading: &str, surface: &str) -> bool {
     is_datetime_reading(reading) && surface.chars().any(|c| c.is_ascii_digit())
 }
 
+/// 生成された日付/時刻の表層を **フォーマット種別 (format id)** へ分類する。
+///
+/// リテラル日付 (`2026/11/18`) は一過性なので学習しないが、その**形式** (`ymd_slash`) は
+/// ユーザーの選好として記録できる。これはその分類器で、**フォーマット選好学習の鍵**。
+/// `candidates_at` が生成し得る全表層が Some を返す (下の束縛テストで保証＝生成器と
+/// 分類器の乖離を防ぐ。docs/CODE_COMMENT_DISCIPLINE.md の方針)。
+///
+/// 返す id は `date_strings` / `time_strings` / `timestamp_strings` の各フォーマットに対応:
+/// `ymd_kanji`(年月日) / `ymd_kanji_wd`(年月日（曜）) / `ymd_slash`(Y/m/d) /
+/// `ymd_hyphen`(Y-m-d) / `reiwa_kanji`(令和…) / `reiwa_dot`(R…) /
+/// `hm_colon`(HH:MM) / `hm_ja`(H時M分) / `hms_colon`(HH:MM:SS) /
+/// `ts_kanji_hms` / `ts_kanji_hm` / `ts_slash_hms` / `ts_hyphen_hms`(日付＋時刻)。
+#[must_use]
+pub fn classify_datetime_format(surface: &str) -> Option<&'static str> {
+    let has_space = surface.contains(' ');
+    let colons = surface.matches(':').count();
+    // タイムスタンプ (日付＋時刻、半角スペース区切り) を先に判定。
+    if has_space {
+        if surface.contains('年') {
+            return Some(if colons >= 2 {
+                "ts_kanji_hms"
+            } else {
+                "ts_kanji_hm"
+            });
+        }
+        if surface.contains('/') {
+            return Some("ts_slash_hms");
+        }
+        if surface.contains('-') {
+            return Some("ts_hyphen_hms");
+        }
+        return None;
+    }
+    // 日付 (年月日系)。
+    if surface.contains('年') && surface.contains('日') {
+        if surface.starts_with("令和") {
+            return Some("reiwa_kanji");
+        }
+        if surface.contains('（') {
+            return Some("ymd_kanji_wd");
+        }
+        return Some("ymd_kanji");
+    }
+    if surface.starts_with('R') && surface.contains('.') {
+        return Some("reiwa_dot");
+    }
+    if surface.contains('/') {
+        return Some("ymd_slash");
+    }
+    if surface.contains('-') && surface.starts_with(|c: char| c.is_ascii_digit()) {
+        return Some("ymd_hyphen");
+    }
+    // 時刻のみ。
+    if surface.contains('時') && surface.contains('分') {
+        return Some("hm_ja");
+    }
+    if colons >= 2 {
+        return Some("hms_colon");
+    }
+    if colons == 1 {
+        return Some("hm_colon");
+    }
+    None
+}
+
 /// 純粋版: `now` を渡してテスト可能にする。
 fn candidates_at(reading: &str, now: DateTime<Local>) -> Vec<Candidate> {
     let surfaces: Vec<String> = match reading {
@@ -218,5 +283,94 @@ mod tests {
         // datetime トリガーでない読みは、数字を含んでも対象外ではない (学習してよい)。
         assert!(!is_datetime_surface("ねこ", "猫2"));
         assert!(!is_datetime_surface("きょうと", "京都"));
+    }
+
+    #[test]
+    fn classify_datetime_format_matches_patterns() {
+        assert_eq!(
+            classify_datetime_format("2026年10月20日"),
+            Some("ymd_kanji")
+        );
+        assert_eq!(
+            classify_datetime_format("2026年10月20日（火）"),
+            Some("ymd_kanji_wd")
+        );
+        assert_eq!(classify_datetime_format("2026/10/20"), Some("ymd_slash"));
+        assert_eq!(classify_datetime_format("2026-10-20"), Some("ymd_hyphen"));
+        assert_eq!(
+            classify_datetime_format("令和8年10月20日"),
+            Some("reiwa_kanji")
+        );
+        assert_eq!(classify_datetime_format("R8.10.20"), Some("reiwa_dot"));
+        assert_eq!(classify_datetime_format("10:30"), Some("hm_colon"));
+        assert_eq!(classify_datetime_format("10時30分"), Some("hm_ja"));
+        assert_eq!(classify_datetime_format("10:30:45"), Some("hms_colon"));
+        assert_eq!(
+            classify_datetime_format("2026年10月20日 10:30:45"),
+            Some("ts_kanji_hms")
+        );
+        assert_eq!(
+            classify_datetime_format("2026年10月20日 10:30"),
+            Some("ts_kanji_hm")
+        );
+        assert_eq!(
+            classify_datetime_format("2026/10/20 10:30:45"),
+            Some("ts_slash_hms")
+        );
+        assert_eq!(
+            classify_datetime_format("2026-10-20 10:30:45"),
+            Some("ts_hyphen_hms")
+        );
+        // 日付/時刻でない表層は None。
+        assert_eq!(classify_datetime_format("今日"), None);
+        assert_eq!(classify_datetime_format("猫"), None);
+    }
+
+    /// ★ 束縛テスト: `candidates_at` が生成し得る**全表層が Some に分類される**こと。
+    /// 生成器 (date_strings 等) と分類器 (classify_datetime_format) の乖離を防ぐ
+    /// (フォーマットを足したのに分類器を更新し忘れる＝選好が効かない、を赤で検知)。
+    #[test]
+    fn every_generated_surface_classifies_to_some_format() {
+        for reading in [
+            "きょう",
+            "あした",
+            "あす",
+            "きのう",
+            "いま",
+            "じこく",
+            "にちじ",
+        ] {
+            for cand in candidates_at(reading, fixed()) {
+                assert!(
+                    classify_datetime_format(&cand.surface).is_some(),
+                    "生成表層 {} ({}) が分類器で None。classify_datetime_format を更新せよ",
+                    cand.surface,
+                    reading
+                );
+            }
+        }
+    }
+
+    /// ★ characterization: **生成器 `candidates_at` 自体は選好で変わらない**。
+    /// 全フォーマットが同一スコア `DATETIME_SCORE`(=50) で生成され、全て学習対象外。
+    /// フォーマット選好は**エンジン層**で候補へ加点して反映する（生成器は不変）ので、
+    /// この「生成は均一」特性は選好学習を入れても保たれる（engine 側テスト
+    /// `date_format_preference_ranks_picked_format_first` が反映側を担保）。
+    #[test]
+    fn date_candidates_share_fixed_score_and_are_unlearnable() {
+        let c = candidates_at("きょう", fixed());
+        assert!(!c.is_empty(), "きょう は日付候補を生成する");
+        for cand in &c {
+            assert_eq!(
+                cand.score, DATETIME_SCORE,
+                "生成時は全フォーマットが固定スコア {DATETIME_SCORE}: {}",
+                cand.surface
+            );
+            assert!(
+                is_datetime_surface("きょう", &cand.surface),
+                "生成日付 {} は (リテラルとしては) 学習対象外",
+                cand.surface
+            );
+        }
     }
 }

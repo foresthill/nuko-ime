@@ -227,6 +227,15 @@ PR #40 で `convert_k_best(reading, None, k=9)` に切替。各 `KBestPath` が�
 全体方針の表は [`docs/ARCHITECTURE.md` §3.4](docs/ARCHITECTURE.md)。規則/生成器を変えるときは
 **壊してはいけない既存ケースを回帰テストで固定してから**直す。
 
+### 日付/時刻は「リテラルは学習しない・フォーマットは学習する」
+
+「きょう/あした/いま/…」の日付時刻候補（`conversion/datetime.rs`、生成器＝規則クラス）は**リテラル**（`2026/11/18`）を頻度学習しない（翌日以降に古い日付が固定される害を防ぐ＝`is_datetime_surface` で commit スキップ）。だが**どの形式を選んだか**（`ymd_slash` 等）は安定した選好なので `DateFormatStore`（`date_format.json`・常時ON・ローカル非共有）に記録し、日付候補グループ内で選好形式を上位に出す。
+
+- 形式分類は `classify_datetime_format(surface)→format_id`（単一の真実源）。**生成器と分類器の乖離は束縛テスト** `every_generated_surface_classifies_to_some_format` で防ぐ（フォーマットを足したら分類器も更新せよ＝赤で検知。CODE_COMMENT_DISCIPLINE の実践）。
+- 記録は `engine.commit` の datetime 分岐（リテラルは return、形式は record）。反映は flat convert の datetime 注入ブロックで `date_formats.count(fmt)` を加点（低スコア帯 base 50 なので既定の `今日`(漢字) 等は上位に残る）。検証は `nuko convert きょう --count 40 --personal`（実測: ymd_slash 選好で `2026/11/18` が日付先頭へ）。
+- 「どの層で直すか」の実例: これは**規則/生成器＋形式の選好学習**であり、個別の日付を辞書に足すのではない。
+- 残: 「学習を忘れる」UI からの `forget_date_formats` 配線（API は在る）。
+
 ### 落とし穴: nn 曖昧性の「代替読み候補」は学習キーを入力読みにする (#159 / PR #160)
 
 `しんに⇄しんい(真意)` / `たんに⇄たんい(単位)` は **全IME共通で `shinni→しんに` が正しいローマ字**（ソース: シャープ ローマ字ガイド / Mozc `romanji-hiragana.tsv`。romaji 層では解決不可、`おんな=onna` と同型）。nuko は `nn_alternate_readings` で `しんに→しんい` の**代替読みも変換してマージ**し、真意 を候補に出す（＝Google/ATOK が変換層でやる曖昧一致と同方式）。

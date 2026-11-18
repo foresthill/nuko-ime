@@ -793,6 +793,10 @@ fn setup_corrections(engine: &mut ConversionEngine) {
     if let Err(e) = engine.load_segmentations(dir.join("segmentations.toml")) {
         tracing::warn!(error = %e, "segmentations.toml load 失敗 (文節学習なしで継続)");
     }
+    // 日付/時刻フォーマット選好 (ymd_slash 等) を load し、以後 commit 時に自動 save。
+    if let Err(e) = engine.load_date_formats(dir.join("date_format.json")) {
+        tracing::warn!(error = %e, "date_format.json load 失敗 (フォーマット選好なしで継続)");
+    }
 }
 
 /// 文節の「切り方」を学習して保存し、稼働エンジンへ即反映する。
