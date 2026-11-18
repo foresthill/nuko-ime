@@ -1,6 +1,6 @@
 //! 変換エンジン本体
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[cfg(feature = "akaza")]
 use super::backend::LibakazaBackend;
@@ -10,7 +10,9 @@ use super::{Candidate, CandidateList, CandidateSource, ConversionContext};
 use crate::dictionary::DictionaryManager;
 use crate::error::{NukoError, Result};
 use crate::input::{to_halfwidth_katakana, to_katakana};
-use crate::learning::{CorrectionStore, LearningManager, PhraseStore, SegmentationStore};
+use crate::learning::{
+    CorrectionStore, DateFormatStore, LearningManager, PhraseStore, SegmentationStore,
+};
 
 /// 自然分割の境界 (`nat_bounds` = 0 と `total` を含む累積オフセット) に対し、
 /// `hint` 読みが 1 文節になるよう強制境界を作った `force_ranges` を返す。
@@ -429,6 +431,11 @@ pub struct ConversionEngine {
     /// フレーズ予測 (#187)。確定した文を読み全体→表層全体で覚え、前方一致で予測する。
     /// 空なら [`Self::predict`] は静的辞書のみ。個人データ・非共有。
     phrases: PhraseStore,
+    /// 日付/時刻フォーマット選好。確定した形式 (ymd_slash 等) を覚え、日付候補を
+    /// その形式ほど上位に出す。リテラル日付は学習しない。空なら無変化。個人・非共有。
+    date_formats: DateFormatStore,
+    /// `date_formats` の保存先 (set されていれば commit 時に自動 save)。
+    date_formats_path: Option<PathBuf>,
     /// 旧字体モード。ON なら候補の旧字体版 (國/體/學…) を末尾に追加する。既定 OFF。
     kyujitai_mode: bool,
 }
@@ -447,6 +454,8 @@ impl ConversionEngine {
             corrections: CorrectionStore::default(),
             segmentations: SegmentationStore::default(),
             phrases: PhraseStore::default(),
+            date_formats: DateFormatStore::default(),
+            date_formats_path: None,
             kyujitai_mode: false,
         })
     }
@@ -482,6 +491,8 @@ impl ConversionEngine {
             corrections: CorrectionStore::default(),
             segmentations: SegmentationStore::default(),
             phrases: PhraseStore::default(),
+            date_formats: DateFormatStore::default(),
+            date_formats_path: None,
             kyujitai_mode: false,
         })
     }
@@ -562,6 +573,40 @@ impl ConversionEngine {
     /// フレーズ予測ストアを設定する。
     pub fn set_phrases(&mut self, phrases: PhraseStore) {
         self.phrases = phrases;
+    }
+
+    /// `date_format.json` から日付フォーマット選好を load し、以後の自動 save 先に設定する。
+    ///
+    /// # エラー
+    /// ファイルはあるがパースに失敗した場合。
+    pub fn load_date_formats(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref().to_path_buf();
+        self.date_formats = DateFormatStore::load(&path)?;
+        tracing::info!(
+            count = self.date_formats.len(),
+            "日付フォーマット選好を load"
+        );
+        self.date_formats_path = Some(path);
+        Ok(())
+    }
+
+    /// 日付フォーマット選好への参照 (保存・表示・テスト用)。
+    #[must_use]
+    pub fn date_formats(&self) -> &DateFormatStore {
+        &self.date_formats
+    }
+
+    /// 日付フォーマット選好を全消しして保存する (「学習を忘れる」用)。除去件数を返す。
+    pub fn forget_date_formats(&mut self) -> usize {
+        let n = self.date_formats.forget_all();
+        if n > 0 {
+            if let Some(path) = &self.date_formats_path {
+                if let Err(e) = self.date_formats.save(path) {
+                    tracing::warn!(error = %e, "date_format.json の保存に失敗 (forget)");
+                }
+            }
+        }
+        n
     }
 
     /// フレーズ予測ストアへの参照(保存・表示用)。
@@ -793,7 +838,15 @@ impl ConversionEngine {
         // `commit()` 側で抑止済みなので、これは既存データの掃除を兼ねる belt-and-suspenders)。
         if super::datetime::is_datetime_reading(reading) {
             candidates.retain(|c| !super::datetime::is_datetime_surface(reading, &c.surface));
-            for c in super::datetime::datetime_candidates(reading) {
+            for mut c in super::datetime::datetime_candidates(reading) {
+                // フォーマット選好: 過去に選んだ形式ほど日付グループ内で上位に出す。
+                // リテラル日付は学習しないが、形式 (ymd_slash 等) の選好は加点する。
+                // 日付候補は低スコア帯 (base 50) なので、加点しても libakaza/学習候補
+                // (98k/200k+) を超えず、「今日(漢字)」等の既定は上位に残る。
+                if let Some(fmt) = super::datetime::classify_datetime_format(&c.surface) {
+                    let boost = i32::try_from(self.date_formats.count(fmt)).unwrap_or(i32::MAX);
+                    c.score = c.score.saturating_add(boost);
+                }
                 candidates.push(c);
             }
         }
@@ -1219,10 +1272,20 @@ impl ConversionEngine {
     /// * `context` - 変換コンテキスト
     pub fn commit(&mut self, candidate: &Candidate, context: &ConversionContext) -> Result<()> {
         // 日付/時刻の生成候補 (きょう→2026年…/いま→10:30 等) は **一過性** なので
-        // 頻度学習 (Layer 0) に記録しない。記録すると翌日以降も確定時の古い日付が
-        // 今日の日付より上位に固定される (2026-11 ユーザー報告「きょう→2026年10月20日」)。
+        // 頻度学習 (Layer 0) に**リテラルは**記録しない。記録すると翌日以降も確定時の古い
+        // 日付が今日の日付より上位に固定される (2026-11 ユーザー報告「きょう→2026年10月20日」)。
         // 候補自体は毎回 now で生成される (`super::datetime`) ので学習不要。
+        // ただし「どの**形式**を選んだか」(ymd_slash 等) は安定した選好なので記録する
+        // (リテラルでなく形式を覚えるので古い日付問題は再発しない)。
         if super::datetime::is_datetime_surface(&candidate.reading, &candidate.surface) {
+            if let Some(fmt) = super::datetime::classify_datetime_format(&candidate.surface) {
+                self.date_formats.record(fmt);
+                if let Some(path) = &self.date_formats_path {
+                    if let Err(e) = self.date_formats.save(path) {
+                        tracing::warn!(error = %e, "date_format.json の保存に失敗");
+                    }
+                }
+            }
             return Ok(());
         }
         self.learning.record(candidate, context)?;
@@ -2042,6 +2105,80 @@ mod tests {
         assert!(
             neko.iter().any(|c| c.surface == "猫2"),
             "datetime でない読みの学習は維持される (ガードが広すぎない)"
+        );
+    }
+
+    /// ★ 日付フォーマット選好: commit は**リテラル日付は学習しないが、形式は記録する**。
+    /// (バグ報告「yyyy/mm/dd を何度選んでもスコアが上がらない」への対応の記録側。)
+    #[test]
+    fn datetime_commit_records_format_preference_not_literal() {
+        use crate::conversion::datetime::classify_datetime_format;
+        let mut engine = ConversionEngine::new().unwrap();
+        let ctx = ConversionContext::new();
+
+        // スラッシュ形式の日付を確定。
+        let slash = Candidate::new("2026/10/20", "きょう");
+        assert_eq!(classify_datetime_format("2026/10/20"), Some("ymd_slash"));
+        engine.commit(&slash, &ctx).unwrap();
+
+        // 形式 (ymd_slash) は選好として記録される。
+        assert_eq!(
+            engine.date_formats().count("ymd_slash"),
+            1,
+            "選んだ形式 ymd_slash が記録される"
+        );
+        // だがリテラル日付は学習されない (翌日以降に古い日付が残らない)。
+        let after = engine.convert("きょう", &ctx).unwrap();
+        assert!(
+            !after.iter().any(|c| c.surface == "2026/10/20"),
+            "リテラル日付は学習されず候補に残らない"
+        );
+    }
+
+    /// ★★ 日付フォーマット選好: 選んだ形式が**日付候補グループの先頭**に来る。
+    /// バグ報告「yyyy/mm/dd を何度選んでもスコアが上がらない」を解消する本体。
+    #[test]
+    fn date_format_preference_ranks_picked_format_first() {
+        use crate::conversion::datetime::classify_datetime_format;
+        let mut engine = ConversionEngine::new().unwrap();
+        let ctx = ConversionContext::new();
+
+        // 選好前: 日付候補は全部同点 (base 50)。= まだ選好差が無い。
+        let before = engine.convert("きょう", &ctx).unwrap();
+        let before_scores: Vec<i32> = before
+            .iter()
+            .filter(|c| classify_datetime_format(&c.surface).is_some())
+            .map(|c| c.score)
+            .collect();
+        assert!(!before_scores.is_empty(), "日付候補が生成される");
+        assert!(
+            before_scores.windows(2).all(|w| w[0] == w[1]),
+            "選好前は全日付候補が同点 (選好差なし)"
+        );
+
+        // ユーザーが ymd_slash を 2 回選ぶ。
+        engine.date_formats.record("ymd_slash");
+        engine.date_formats.record("ymd_slash");
+
+        // 選好後: ymd_slash が他の全日付形式より厳密に上位になる。
+        let after = engine.convert("きょう", &ctx).unwrap();
+        let slash_score = after
+            .iter()
+            .find(|c| classify_datetime_format(&c.surface) == Some("ymd_slash"))
+            .map(|c| c.score)
+            .expect("ymd_slash 候補が存在する");
+        let others_max = after
+            .iter()
+            .filter(|c| {
+                let f = classify_datetime_format(&c.surface);
+                f.is_some() && f != Some("ymd_slash")
+            })
+            .map(|c| c.score)
+            .max()
+            .expect("他の日付形式も存在する");
+        assert!(
+            slash_score > others_max,
+            "★ 選好した ymd_slash ({slash_score}) が他の日付形式 (最大 {others_max}) より上位"
         );
     }
 
