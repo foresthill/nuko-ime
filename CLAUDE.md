@@ -255,6 +255,15 @@ PR #40 で `convert_k_best(reading, None, k=9)` に切替。各 `KBestPath` が�
 - **検証手順の定石**: ① 誤変換を見たら `nuko convert <読み> --libakaza --personal --explain`（#183、`--release` 必須）で内訳を撮る → ② 失敗ケースをユニットテスト化（旧 `add` で落ちることを実測）→ ③ `max` 等の修正後に before/after を再度 `--explain` で実測。推測で辞書/スコアを弄らない。
 - 残件（③ 降格 / 文脈）: `そこ(×28 底 > ×27 そこ)` は count どおりで `max` では覆らない。降格機構 or `context_hash` が要る。詳細と設計思想は [`docs/LEARNING_ARCHITECTURE.md` §1.6（スコア透明化）/ §個人重みの合成](docs/LEARNING_ARCHITECTURE.md) を正とする。
 
+### 規約: コメントに式・値を複製しない（コメント乖離の防止）
+
+**実装＝コード。コメントは why を語るもので、実装そのものではない。** コメントに式・値を書き写すと真実の源が 2 つになり、コードだけ変わってコメントが腐る（＝嘘をつくドキュメント）。2026-11、engine.rs のコメントがスコアを `count*50` と誤記（実体は `count*10`）し、別ドキュメント執筆時に書き手がその誤コメントを信じて伝播した。
+
+- スコア式・しきい値等の**挙動を決める数値**は `const` に名前を付け、他所のコメントは**値でなく定数名で参照**する。
+- **数値の主張はテストで pin**（実行可能ドキュメント＝腐れば赤くなる）。例 [`frequency.rs::score_formula_is_pinned_count_times_10`](nuko-core/src/learning/frequency.rs)。
+- 手計算の worked example を焼き込まない（例を出すならテストで**実測値**を使う）。式を変えたら旧値を `grep` で追従。
+- 詳細・根本原因分析・リーダブルコードの位置づけは [`docs/CODE_COMMENT_DISCIPLINE.md`](docs/CODE_COMMENT_DISCIPLINE.md)。スコア透明化（§1.6）と同じ「数値は実測/test で裏付ける」思想。
+
 ### 打ち直し訂正は「常時ON」で捉える（観察ログ opt-in と独立） (retype.json / PR #211)
 
 「誤変換を同じ読みで別の表層へ打ち直す」= 最も痛い瞬間＝最大の学習機会（森岡さん 2026-11-15）。**検知** `note_commit_detect_correction`（[state.rs](nuko-macos/src/state.rs)）は以前から常時動いていたが、**記録先が観察ログ（Layer 1, opt-in 既定 OFF）だけ**だったので、既定ユーザーでは打ち直しを丸ごと捨てていた（=「把捉されてない感」の正体）。
