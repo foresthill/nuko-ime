@@ -219,4 +219,52 @@ mod tests {
         assert!(!is_datetime_surface("ねこ", "猫2"));
         assert!(!is_datetime_surface("きょうと", "京都"));
     }
+
+    /// ★ characterization: バグ報告「yyyy/mm/dd を何度選んでもスコアが上がらない」の
+    /// **原因を固定する**テスト (2026-11-18)。日付候補は:
+    ///   (1) 全フォーマットが同一スコア `DATETIME_SCORE` (= 50) で生成され、
+    ///   (2) すべて `is_datetime_surface` = true ＝ 頻度学習の対象外 (古い日付の固定を防ぐ既定仕様)。
+    /// ⇒ どのフォーマットを選んでも score は 50 のまま、順位は `date_strings` の生成順で固定。
+    ///    ユーザーの「フォーマット選好」が score にも learnability にも一切載らない。
+    ///
+    /// これは (2) の「リテラル日付を学習しない」設計自体は正しい。足りないのは
+    /// **フォーマット選好の学習**（リテラル日付でなく "Y/m/d" 等の形式を覚える）。未実装。
+    /// 実装が入ればこのテストは「選んだフォーマットが上位に来る」版へ更新する。
+    #[test]
+    fn date_candidates_share_fixed_score_and_are_unlearnable() {
+        let c = candidates_at("きょう", fixed());
+        assert!(!c.is_empty(), "きょう は日付候補を生成する");
+
+        // (1) 全候補が同一の固定スコア 50。= 選好による順位差が付かない。
+        for cand in &c {
+            assert_eq!(
+                cand.score, DATETIME_SCORE,
+                "日付候補 {} は固定スコア {DATETIME_SCORE}（フォーマット差なし）",
+                cand.surface
+            );
+        }
+        // スラッシュ形式も漢字形式も同点であることを明示 (順位は生成順のみで決まる)。
+        let slash = c
+            .iter()
+            .find(|x| x.surface == "2026/10/20")
+            .expect("Y/m/d 形式");
+        let kanji = c
+            .iter()
+            .find(|x| x.surface == "2026年10月20日")
+            .expect("年月日 形式");
+        assert_eq!(
+            slash.score, kanji.score,
+            "スラッシュと漢字は同スコア = 選好で差が付かない"
+        );
+
+        // (2) 全候補が学習対象外 (surface に数字を含む datetime トリガー)。
+        //     ＝ 何度確定しても learning.json に載らない → スコアが上がりようがない。
+        for cand in &c {
+            assert!(
+                is_datetime_surface("きょう", &cand.surface),
+                "日付候補 {} は学習対象外 (is_datetime_surface=true)",
+                cand.surface
+            );
+        }
+    }
 }
