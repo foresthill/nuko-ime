@@ -210,6 +210,16 @@ enum LearnAction {
         #[arg(long)]
         surface: Option<String>,
     },
+    /// 特定の読み＋表層を降格する (暴走した追い越しブーストを除去して頻度ベースへ戻す)。
+    ///
+    /// 間違って確定し続けて膨張した表層 (500k〜800k) を下げ、打ち直し訂正が勝つようにする。
+    /// count (使用実績) は保持。名指しした (読み, 表層) だけ下げるので他の変換は不変。
+    Demote {
+        /// 降格する読み (かな)。例: よう
+        reading: String,
+        /// 降格する表層。例: 用
+        surface: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -635,12 +645,18 @@ fn cmd_learn(action: Option<LearnAction>) -> Result<()> {
         LearnAction::Forget { reading, surface } => {
             learn_forget(&dir, &reading, surface.as_deref())
         }
+        LearnAction::Demote { reading, surface } => learn_demote(&dir, &reading, &surface),
     }
 }
 
-/// 特定の読みの学習を忘れる。観察ログから該当イベントを除去して書き直し、
-/// 訂正選好を再抽出する (= 再学習しても戻らない、durable な忘却)。
-fn learn_forget(dir: &Path, reading: &str, surface: Option<&str>) -> Result<()> {
+/// 訂正選好 (Layer2) 側の忘却コア。観察ログ+打ち直しから該当を除去し corrections を
+/// 再構築する。戻り値 `(観察除去数, 打ち直し除去数, 再構築後の選好件数)`。表示はしない。
+/// `learn_forget` と `learn_demote` で共用。
+fn forget_corrections_core(
+    dir: &Path,
+    reading: &str,
+    surface: Option<&str>,
+) -> Result<(usize, usize, usize)> {
     use nuko_core::learning::filter_out_reading;
 
     let obs = ObservationLog::new(true, dir.join("observations.jsonl"));
@@ -659,17 +675,6 @@ fn learn_forget(dir: &Path, reading: &str, surface: Option<&str>) -> Result<()> 
         retype.save(dir.join("retype.json"))?;
     }
 
-    let removed = obs_removed + retype_removed;
-    if removed == 0 {
-        println!(
-            "{} 読み「{}」{}の学習は見つかりませんでした。",
-            "…".dimmed(),
-            reading.yellow(),
-            surface.map(|s| format!("→「{s}」")).unwrap_or_default()
-        );
-        return Ok(());
-    }
-
     // 観察ログを書き直し (削れた時だけ) → 残った観察 ∪ 残った打ち直し から再抽出・保存 (durable)。
     if obs_removed > 0 {
         obs.rewrite(&kept)?;
@@ -679,6 +684,24 @@ fn learn_forget(dir: &Path, reading: &str, surface: Option<&str>) -> Result<()> 
     let store = extract_corrections(&all, 2);
     store.save(dir.join("corrections.toml"))?;
 
+    Ok((obs_removed, retype_removed, store.len()))
+}
+
+/// 特定の読みの学習を忘れる。観察ログから該当イベントを除去して書き直し、
+/// 訂正選好を再抽出する (= 再学習しても戻らない、durable な忘却)。
+fn learn_forget(dir: &Path, reading: &str, surface: Option<&str>) -> Result<()> {
+    let (obs_removed, retype_removed, store_len) = forget_corrections_core(dir, reading, surface)?;
+
+    if obs_removed + retype_removed == 0 {
+        println!(
+            "{} 読み「{}」{}の学習は見つかりませんでした。",
+            "…".dimmed(),
+            reading.yellow(),
+            surface.map(|s| format!("→「{s}」")).unwrap_or_default()
+        );
+        return Ok(());
+    }
+
     println!(
         "{} 読み「{}」{}の学習を忘れました (観察 {} 件・打ち直し {} 件除去、選好 {} 件に再構築)。",
         "✅".green(),
@@ -686,7 +709,53 @@ fn learn_forget(dir: &Path, reading: &str, surface: Option<&str>) -> Result<()> 
         surface.map(|s| format!("→「{s}」")).unwrap_or_default(),
         obs_removed.to_string().yellow(),
         retype_removed.to_string().yellow(),
-        store.len().to_string().yellow()
+        store_len.to_string().yellow()
+    );
+    println!(
+        "  {} NukoIME を再起動すると反映されます (入力ソースを切替→戻す)。",
+        "注:".dimmed()
+    );
+    Ok(())
+}
+
+/// 特定の読み＋表層を**降格**する (両レイヤー: 頻度ブースト除去＋その表層の訂正を忘れる)。
+///
+/// 実機データは Layer0 (頻度の追い越しブースト) と Layer2 (訂正選好) の**両方**で膨張する
+/// ため、片方だけでは下がりきらない (用 は boost 除去後も訂正 ~302000 が残り 504090 だった)。
+/// そこで (1) `learning.json` の boost を 0 に戻し (count は保持)、(2) その (読み,表層) の
+/// 訂正・観察・打ち直しを忘れる。名指しした表層だけ下げるので他の変換は不変。
+fn learn_demote(dir: &Path, reading: &str, surface: &str) -> Result<()> {
+    // (1) Layer0: 頻度の追い越しブーストを除去。
+    let path = dir.join("learning.json");
+    let mut learning = nuko_core::learning::LearningManager::load(&path)?;
+    let boost_removed = learning.demote(reading, surface);
+    if boost_removed {
+        learning.save()?;
+    }
+
+    // (2) Layer2: その表層の訂正・観察・打ち直しを忘れる (再学習でも戻らない)。
+    let (obs_removed, retype_removed, store_len) =
+        forget_corrections_core(dir, reading, Some(surface))?;
+
+    if !boost_removed && obs_removed + retype_removed == 0 {
+        println!(
+            "{} 「{}」→「{}」は学習に無いか、既に降格済みでした (変更なし)。",
+            "…".dimmed(),
+            reading.yellow(),
+            surface.yellow()
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{} 「{}」→「{}」を降格しました (頻度ブースト{}・訂正観察 {} 件・打ち直し {} 件を除去、使用回数は保持、選好 {} 件)。",
+        "✅".green(),
+        reading.yellow(),
+        surface.yellow(),
+        if boost_removed { "除去" } else { "なし" },
+        obs_removed.to_string().yellow(),
+        retype_removed.to_string().yellow(),
+        store_len.to_string().yellow()
     );
     println!(
         "  {} NukoIME を再起動すると反映されます (入力ソースを切替→戻す)。",

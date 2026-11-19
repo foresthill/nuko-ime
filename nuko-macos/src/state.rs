@@ -404,6 +404,11 @@ fn retype_correction_events() -> Vec<ObservationEvent> {
     RETYPE_STORE.with(|cell| cell.borrow().as_correction_events())
 }
 
+/// 打ち直しで「誤」とされた `(読み, 表層)` ペア一覧 (Layer0 降格の対象)。
+fn retype_avoided_pairs() -> Vec<(String, String)> {
+    RETYPE_STORE.with(|cell| cell.borrow().avoided_pairs())
+}
+
 /// 打ち直しストアから特定の読み (+任意で正の表層) を忘れる。除去件数を返す。
 ///
 /// 観察ログ側の `filter_out_reading` と対。忘れる操作 (設定窓 / `nuko learn forget`) で
@@ -559,6 +564,21 @@ pub fn auto_relearn_after_commit() {
         }
         let _ = store.save(&corrections_path);
         with_engine_mut(|engine| engine.set_corrections(store));
+    }
+
+    // 打ち直しで「誤」とされた表層は Layer0 (頻度/追い越し) 側でも降格する。
+    // 訂正 (Layer2) で「正」を +300_000 するだけでは、間違って確定し続けて追い越し
+    // ブーストが訂正tier を超えて膨張した「誤」(実機 500k〜800k) に勝てないため
+    // (2026-11 森岡さん報告の悪循環ループ)。名指しした (読み, 誤) だけ boost を 0 に
+    // 戻すので、他の変換は不変。demote_frequency が内部で learning.json を保存する。
+    // idempotent (既に 0 なら no-op) なので毎 commit 呼んでも churn しない。
+    let avoided = retype_avoided_pairs();
+    if !avoided.is_empty() {
+        with_engine_mut(|engine| {
+            for (reading, surface) in &avoided {
+                engine.demote_frequency(reading, surface);
+            }
+        });
     }
 }
 
@@ -788,6 +808,11 @@ fn setup_corrections(engine: &mut ConversionEngine) {
             "打ち直し訂正を corrections へ畳み込み (起動時)"
         );
         engine.set_corrections(store);
+    }
+    // 打ち直しで「誤」とされた表層を Layer0 側でも起動時に降格する (暴走した追い越し
+    // ブーストを除去。auto_relearn_after_commit と同じ理由・idempotent)。
+    for (reading, surface) in retype_avoided_pairs() {
+        engine.demote_frequency(&reading, &surface);
     }
     // 文節位置の学習 (ユーザーが Shift で切り直した切り方) を load する。
     if let Err(e) = engine.load_segmentations(dir.join("segmentations.toml")) {

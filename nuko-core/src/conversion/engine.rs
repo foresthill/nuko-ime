@@ -1323,6 +1323,24 @@ impl ConversionEngine {
         self.learning.clear()
     }
 
+    /// 指定の読み＋表層を**降格**する (追い越しブーストを除去して頻度ベースへ戻す)。
+    ///
+    /// 間違って確定し続けて膨張した表層 (実機で 500k〜800k) を下げ、打ち直し訂正
+    /// (Layer2 +300_000) が確実に勝つようにする = 悪循環ループの根治 (2026-11 森岡さん)。
+    /// 名指しした (reading, surface) だけ下げるのでグローバルな再ランクはしない。
+    /// 降格できたら learning.json を保存する。
+    ///
+    /// 戻り値: 実際に降格した (エントリ存在かつ boost が 0 でなかった) なら `true`。
+    pub fn demote_frequency(&mut self, reading: &str, surface: &str) -> bool {
+        let changed = self.learning.demote(reading, surface);
+        if changed && self.learning.has_path() {
+            if let Err(e) = self.learning.save() {
+                tracing::warn!(error = %e, "降格後の学習データ save 失敗 (in-memory のみ)");
+            }
+        }
+        changed
+    }
+
     /// 辞書マネージャーへの参照を取得
     #[must_use]
     pub fn dictionary(&self) -> &DictionaryManager {

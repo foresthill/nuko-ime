@@ -168,6 +168,19 @@ impl RetypeStore {
             .collect()
     }
 
+    /// 全エントリの `(読み, 誤=avoid)` ペアを返す (降格対象の列挙用)。
+    ///
+    /// 打ち直しで「誤」とされた表層を、頻度学習側 (Layer0) でも降格するために使う。
+    /// 訂正 (Layer2) で「正」を上げるだけでは、追い越しブーストで膨張した「誤」が
+    /// 訂正tier を超えていると勝てないため (2026-11 悪循環ループの根治)。
+    #[must_use]
+    pub fn avoided_pairs(&self) -> Vec<(String, String)> {
+        self.entries
+            .iter()
+            .map(|e| (e.reading.clone(), e.avoid.clone()))
+            .collect()
+    }
+
     /// 件数。
     #[must_use]
     pub fn len(&self) -> usize {

@@ -161,6 +161,28 @@ impl LearningManager {
         *self.dirty.write() = true;
     }
 
+    /// 指定の読み＋表層を**降格**する (追い越しブーストを除去し頻度ベースへ戻す)。
+    ///
+    /// 打ち直し訂正 / 明示的な降格操作で呼ぶ。該当エントリの `FrequencyEntry::demote` を
+    /// 実行し、膨張した boost を 0 に戻す。`count` は保持。グローバルな再ランクはせず、
+    /// 名指しした (reading, surface) だけ下げるので他の変換は不変。
+    ///
+    /// 戻り値: 実際に降格した (エントリが存在し boost が 0 でなかった) なら `true`。
+    pub fn demote(&mut self, reading: &str, surface: &str) -> bool {
+        let mut data = self.frequency_data.write();
+        let Some(entries) = data.get_mut(reading) else {
+            return false;
+        };
+        let Some(entry) = entries.iter_mut().find(|e| e.surface == surface) else {
+            return false;
+        };
+        let changed = entry.demote();
+        if changed {
+            *self.dirty.write() = true;
+        }
+        changed
+    }
+
     /// 学習データから候補を取得
     pub fn get_candidates(
         &self,
@@ -277,5 +299,28 @@ mod tests {
         manager.apply_selection_boost(&c, Some(300_691)); // Weak は無視
         let after = manager.get_candidates("よう", &ctx).unwrap()[0].score;
         assert_eq!(before, after, "Weak はブーストしない (従来どおり)");
+    }
+
+    #[test]
+    fn demote_removes_overtake_boost_back_to_frequency_base() {
+        // 追い越しで膨張した表層を降格 → 頻度ベースへ戻り、名指しした表層だけ下がる。
+        let mut manager = LearningManager::new().unwrap();
+        let ctx = ConversionContext::default();
+        let you = Candidate::new("用", "よう");
+        manager.record(&you, &ctx).unwrap();
+        manager.apply_selection_boost(&you, Some(800_000)); // 暴走を模擬
+        let inflated = manager.get_candidates("よう", &ctx).unwrap()[0].score;
+        assert!(inflated > 300_000, "降格前は訂正tierを超える (={inflated})");
+
+        assert!(manager.demote("よう", "用"), "降格できたら true");
+        let after = manager.get_candidates("よう", &ctx).unwrap()[0].score;
+        assert!(after < 300_000, "降格後は訂正tier未満 (={after})");
+
+        assert!(!manager.demote("よう", "用"), "再降格は no-op (既に 0)");
+        assert!(
+            !manager.demote("よう", "無い表層"),
+            "存在しない表層は false"
+        );
+        assert!(!manager.demote("ない読み", "用"), "存在しない読みは false");
     }
 }
