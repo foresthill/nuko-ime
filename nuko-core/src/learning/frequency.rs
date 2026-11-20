@@ -77,6 +77,26 @@ impl FrequencyEntry {
         }
     }
 
+    /// 追い越しブーストを取り除いて**降格**する (score を頻度ベース 200_000+count*10 へ戻す)。
+    ///
+    /// 追い越しブーストは単調増加なので、間違って確定し続けた表層が訂正tier(300_000)を
+    /// 超えて膨張し (実機で 500_000〜800_000)、打ち直し訂正でも勝てなくなる悪循環を生む
+    /// (2026-11 森岡さん報告)。打ち直し / 明示的な降格操作 = 「この表層は誤り」という
+    /// 明確なシグナルのときだけ、**単調増加の例外**として boost を 0 に戻す。
+    ///
+    /// `count` は保持する (頻度=使用実績は失わない)。boost を消すだけなので、訂正
+    /// (Layer2, +300_000) を乗せた正の表層が確実に上に出る。既に 0 なら no-op。
+    ///
+    /// 戻り値: 降格した (boost が 0 でなかった) なら `true`。
+    pub fn demote(&mut self) -> bool {
+        if self.boost != 0 {
+            self.boost = 0;
+            true
+        } else {
+            false
+        }
+    }
+
     /// このエントリの [`score`](Self::score) が `target + margin` 以上になるよう
     /// ブーストを引き上げる (「強」= 追い越し用)。
     ///
@@ -246,5 +266,30 @@ mod tests {
     #[test]
     fn learning_strength_default_is_strong() {
         assert_eq!(LearningStrength::default(), LearningStrength::Strong);
+    }
+
+    #[test]
+    fn demote_removes_runaway_boost_back_to_frequency_base() {
+        // 暴走した表層 (追い越しで 800_000 まで膨張) を降格 → 頻度ベースへ戻る。
+        let mut e = FrequencyEntry::new("用", "よう");
+        e.boost_to_at_least(800_000, OVERTAKE_MARGIN); // 実機の暴走を模擬
+        assert!(e.score() > 300_000, "降格前は訂正tierを超えて膨張");
+
+        assert!(e.demote(), "boost があれば降格した = true");
+        // count=1 なので base + 10。暴走が消え、訂正 (300_000) に確実に負ける。
+        assert_eq!(e.boost, 0, "boost は 0 に戻る");
+        assert!(
+            e.score() < 300_000,
+            "降格後は訂正tier (300_000) 未満 = 打ち直し訂正が勝てる (score={})",
+            e.score()
+        );
+    }
+
+    #[test]
+    fn demote_keeps_count_and_is_noop_when_not_boosted() {
+        let mut e = FrequencyEntry::new("用", "よう");
+        e.increment(); // count=2
+        assert!(!e.demote(), "boost が無ければ no-op = false");
+        assert_eq!(e.count, 2, "count (使用実績) は降格で失わない");
     }
 }
