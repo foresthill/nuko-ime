@@ -202,6 +202,31 @@ impl LearningManager {
         *self.dirty.write() = true;
     }
 
+    /// **教えるブースト** (Shift+Enter =「これを教える」。`record` の後に呼ぶ)。
+    ///
+    /// モード設定に**関わらず**、選んだ表層を `rival_top` の上へ恒久的に引き上げて
+    /// **絶対的に 1 位**にする (= 王冠の天井クランプも効かせず、打ち直し訂正(300k)すら
+    /// 超える)。ユーザーが明示的に「これを最優先にしろ」と宣言した操作なので、王冠の
+    /// 「訂正tier未満に収める」階層よりユーザーの明示指示を優先する。
+    ///
+    /// `rival_top` は同じ読みの**他候補の最大合成スコア** (libakaza/Layer2 込み・convert 由来)。
+    /// `boost_to_at_least` を使う (単調) ので、教えた順位は勝手に戻らない。明示操作ゆえ
+    /// 稀にしか呼ばれず、間違えたら Ctrl+Enter の降格でリセットできる。
+    pub fn apply_teach_boost(&mut self, candidate: &Candidate, rival_top: Option<i32>) {
+        let Some(top) = rival_top else {
+            return; // 相手が居なければ record の +10 で既に 1 位 (base 200k)。
+        };
+        let mut data = self.frequency_data.write();
+        let Some(entries) = data.get_mut(&candidate.reading) else {
+            return;
+        };
+        let Some(entry) = entries.iter_mut().find(|e| e.surface == candidate.surface) else {
+            return;
+        };
+        entry.boost_to_at_least(top, OVERTAKE_MARGIN);
+        *self.dirty.write() = true;
+    }
+
     /// 指定の読み＋表層を**降格**する (追い越しブーストを除去し頻度ベースへ戻す)。
     ///
     /// 打ち直し訂正 / 明示的な降格操作で呼ぶ。該当エントリの `FrequencyEntry::demote` を
@@ -416,6 +441,32 @@ mod tests {
             last_top_score < 260_000,
             "10 回交互でも ~250k で頭打ち (={last_top_score})"
         );
+    }
+
+    #[test]
+    fn teach_overtakes_even_above_correction_tier() {
+        // 教える(Shift+Enter)はモード無視・天井無視で絶対1位。訂正tier(300k)超えの
+        // rival すら追い越す (ユーザーの明示指示を最優先)。
+        let mut m = LearningManager::new().unwrap();
+        let ctx = ConversionContext::default();
+        let sama = Candidate::new("様", "よう");
+        m.record(&sama, &ctx).unwrap(); // base 200_010
+        m.apply_teach_boost(&sama, Some(400_000)); // 訂正超えの rival
+        let after = m.get_candidates("よう", &ctx).unwrap()[0].score;
+        assert!(after > 400_000, "教えると訂正tierすら超えて1位 (={after})");
+    }
+
+    #[test]
+    fn teach_is_noop_without_rival() {
+        // 相手が居なければ record の +10 で既に1位 = 追加ブースト不要。
+        let mut m = LearningManager::new().unwrap();
+        let ctx = ConversionContext::default();
+        let c = Candidate::new("猫", "ねこ");
+        m.record(&c, &ctx).unwrap();
+        let before = m.get_candidates("ねこ", &ctx).unwrap()[0].score;
+        m.apply_teach_boost(&c, None);
+        let after = m.get_candidates("ねこ", &ctx).unwrap()[0].score;
+        assert_eq!(before, after, "相手が居なければブーストしない");
     }
 
     #[test]
