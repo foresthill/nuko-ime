@@ -232,7 +232,8 @@ PR #40 で `convert_k_best(reading, None, k=9)` に切替。各 `KBestPath` が�
 「きょう/あした/いま/…」の日付時刻候補（`conversion/datetime.rs`、生成器＝規則クラス）は**リテラル**（`2026/11/18`）を頻度学習しない（翌日以降に古い日付が固定される害を防ぐ＝`is_datetime_surface` で commit スキップ）。だが**どの形式を選んだか**（`ymd_slash` 等）は安定した選好なので `DateFormatStore`（`date_format.json`・常時ON・ローカル非共有）に記録し、日付候補グループ内で選好形式を上位に出す。
 
 - 形式分類は `classify_datetime_format(surface)→format_id`（単一の真実源）。**生成器と分類器の乖離は束縛テスト** `every_generated_surface_classifies_to_some_format` で防ぐ（フォーマットを足したら分類器も更新せよ＝赤で検知。CODE_COMMENT_DISCIPLINE の実践）。
-- 記録は `engine.commit` の datetime 分岐（リテラルは return、形式は record）。反映は flat convert の datetime 注入ブロックで `date_formats.count(fmt)` を加点（低スコア帯 base 50 なので既定の `今日`(漢字) 等は上位に残る）。検証は `nuko convert きょう --count 40 --personal`（実測: ymd_slash 選好で `2026/11/18` が日付先頭へ）。
+- 記録は `engine.commit` の datetime 分岐（リテラルは return、形式は record）。反映は flat convert の datetime 注入ブロックで `count × DATE_FORMAT_PREFERENCE_STEP`（上限 `DATE_FORMAT_PREFERENCE_MAX_BOOST`、datetime.rs の 2 定数）を加点。低スコア帯 base 50 ＋上限込みでも libakaza 帯(+100_000)を超えないので既定の `今日`(漢字) 等は上位に残る（＝「日付グループ内の並べ替え」専用。`今日`より上には出さない設計）。加点幅は `date_format_boost_is_step_times_count_and_stays_below_libakaza_band` テストで pin。検証は `nuko convert きょう --count 40 --personal --explain`（実測: ×1→100 / ×2→150 と上がり、多用形式が日付先頭へ）。
+- ⚠️ 「+1/回では上がった気がしない」で `STEP=1`→`50` に変更済（2026-11-18）。並び替えだけなら +1 でも足りるが体感で上がらないため。それでも日付帯に封じ込め（`今日`超えは別設計）。
 - 「どの層で直すか」の実例: これは**規則/生成器＋形式の選好学習**であり、個別の日付を辞書に足すのではない。
 - 残: 「学習を忘れる」UI からの `forget_date_formats` 配線（API は在る）。
 

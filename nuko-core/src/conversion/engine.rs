@@ -841,10 +841,16 @@ impl ConversionEngine {
             for mut c in super::datetime::datetime_candidates(reading) {
                 // フォーマット選好: 過去に選んだ形式ほど日付グループ内で上位に出す。
                 // リテラル日付は学習しないが、形式 (ymd_slash 等) の選好は加点する。
-                // 日付候補は低スコア帯 (base 50) なので、加点しても libakaza/学習候補
-                // (98k/200k+) を超えず、「今日(漢字)」等の既定は上位に残る。
+                // 加点は `count × STEP` (上限 MAX_BOOST)。日付候補は低スコア帯 (base 50)
+                // に留まり、上限込みでも libakaza/学習候補 (98k/200k+) を超えないので
+                // 「今日(漢字)」等の既定は上位に残る (datetime.rs の 2 定数を参照)。
                 if let Some(fmt) = super::datetime::classify_datetime_format(&c.surface) {
-                    let boost = i32::try_from(self.date_formats.count(fmt)).unwrap_or(i32::MAX);
+                    let raw = i64::from(self.date_formats.count(fmt))
+                        * i64::from(super::datetime::DATE_FORMAT_PREFERENCE_STEP);
+                    let capped =
+                        raw.min(i64::from(super::datetime::DATE_FORMAT_PREFERENCE_MAX_BOOST));
+                    let boost = i32::try_from(capped)
+                        .unwrap_or(super::datetime::DATE_FORMAT_PREFERENCE_MAX_BOOST);
                     c.score = c.score.saturating_add(boost);
                 }
                 candidates.push(c);
@@ -2179,6 +2185,49 @@ mod tests {
         assert!(
             slash_score > others_max,
             "★ 選好した ymd_slash ({slash_score}) が他の日付形式 (最大 {others_max}) より上位"
+        );
+    }
+
+    /// 加点幅 (count×STEP) と上限を固定する。「+1/回では上がった気がしない」への対応を
+    /// 数値で pin し (CODE_COMMENT_DISCIPLINE: 数値の主張はテストで裏付ける)、同時に
+    /// 上限込みでも libakaza 帯 (+100_000) を侵さない不変条件を固定する。
+    #[test]
+    fn date_format_boost_is_step_times_count_and_stays_below_libakaza_band() {
+        use crate::conversion::datetime::{classify_datetime_format, DATE_FORMAT_PREFERENCE_STEP};
+        let mut engine = ConversionEngine::new().unwrap();
+        let ctx = ConversionContext::new();
+
+        // 未選好の日付候補スコア (= base) を実測で取る (定数を複製しない)。
+        let before = engine.convert("きょう", &ctx).unwrap();
+        let base = before
+            .iter()
+            .find(|c| classify_datetime_format(&c.surface).is_some())
+            .map(|c| c.score)
+            .expect("日付候補");
+
+        // 3 回選ぶと「base + 3×STEP」に上がる (= 1 回ごとに STEP ずつ体感で上がる)。
+        for _ in 0..3 {
+            engine.date_formats.record("ymd_slash");
+        }
+        let after = engine.convert("きょう", &ctx).unwrap();
+        let slash = after
+            .iter()
+            .find(|c| classify_datetime_format(&c.surface) == Some("ymd_slash"))
+            .map(|c| c.score)
+            .expect("ymd_slash 候補");
+        assert_eq!(
+            slash,
+            base + 3 * DATE_FORMAT_PREFERENCE_STEP,
+            "加点は count×STEP"
+        );
+
+        // 不変条件: base + 上限いっぱいでも libakaza 帯 (+100_000) を超えない。
+        // libakaza 定数は akaza feature 限定なので gate する (cross-platform clippy 対策)。
+        #[cfg(feature = "akaza")]
+        assert!(
+            base + crate::conversion::datetime::DATE_FORMAT_PREFERENCE_MAX_BOOST
+                < LIBAKAZA_PRIORITY_BOOST,
+            "日付加点は上限込みでも libakaza 帯を侵さない (今日/既定を飛び越えない)"
         );
     }
 

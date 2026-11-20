@@ -10,6 +10,21 @@ use super::{Candidate, CandidateSource};
 /// 日付/時刻候補のスコア (そこそこ上位に出すが、今日(kanji) 等の既定は残す)。
 const DATETIME_SCORE: i32 = 50;
 
+/// フォーマット選好 1 回あたりの加点 (日付グループ内の並べ替え用)。
+///
+/// base `DATETIME_SCORE` に対し、ユーザーがその形式 (`ymd_slash` 等) を確定するたび
+/// `count × STEP` だけ上乗せして「選んだ形式ほど日付グループの上」にする。+1/回 では
+/// 体感で「スコアが上がらない」ため、1 回で確実に差が出る幅にした (2026-11 ユーザー報告)。
+pub const DATE_FORMAT_PREFERENCE_STEP: i32 = 50;
+
+/// フォーマット選好加点の上限。
+///
+/// 日付候補が libakaza/学習帯 (~98k 以上) を超えて「今日(漢字)」等の既定を飛び越えない
+/// よう頭打ちにする。防御的な安全弁で、実使用の確定回数 (90000/50 = 1800 回) では到達しない。
+/// この不変条件は engine.rs の
+/// `date_format_boost_is_step_times_count_and_stays_below_libakaza_band` テストで固定する。
+pub const DATE_FORMAT_PREFERENCE_MAX_BOOST: i32 = 90_000;
+
 /// 読みに対応する日付/時刻候補を返す (現在時刻を使用。該当なしは空)。
 #[must_use]
 pub fn datetime_candidates(reading: &str) -> Vec<Candidate> {
