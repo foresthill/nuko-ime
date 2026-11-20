@@ -1,5 +1,6 @@
 //! 学習マネージャー
 
+use super::correction;
 use super::frequency::{FrequencyEntry, LearningStrength, MEDIUM_STEP, OVERTAKE_MARGIN};
 use crate::conversion::{Candidate, ConversionContext};
 use crate::error::{NukoError, Result};
@@ -150,7 +151,9 @@ impl LearningManager {
             return;
         };
         match self.strength {
-            LearningStrength::Weak => {}
+            // Weak = 頻度のみ。Crown は `apply_crown_boost` で別処理 (engine が strength で
+            // 振り分ける) ので、ここに来たら no-op = 剥奪ロジック抜きの部分適用を避ける。
+            LearningStrength::Weak | LearningStrength::Crown => {}
             LearningStrength::Medium => entry.add_boost(MEDIUM_STEP),
             LearningStrength::Strong => {
                 if let Some(top) = rival_top {
@@ -158,6 +161,44 @@ impl LearningManager {
                 }
             }
         }
+        *self.dirty.write() = true;
+    }
+
+    /// **王冠ブースト**を与える (`LearningStrength::Crown`。`record` の後に呼ぶ)。
+    ///
+    /// 「確定した候補が一気に 1 位へ来る」思想を保ちつつ**暴走を断つ**ための中核。
+    /// 同じ読みについて:
+    /// 1. **他表層の王冠を剥奪** (`demote` で boost を 0 に戻す)。王冠を持てるのは
+    ///    「最後に確定した 1 つ」だけ = 交互確定でも両方が競り上がらない。
+    /// 2. 剥奪後の**他表層の最大 score (base)** を目標に、選んだ表層へ `set_crown` で
+    ///    上限付きブーストを与える (訂正tier `correction::CORRECTION_BOOST` 未満にクランプ)。
+    ///
+    /// 相手が居なければブーストは 0 (頻度ベース 200_000 で libakaza には勝つ)。
+    /// `rival_top` を引数に取らない = 高価な `convert` 不要で、相手の“ブースト済み”値を
+    /// 追わない (= ratchet しない) のが `apply_selection_boost(Strong)` との決定的な違い。
+    pub fn apply_crown_boost(&mut self, candidate: &Candidate) {
+        let mut data = self.frequency_data.write();
+        let Some(entries) = data.get_mut(&candidate.reading) else {
+            return;
+        };
+
+        // 1. 他表層の王冠を剥奪し、剥奪後の最大 base score を測る。
+        let mut rival_base_top: Option<i32> = None;
+        for e in entries.iter_mut() {
+            if e.surface != candidate.surface {
+                e.demote(); // boost = 0 (王冠剥奪)。count は保持。
+                let s = e.score();
+                rival_base_top = Some(rival_base_top.map_or(s, |m| m.max(s)));
+            }
+        }
+
+        // 2. 選んだ表層へ王冠を設定 (相手が居るときだけ)。
+        if let Some(target) = rival_base_top {
+            if let Some(entry) = entries.iter_mut().find(|e| e.surface == candidate.surface) {
+                entry.set_crown(target, OVERTAKE_MARGIN, correction::CORRECTION_BOOST);
+            }
+        }
+
         *self.dirty.write() = true;
     }
 
@@ -270,6 +311,7 @@ mod tests {
         // 実機の「様 が Layer2 で底上げされた 用(~300k) に勝てない」を再現し、
         // Strong の追い越しで 1 回の選択で逆転することを確認する。
         let mut manager = LearningManager::new().unwrap();
+        manager.set_strength(super::LearningStrength::Strong); // 既定は Crown なので明示
         let ctx = ConversionContext::default();
         let sama = Candidate::new("様", "よう");
 
@@ -305,6 +347,7 @@ mod tests {
     fn demote_removes_overtake_boost_back_to_frequency_base() {
         // 追い越しで膨張した表層を降格 → 頻度ベースへ戻り、名指しした表層だけ下がる。
         let mut manager = LearningManager::new().unwrap();
+        manager.set_strength(super::LearningStrength::Strong); // 累積モードの暴走を模擬
         let ctx = ConversionContext::default();
         let you = Candidate::new("用", "よう");
         manager.record(&you, &ctx).unwrap();
@@ -322,5 +365,74 @@ mod tests {
             "存在しない表層は false"
         );
         assert!(!manager.demote("ない読み", "用"), "存在しない読みは false");
+    }
+
+    #[test]
+    fn crown_makes_committed_top_over_learned_rival() {
+        // 既定(Crown)。用 を多用(高count)した後に 様 を確定 → 様 が 1 位へ。
+        let mut m = LearningManager::new().unwrap();
+        let ctx = ConversionContext::default();
+        let you = Candidate::new("用", "よう");
+        let sama = Candidate::new("様", "よう");
+        for _ in 0..20 {
+            m.record(&you, &ctx).unwrap(); // 用 count=20 → base 200_200
+        }
+        m.record(&sama, &ctx).unwrap(); // 様 count=1 → base 200_010
+        m.apply_crown_boost(&sama); // 様 を確定(王冠)
+
+        let cands = m.get_candidates("よう", &ctx).unwrap();
+        let top = cands.iter().max_by_key(|c| c.score).unwrap();
+        assert_eq!(top.surface, "様", "確定した 様 が 1 位");
+        assert!(top.score < 300_000, "訂正tier未満 (={})", top.score);
+    }
+
+    #[test]
+    fn crown_strips_previous_crown_and_does_not_ratchet() {
+        // 用/様 を交互に確定しても、王冠は「最後の 1 つ」だけ = 青天井に競り上がらない。
+        let mut m = LearningManager::new().unwrap();
+        let ctx = ConversionContext::default();
+        let you = Candidate::new("用", "よう");
+        let sama = Candidate::new("様", "よう");
+        m.record(&you, &ctx).unwrap();
+        m.record(&sama, &ctx).unwrap();
+
+        let mut last_top_score = 0;
+        for i in 0..10 {
+            let pick = if i % 2 == 0 { &sama } else { &you };
+            m.record(pick, &ctx).unwrap();
+            m.apply_crown_boost(pick);
+            let cands = m.get_candidates("よう", &ctx).unwrap();
+            let top = cands.iter().max_by_key(|c| c.score).unwrap();
+            assert_eq!(top.surface, pick.surface, "最後に確定した方が 1 位");
+            assert!(
+                top.score < 300_000,
+                "交互確定でも訂正tier未満に収まる (i={i}, score={})",
+                top.score
+            );
+            last_top_score = top.score;
+        }
+        // 10 回交互でも 250k 近辺に収まる (旧 Strong は 500k 超へ暴走していた)。
+        assert!(
+            last_top_score < 260_000,
+            "10 回交互でも ~250k で頭打ち (={last_top_score})"
+        );
+    }
+
+    #[test]
+    fn crown_keeps_other_surfaces_boost_zero() {
+        // 剥奪された他表層は boost=0 (頻度ベース) に戻っている。
+        let mut m = LearningManager::new().unwrap();
+        let ctx = ConversionContext::default();
+        let you = Candidate::new("用", "よう");
+        let sama = Candidate::new("様", "よう");
+        m.record(&you, &ctx).unwrap();
+        m.apply_crown_boost(&you); // 用 に王冠
+        m.record(&sama, &ctx).unwrap();
+        m.apply_crown_boost(&sama); // 様 に王冠 → 用 の王冠は剥奪
+
+        let data = m.frequency_data.read();
+        let entries = data.get("よう").unwrap();
+        let you_entry = entries.iter().find(|e| e.surface == "用").unwrap();
+        assert_eq!(you_entry.boost, 0, "剥奪された 用 は boost=0");
     }
 }

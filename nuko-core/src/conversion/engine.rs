@@ -1296,22 +1296,30 @@ impl ConversionEngine {
         }
         self.learning.record(candidate, context)?;
 
-        // 学習の強さに応じて「追い越しブースト」を積む (#183 スコア可視化の次段)。
-        // Strong のときは、同じ読みの**他候補の最大“合成”スコア** (libakaza/Layer2 込み)
-        // を再変換で求め、それを恒久的に上回るまで Layer0 を引き上げる。これで Layer2 で
-        // 底上げされた rival (例 `よう→用` ~300k) にも 1 回の選択で勝てる。Weak なら skip。
-        if self.learning.strength() != crate::learning::LearningStrength::Weak {
-            let rival_top = self
-                .convert(&candidate.reading, context)
-                .ok()
-                .and_then(|cands| {
-                    cands
-                        .iter()
-                        .filter(|c| c.surface != candidate.surface)
-                        .map(|c| c.score)
-                        .max()
-                });
-            self.learning.apply_selection_boost(candidate, rival_top);
+        // 学習モードに応じて確定ブーストを積む (#183 スコア可視化の次段 / 王冠 2026-11-21)。
+        // - Crown (既定): 上限付き王冠。他表層の王冠を剥奪して「最後に確定した 1 つ」だけを
+        //   1 位へ。convert 不要 (相手の base だけ見る = ratchet しない)。暴走の根治。
+        // - Strong/Medium: 従来の累積・追い越し。同じ読みの**他候補の最大“合成”スコア**
+        //   (libakaza/Layer2 込み) を再変換で求め、それを恒久的に上回るまで引き上げる。
+        //   集合知的に上がる挙動を好むユーザー向けの選択肢 (単調増加なので青天井)。
+        // - Weak: 頻度のみ (+10)。ブーストしない。
+        use crate::learning::LearningStrength;
+        match self.learning.strength() {
+            LearningStrength::Weak => {}
+            LearningStrength::Crown => self.learning.apply_crown_boost(candidate),
+            LearningStrength::Medium | LearningStrength::Strong => {
+                let rival_top = self
+                    .convert(&candidate.reading, context)
+                    .ok()
+                    .and_then(|cands| {
+                        cands
+                            .iter()
+                            .filter(|c| c.surface != candidate.surface)
+                            .map(|c| c.score)
+                            .max()
+                    });
+                self.learning.apply_selection_boost(candidate, rival_top);
+            }
         }
 
         // 学習データの永続化が設定されていれば自動 save。失敗は warn にとどめ
@@ -2129,6 +2137,54 @@ mod tests {
         assert!(
             neko.iter().any(|c| c.surface == "猫2"),
             "datetime でない読みの学習は維持される (ガードが広すぎない)"
+        );
+    }
+
+    /// ★ 王冠モード (既定) の commit→convert end-to-end 検証。
+    ///
+    /// 「確定した候補が一気に 1 位へ来る」思想を保ちつつ、交互確定でも訂正tier(300k)
+    /// 未満に収まり**暴走しない**こと (旧 Strong は 500k 超へ膨張していた) を実経路で確認。
+    #[test]
+    fn crown_commit_puts_last_committed_on_top_and_stays_bounded() {
+        let mut engine = ConversionEngine::new().unwrap();
+        let ctx = ConversionContext::new();
+        let you = Candidate::new("用", "よう");
+        let sama = Candidate::new("様", "よう");
+
+        let top = |engine: &ConversionEngine| -> Candidate {
+            engine
+                .convert("よう", &ctx)
+                .unwrap()
+                .iter()
+                .max_by_key(|c| c.score)
+                .cloned()
+                .unwrap()
+        };
+
+        // 用 を多用 (count=20)。この時点では 用 が 1 位。
+        for _ in 0..20 {
+            engine.commit(&you, &ctx).unwrap();
+        }
+        assert_eq!(top(&engine).surface, "用", "多用した 用 が一旦 1 位");
+
+        // 様 を 1 回確定 → 王冠が 様 へ移り、一発で 1 位。訂正tier未満。
+        engine.commit(&sama, &ctx).unwrap();
+        let after_sama = top(&engine);
+        assert_eq!(after_sama.surface, "様", "最後に確定した 様 が 1 位へ");
+        assert!(
+            after_sama.score < 300_000,
+            "王冠は訂正tier未満 (={})",
+            after_sama.score
+        );
+
+        // 用 に戻しても王冠が移るだけで暴走しない。
+        engine.commit(&you, &ctx).unwrap();
+        let back = top(&engine);
+        assert_eq!(back.surface, "用", "確定した 用 が再び 1 位");
+        assert!(
+            back.score < 300_000,
+            "交互確定でも訂正tier未満 = 暴走しない (={})",
+            back.score
         );
     }
 

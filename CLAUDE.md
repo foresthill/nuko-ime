@@ -283,6 +283,17 @@ PR #40 で `convert_k_best(reading, None, k=9)` に切替。各 `KBestPath` が�
 - **配線は state.rs/CLI のみ（controller.rs = IMK 境界は不触）**: 記録は controller が既に呼ぶ `note_commit_detect_correction` の中、反映は `auto_relearn_after_commit`（観察 OFF でも打ち直しがあれば既存 corrections を尊重して upsert）/ `setup_corrections`（起動時畳み込み）/ `relearn_now`（観察∪打ち直し）。**忘れる**（設定窓＋`nuko learn forget`）も retype.json を purge（でないと次の確定で復活）。
 - 設計思想は [`docs/LEARNING_ARCHITECTURE.md`](docs/LEARNING_ARCHITECTURE.md)（個人重みの合成）を正とする。残: `×N`（打ち直し回数）をビューアに出す v2 / 文中の複数文節打ち直し（whole-reading 選好の既存制約）。
 
+### 確定ブーストの暴走 → 「王冠モデル」で根治＋モード選択（既定が Strong→**Crown** に変更）
+
+追い越しブースト（単調増加）が `用`/`様` の交互確定で 500k〜800k まで膨張し、打ち直し訂正(300k)でも勝てない悪循環になっていた（森岡さん報告）。**「確定した候補が一気に1位へ来る」思想は保持し、値の暴走だけを断つ**のが王冠モデル。
+
+- **既定 `LearningStrength` を `Strong`→`Crown` に変更**（`frequency.rs`）。`set_strength` は現状どこからも呼ばれず常に既定なので、実質「全ユーザーが Crown になる」= 暴走の根治。
+- **王冠** = 1つの読みにつき「最後に確定した1つ」だけが**上限付き**ブーストを持つ。確定時に他表層の boost は剥奪（0）。**非単調**だが順位は常に1位（「戻った!?」は起きない）／**訂正tier(`correction::CORRECTION_BOOST`)未満にクランプ**（打ち直し訂正は王冠より強い階層を保持。天井の値の真実源は correction.rs）。`convert` 不要で ratchet しない。
+- 実装: `FrequencyEntry::set_crown` / `LearningManager::apply_crown_boost`、`engine.commit` がモードで振り分け。end-to-end pin = `crown_commit_puts_last_committed_on_top_and_stays_bounded`。
+- **モードは4つから選べる**（Weak=頻度のみ / Crown=既定 / Strong=累積・集合知/従来 / Medium=中）。森岡さん「集合知として上がるパターンも選べると良い」。
+- **残（別PR）**: ①モード選択UI＋`LearningStrength`永続化 ②Shift+Enter=教える/Ctrl+Enter=降格（controller.rs＝**smoke必須**）③←→スコア増減（文節移動と衝突、文脈分離要）④手動スコア調整 ⑤全イベントログ化（**肥大注意**＝#152 prune踏襲）⑥平仮名ライブ変換。
+- 設計思想・ロードマップは [`docs/LEARNING_ARCHITECTURE.md`](docs/LEARNING_ARCHITECTURE.md)（§追い越しの暴走→王冠モデル）を正とする。
+
 ### 設計思想: 学習4層 ↔ 心の構造（意識/個人的無意識/集合的無意識/超意識）
 
 個人学習は**共有しない**、集合知は**有益な分だけアップデートで配布**、AI(dreaming)は**意図推論**——この振り分けは心の構造のメタファで整理できる。長期の設計思想は [`docs/LEARNING_ARCHITECTURE.md` §1.5](docs/LEARNING_ARCHITECTURE.md)（長期記憶）。このCLAUDE.md（短期記憶）には運用規約だけ置き、思想は docs 側を正とする。

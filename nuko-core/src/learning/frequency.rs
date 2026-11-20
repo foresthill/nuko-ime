@@ -3,29 +3,45 @@
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
-/// 学習の「強さ」= 候補を選んだときスコアをどれだけ上げるか。
+/// 学習の「強さ」= 候補を選んだときスコアをどれだけ上げるか (= 学習モード)。
 ///
 /// 可視化で「1 回選んでも +10 しか上がらず、Layer2 で底上げされた rival
 /// (例 `用` ~300k) に永遠に勝てない」と判明した (2026-11-14、実機 + `--explain`)。
-/// そこで「上げ幅」をユーザー設定にする。設計判断は docs/LEARNING_ARCHITECTURE.md §1.6:
-/// - **減衰する recency ボーナスは不採用**(「さっき上に出たのに戻ってる!?」= 非単調で混乱)。
-/// - 採用 = **追い越し(恒久・単調)**: 選んだら今のトップより上へ恒久的に引き上げる
-///   (`FrequencyEntry::boost_to_at_least`)。スコアは選択時だけ上がる = 下がらない。
+/// そこで「上げ幅」をユーザー設定にする。設計判断は docs/LEARNING_ARCHITECTURE.md §1.6。
+///
+/// ## モードの系譜 (なぜ 4 つあるか)
+///
+/// - 当初の `Strong` (追い越し・単調増加) は「選んだら今のトップより上へ恒久加点」
+///   する設計思想 (森岡さん) だった。だが **単調増加 × 相手の“ブースト済み”スコアを
+///   追う** ため、`用`/`様` を交互確定すると両方が青天井に競り上がり実機で 500k〜800k
+///   まで膨張、打ち直し訂正(300k)でも勝てない悪循環を生んだ (2026-11)。
+/// - 根治として **`Crown` (王冠・既定)** を追加。確定した表層へ**上限付き**のブーストを与え、
+///   同じ読みの**他表層の王冠は剥奪**する (= 王冠を持てるのは「最後に確定した 1 つ」だけ)。
+///   非単調 + 剥奪なので交互確定でも競り上がらず、訂正tier(300k)**未満**に収まる
+///   (打ち直し訂正は王冠より強い、という階層を保つ)。
+/// - `Strong` は「累積(集合知的に上がる従来挙動)」を好むユーザー向けに**選択肢として残す**
+///   (森岡さん「単純上書きでなく集合知として上がるパターンも選べると良い」2026-11-21)。
+///
+/// 減衰する recency ボーナスは依然**不採用** (「さっき上に出たのに戻ってる!?」= 非単調で混乱)。
+/// 王冠の非単調は**絶対値**が下がり得るだけで**順位は常に 1 位**なので、この混乱は起きない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LearningStrength {
-    /// 従来どおり (1 選択 = 使用回数 +1 = スコア +10)。追い越しなし。
+    /// 頻度のみ (1 選択 = 使用回数 +1 = スコア +10)。確定でブーストしない。
     Weak,
     /// 段階的に大きく上げる (1 選択ごとに固定ステップ加点)。数回で逆転。
     Medium,
-    /// 1 選択で必ずトップへ (今の最上位候補を恒久的に追い越す)。既定。
-    #[default]
+    /// 累積・追い越し (今の最上位を恒久的に追い越す・単調増加)。集合知的に上がるが青天井。
     Strong,
+    /// 王冠 (既定): 確定した 1 つだけへ**上限付き**ブースト。他表層の王冠は剥奪。
+    /// 暴走せず、打ち直し訂正(300k)より下に収まる。
+    #[default]
+    Crown,
 }
 
 /// 「中」1 選択あたりの固定ブースト加点。数回で高スコア rival も抜ける大きさ。
 pub const MEDIUM_STEP: i32 = 20_000;
-/// 追い越し時に相手へ乗せる余裕 (同点負けを防ぐ)。
+/// 追い越し時に相手へ乗せる余裕 (同点負けを防ぐ)。王冠でも同じ余裕を使う。
 pub const OVERTAKE_MARGIN: i32 = 100;
 
 /// 頻度情報
@@ -109,6 +125,25 @@ impl FrequencyEntry {
         if needed > 0 {
             self.boost = self.boost.saturating_add(needed);
         }
+    }
+
+    /// **王冠**を与える: score が `target + margin` になるよう boost を設定する
+    /// (「王冠」= `LearningStrength::Crown`。確定した 1 つだけが持つ上限付きブースト)。
+    ///
+    /// `boost_to_at_least` との違いは 2 点、どちらも**暴走を断つ**ためにある:
+    /// 1. **非単調** (set であって add でない)。相手が低ければ boost は下がり得る。これにより
+    ///    `用`/`様` を交互確定しても、毎回 strip 済みの相手 base を目標に**再設定**するだけで
+    ///    青天井に競り上がらない。順位は常に相手の上 = 1 位なので「戻った」感は出ない。
+    /// 2. **`ceiling` でクランプ**。score が `ceiling` 以上にならない。呼び出し側は訂正tier
+    ///    (`correction::CORRECTION_BOOST`) を渡し、**打ち直し訂正は王冠より強い**階層を保つ。
+    ///
+    /// `target` には「同じ読みの他表層の最大 score (王冠剥奪後の base)」を渡す。相手が居ない
+    /// (target が自分の base 以下) なら boost は 0 = 頻度ベースのまま (それでも libakaza には勝つ)。
+    pub fn set_crown(&mut self, target: i32, margin: i32, ceiling: i32) {
+        let desired = target.saturating_add(margin).min(ceiling.saturating_sub(1));
+        // boost を除いた素点 (= 200_000 + count*10 − 減衰)。score() = base + boost。
+        let base = self.score().saturating_sub(self.boost);
+        self.boost = desired.saturating_sub(base).max(0);
     }
 
     /// スコアを計算
@@ -264,8 +299,57 @@ mod tests {
     }
 
     #[test]
-    fn learning_strength_default_is_strong() {
-        assert_eq!(LearningStrength::default(), LearningStrength::Strong);
+    fn learning_strength_default_is_crown() {
+        // 既定は王冠 (上限付き・暴走なし)。旧既定 Strong は「累積」選択肢として残す。
+        assert_eq!(LearningStrength::default(), LearningStrength::Crown);
+    }
+
+    #[test]
+    fn set_crown_overtakes_rival_and_stays_below_ceiling() {
+        // 様 (base 200_010) を rival(用 base 200_200) の上へ。天井 300_000 未満。
+        let mut sama = FrequencyEntry::new("様", "よう");
+        let ceiling = crate::learning::correction::CORRECTION_BOOST; // 300_000
+        sama.set_crown(200_200, OVERTAKE_MARGIN, ceiling);
+        assert_eq!(sama.score(), 200_300, "rival base + margin へ乗る");
+        assert!(
+            sama.score() < ceiling,
+            "訂正tier未満 (打ち直し訂正は王冠より強い)"
+        );
+    }
+
+    #[test]
+    fn set_crown_is_clamped_by_ceiling() {
+        // 相手が訂正tierを超える高スコアでも、王冠は天井-1 までしか上がらない。
+        let mut e = FrequencyEntry::new("用", "よう");
+        let ceiling = crate::learning::correction::CORRECTION_BOOST;
+        e.set_crown(999_999, OVERTAKE_MARGIN, ceiling);
+        assert_eq!(
+            e.score(),
+            ceiling - 1,
+            "天井でクランプ (訂正tierは超えない)"
+        );
+    }
+
+    #[test]
+    fn set_crown_is_nonmonotonic_no_ratchet() {
+        // 非単調: 大きい rival で一度上げ、その後小さい rival で再設定すると下がる
+        // (= 交互確定で青天井に競り上がらない)。順位は常に rival の上。
+        let mut e = FrequencyEntry::new("様", "よう");
+        let ceiling = crate::learning::correction::CORRECTION_BOOST;
+        e.set_crown(250_000, OVERTAKE_MARGIN, ceiling);
+        assert_eq!(e.score(), 250_100);
+        e.set_crown(200_200, OVERTAKE_MARGIN, ceiling); // 相手が下がった
+        assert_eq!(e.score(), 200_300, "非単調で下がる (ratchet しない)");
+    }
+
+    #[test]
+    fn set_crown_no_rival_keeps_frequency_base() {
+        // rival が自分の base 以下なら boost 0 = 頻度ベース (libakaza には base で勝つ)。
+        let mut e = FrequencyEntry::new("猫", "ねこ"); // base 200_010
+        let ceiling = crate::learning::correction::CORRECTION_BOOST;
+        e.set_crown(100, OVERTAKE_MARGIN, ceiling);
+        assert_eq!(e.boost, 0, "相手が居なければブーストしない");
+        assert_eq!(e.score(), 200_010);
     }
 
     #[test]
