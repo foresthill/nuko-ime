@@ -582,6 +582,50 @@ pub fn auto_relearn_after_commit() {
     }
 }
 
+/// 確定ホットパスから重い再学習を外すためのデバウンス間隔 (ms)。
+/// 新しい確定がこの時間だけ来なければ 1 回だけ再学習する (trailing-edge)。
+const RELEARN_DEBOUNCE_MS: u64 = 400;
+
+thread_local! {
+    /// 確定ごとに増える世代。デバウンス発火時に最新世代と一致したときだけ実行する
+    /// (= 入力バーストの最後の確定だけが再学習を走らせる)。
+    static RELEARN_GEN: Cell<u64> = const { Cell::new(0) };
+}
+
+/// 確定後の再学習を**デバウンスして**実行する ([`auto_relearn_after_commit`] の遅延版)。
+///
+/// `auto_relearn_after_commit` は observations.jsonl を read/parse する重い同期処理で、
+/// 実機では 15MB 規模になる。これを**毎確定**メインスレッドで走らせると、超高速な連続
+/// 確定のたびに UI が刻々止まり、その隙にクライアント (特に Chromium/Electron) が確定
+/// 直後のテキストを取りこぼす「全消え」の遠因になる (2026-11 森岡さん報告
+/// 「超高速確定でたまに全消え・少し待って欲しい」)。
+///
+/// 入力バーストが [`RELEARN_DEBOUNCE_MS`] だけ途切れてから**1 回だけ**再学習することで、
+/// N 連続確定を N 回の重い処理から 1 回へ畳む。打ち直し降格もこの中で遅延適用される
+/// (ユーザーが次に変換するまでには間に合う)。再学習ロジック自体は変えないので、
+/// 「選んだら次から上位」の挙動はバーストが落ち着いた直後に従来どおり効く。
+pub fn schedule_auto_relearn() {
+    let generation = RELEARN_GEN.with(|g| {
+        let next = g.get().wrapping_add(1);
+        g.set(next);
+        next
+    });
+    let Ok(when) =
+        dispatch2::DispatchTime::try_from(std::time::Duration::from_millis(RELEARN_DEBOUNCE_MS))
+    else {
+        // Duration 変換は実機で失敗しない想定だが、保険で即時実行にフォールバックする。
+        auto_relearn_after_commit();
+        return;
+    };
+    // closure はメインキュー (= メインスレッド) で走るので thread_local へのアクセスは安全。
+    let _ = dispatch2::DispatchQueue::main().after(when, move || {
+        // バースト中に後続の確定が来て世代が進んでいたら skip (最後の確定だけ実行)。
+        if RELEARN_GEN.with(Cell::get) == generation {
+            auto_relearn_after_commit();
+        }
+    });
+}
+
 /// 指定の読みに対する単語登録候補の表層を返す (候補ウィンドウの Tab ヒント/登録用)。
 ///
 /// [`registration_candidate`] の「1つ前の読み」が `reading` と一致するときだけ `Some`。
