@@ -8,8 +8,13 @@ set -euo pipefail
 # FFI 型不整合 (CLAUDE.md 落とし穴 #9 参照) はこのゲートでしか捕まらない。
 #
 # 使い方:
-#   ./nuko-macos/scripts/smoke-test.sh          # release ビルドで install + 再起動 + チェックリスト
+#   ./nuko-macos/scripts/smoke-test.sh          # release ビルドで install + 反映案内 + チェックリスト
 #   ./nuko-macos/scripts/smoke-test.sh --debug  # debug ビルド(panic=unwind+シンボル)で panic 採取
+#
+# ★ release モードは install.sh と同じく **open しない** (open は旧 IME 接続を奪い「打てない」
+#   事故の元。[[nuko-ime-never-manual-open-ime]] / install.sh のコメント参照)。新ビルドの反映は
+#   入力ソース切替で行う。debug モードは panic 採取のため .app のバイナリを直接起動する
+#   (これは `open` ではなく CLAUDE.md が認める crash 採取手段)。
 #
 # FEATURES は install.sh と同じく環境変数で上書き可 (default: akaza)。
 
@@ -49,13 +54,16 @@ if [ "$MODE" = "release" ]; then
     # 通常の install.sh をそのまま使う (build release + .app 作成 + install + killall)
     FEATURES="$FEATURES" "$SCRIPT_DIR/install.sh"
 
-    echo "=== 新ビルドを起動 ==="
-    open "$HOME/Library/Input Methods/$APP_NAME.app"
-    sleep 2
+    # ★ ここで `open` は絶対にしない (install.sh の該当コメントと同じ理由)。
+    #   install.sh は killall 後に意図的に open せず TISRegisterInputSource で再登録する。
+    #   killall 直後の手動 open は旧 IME 接続を奪い「入力ソースに追加できるのに打てない」
+    #   事故を招く (2026-10-28 実機、デバッグ中の手動 open で発症。FB23026482)。
+    #   新ビルドの反映は **入力ソース切替** (ことえり等 ↔ ぬこIME) で行う。
+    echo "=== 反映手順 (★ open はしない) ==="
+    echo "  入力ソースを 別IME(ことえり等) に切替 → ぬこIME に戻すと新ビルドが反映されます。"
+    echo "  (切替えるまで NukoIME が起動していないのは正常。切替で macOS が新バイナリに繋ぎ直します)"
     if pgrep -lf "$APP_NAME" >/dev/null; then
-        echo "プロセス起動 OK: $(pgrep -lf "$APP_NAME" | head -1)"
-    else
-        echo "⚠️  プロセスが起動していません。クラッシュの可能性。--debug で再採取してください。"
+        echo "  参考: 現在の NukoIME プロセス = $(pgrep -lf "$APP_NAME" | head -1)"
     fi
     print_checklist
 else
