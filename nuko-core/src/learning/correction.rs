@@ -23,7 +23,11 @@ use crate::error::{NukoError, Result};
 /// frequency 学習の boost(~200_000)を上回るようにして、**確定した個人選好が
 /// 頻度・libakaza より優先**されるようにする。重みは僅かな tiebreak。
 /// (スケールの厳密なチューニングは変換への配線時に詰める)
-const CORRECTION_BOOST: i32 = 300_000;
+///
+/// `pub(crate)`: 王冠モード (`frequency::FrequencyEntry::set_crown`) が「王冠は
+/// 打ち直し訂正より下に収める」天井としてこの値を参照する。値の複製を避け、
+/// 訂正tierの高さの**単一の真実源**をここに置く (CLAUDE.md「コメント乖離防止」)。
+pub(crate) const CORRECTION_BOOST: i32 = 300_000;
 
 /// [`CorrectionStore::suffix_targets`] が許可する接尾かな (敬称のみ)。
 ///
