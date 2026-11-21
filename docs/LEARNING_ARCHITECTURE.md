@@ -183,13 +183,15 @@ score = 200_000 (BOOST) + 使用回数 × 10 − 時間減衰(最大30)
 
 **降格**は `demote`（#217）が既存。Ctrl+Enter 配線は次段。
 
-**ロードマップ / 未実装（この決定の後続）**:
+**ロードマップ**:
 
-1. **モード選択 UI**（入力メニュー、旧字体トグル #kyujitai と同型のマーカー方式で永続）＋
-   `LearningStrength` の永続化（現状 load で既定にリセットされる＝UI 未配線のため実害なしだったが、
-   選択を保存するには要対応）。
-2. **Shift+Enter = 教える（王冠を今すぐ強制）/ Ctrl+Enter = 降格**（controller.rs＝IMK 境界変更。
-   マージ前に**実機 smoke test 必須**）。
+1. ✅ **モード選択 UI**（入力メニュー「学習モード（確定で上げる強さ）」サブメニュー＝王冠/累積/頻度のみ。
+   旧字体トグル #kyujitai と同型のマーカー `LEARNING_MODE` で永続）＋ `engine.set_learning_strength`。
+   起動時 `build_engine` が `learning_mode()` を読んで反映。実装 2026-11-21。
+2. ✅ **Shift+Enter = 教える（モード無視で絶対1位・`commit_teach`/`apply_teach_boost`）/
+   Ctrl+Enter = 降格（`demote_frequency`・加点系はスキップ）**。handleEvent は「composing 中の
+   Ctrl+Enter だけ」横取り（非 composing の Ctrl+Enter はアプリの送信等へ素通し）。`command_for_keycode`
+   に control を追加（純粋関数・テスト付き）。controller.rs＝IMK 境界変更なので**実機 smoke 必須**。実装 2026-11-21。
 3. **←→ でスコア増減** は魅力的だが **←→ は文節移動・Shift+←→ は文節伸縮に既割当**（CLAUDE.md
    重要仕様）。衝突するので「候補パネル表示中のみ」等の文脈分離を別途設計。
 4. **手動スコア調整**（設定窓の数値フィールド）。

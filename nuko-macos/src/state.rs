@@ -1,7 +1,8 @@
 use nuko_core::conversion::{CandidateList, ConversionContext, SegmentedConversion};
 use nuko_core::learning::{
-    extract_corrections, prune_for_cap, should_record_phrase, CorrectionStore, ObservationEvent,
-    ObservationLog, PhraseStore, RetypeStore, OBS_CAP_HIGH_WATERMARK, OBS_CAP_KEEP_RECENT_COMMITS,
+    extract_corrections, prune_for_cap, should_record_phrase, CorrectionStore, LearningStrength,
+    ObservationEvent, ObservationLog, PhraseStore, RetypeStore, OBS_CAP_HIGH_WATERMARK,
+    OBS_CAP_KEEP_RECENT_COMMITS,
 };
 use nuko_core::prelude::*;
 use objc2::MainThreadMarker;
@@ -679,6 +680,7 @@ fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
     setup_corrections(&mut engine);
     setup_user_dictionary(&mut engine);
     engine.set_kyujitai_mode(kyujitai_enabled());
+    engine.set_learning_strength(learning_mode());
     Ok(engine)
 }
 
@@ -689,6 +691,7 @@ fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
     setup_corrections(&mut engine);
     setup_user_dictionary(&mut engine);
     engine.set_kyujitai_mode(kyujitai_enabled());
+    engine.set_learning_strength(learning_mode());
     Ok(engine)
 }
 
@@ -720,6 +723,47 @@ pub fn toggle_kyujitai() -> bool {
     with_engine_mut(|engine| engine.set_kyujitai_mode(now_on));
     tracing::info!(enabled = now_on, "旧字体モードを切り替え");
     now_on
+}
+
+/// 学習モード (= `LearningStrength`) を `LEARNING_MODE` ファイルから読む。既定は `Crown`。
+///
+/// ファイル内容は小文字の識別子 (`weak` / `crown` / `strong` / `medium`)。存在しない or
+/// 不明な値は既定 `Crown` (上限付き・暴走なし)。起動時に `build_engine` がエンジンへ反映する。
+#[must_use]
+pub fn learning_mode() -> LearningStrength {
+    let Some(dir) = nuko_app_support_dir() else {
+        return LearningStrength::default();
+    };
+    match std::fs::read_to_string(dir.join("LEARNING_MODE")) {
+        Ok(s) => match s.trim() {
+            "weak" => LearningStrength::Weak,
+            "medium" => LearningStrength::Medium,
+            "strong" => LearningStrength::Strong,
+            "crown" => LearningStrength::Crown,
+            _ => LearningStrength::default(),
+        },
+        Err(_) => LearningStrength::default(),
+    }
+}
+
+/// 学習モードを設定・永続化し、稼働中エンジンへも即反映する。
+///
+/// `LEARNING_MODE` ファイルへ識別子を書き、`with_engine_mut` で live 反映。モード選択 UI
+/// (入力メニュー) から呼ぶ。dir 取得不可時は何もしない。
+pub fn set_learning_mode(mode: LearningStrength) {
+    let Some(dir) = nuko_app_support_dir() else {
+        return;
+    };
+    let id = match mode {
+        LearningStrength::Weak => "weak",
+        LearningStrength::Medium => "medium",
+        LearningStrength::Strong => "strong",
+        LearningStrength::Crown => "crown",
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join("LEARNING_MODE"), id.as_bytes());
+    with_engine_mut(|engine| engine.set_learning_strength(mode));
+    tracing::info!(mode = id, "学習モードを設定");
 }
 
 /// 候補スコア表示が有効か (app support dir の `CANDIDATE_SCORE_VISIBLE` マーカーの有無)。既定 OFF。

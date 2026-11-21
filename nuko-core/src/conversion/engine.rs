@@ -1332,6 +1332,49 @@ impl ConversionEngine {
         Ok(())
     }
 
+    /// 学習モード (= `LearningStrength`) を設定する。
+    ///
+    /// モード選択 UI / 永続化 (`LEARNING_MODE` マーカー) から起動時・切替時に呼ぶ。
+    /// 既定は `Crown` (王冠・暴走なし)。
+    pub fn set_learning_strength(&mut self, strength: crate::learning::LearningStrength) {
+        self.learning.set_strength(strength);
+    }
+
+    /// **教える確定** (Shift+Enter)。通常 commit と同じく記録するが、モードに関わらず
+    /// 選んだ表層を**絶対的に 1 位**へ引き上げる (王冠の天井も無視し、訂正tierすら超える)。
+    ///
+    /// 「この候補を最優先にしろ」というユーザーの明示操作。間違えたら `demote_frequency`
+    /// (Ctrl+Enter) でリセットできる。datetime リテラルは通常 commit 同様に学習しない。
+    pub fn commit_teach(
+        &mut self,
+        candidate: &Candidate,
+        context: &ConversionContext,
+    ) -> Result<()> {
+        // datetime リテラルは「教える」でも学習しない (翌日以降に古い日付が残るため)。
+        // 形式の記録は通常 commit に委ねる (教える対象は漢字変換語が主)。
+        if super::datetime::is_datetime_surface(&candidate.reading, &candidate.surface) {
+            return self.commit(candidate, context);
+        }
+        self.learning.record(candidate, context)?;
+        let rival_top = self
+            .convert(&candidate.reading, context)
+            .ok()
+            .and_then(|cands| {
+                cands
+                    .iter()
+                    .filter(|c| c.surface != candidate.surface)
+                    .map(|c| c.score)
+                    .max()
+            });
+        self.learning.apply_teach_boost(candidate, rival_top);
+        if self.learning.has_path() {
+            if let Err(e) = self.learning.save() {
+                tracing::warn!(error = %e, "教える確定の学習 save 失敗 (in-memory のみ保持)");
+            }
+        }
+        Ok(())
+    }
+
     /// 学習データをクリア
     pub fn clear_learning_data(&mut self) -> Result<()> {
         self.learning.clear()

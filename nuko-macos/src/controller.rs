@@ -436,6 +436,24 @@ define_class!(
             self._toggle_source_badge_impl();
         }
 
+        /// 学習モード「王冠（既定・上限あり）」を選ぶ。
+        #[unsafe(method(nukoSetModeCrown:))]
+        fn nuko_set_mode_crown(&self, _sender: Option<&AnyObject>) {
+            crate::state::set_learning_mode(nuko_core::learning::LearningStrength::Crown);
+        }
+
+        /// 学習モード「累積（従来・集合知として上がる）」を選ぶ。
+        #[unsafe(method(nukoSetModeAccumulate:))]
+        fn nuko_set_mode_accumulate(&self, _sender: Option<&AnyObject>) {
+            crate::state::set_learning_mode(nuko_core::learning::LearningStrength::Strong);
+        }
+
+        /// 学習モード「頻度のみ（確定で上げない）」を選ぶ。
+        #[unsafe(method(nukoSetModeFrequencyOnly:))]
+        fn nuko_set_mode_frequency_only(&self, _sender: Option<&AnyObject>) {
+            crate::state::set_learning_mode(nuko_core::learning::LearningStrength::Weak);
+        }
+
         // 注意: 本 IME は **方式3 (handleEvent:) 単独**。方式1 (inputText:/
         // didCommandBySelector:) は実装しない。3 方式は排他で、混在は落とし穴 #9
         // (打てない/クラッシュ, PR #51/#52)。方式3 一本化は keyCode/修飾キーを得るため
@@ -444,6 +462,17 @@ define_class!(
 );
 
 // --- メソッド実装 ---
+
+/// 確定時の学習の意図 (Enter の修飾キーで決まる)。`do_commit_with_intent` が分岐する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommitIntent {
+    /// 通常 Enter: モード設定どおりに確定・学習。
+    Normal,
+    /// Shift+Enter: 確定しつつ「教える」(選んだ候補をモード無視で絶対1位へ)。
+    Teach,
+    /// Ctrl+Enter: 確定しつつ「降格」(追い越しブーストを剥がす。+10 の加点もしない)。
+    Demote,
+}
 
 impl NukoInputController {
     /// 入力ソースメニューを構築する (現状は「学習を今すぐ研ぎ直す」の 1 項目)。
@@ -595,6 +624,47 @@ impl NukoInputController {
             } else {
                 NSControlStateValueOff
             });
+
+            // 学習モード選択 (王冠=既定 / 累積=集合知/従来 / 頻度のみ)。
+            // 設計・系譜は docs/LEARNING_ARCHITECTURE.md §追い越しの暴走→王冠モデル。
+            use nuko_core::learning::LearningStrength;
+            let mode = crate::state::learning_mode();
+            let on = |b: bool| {
+                if b {
+                    NSControlStateValueOn
+                } else {
+                    NSControlStateValueOff
+                }
+            };
+            let submenu = NSMenu::new(mtm);
+
+            let crown = NSString::from_str("王冠（既定・確定で一発1位・暴走なし）");
+            let crown_item = submenu.addItemWithTitle_action_keyEquivalent(
+                &crown,
+                Some(sel!(nukoSetModeCrown:)),
+                &empty,
+            );
+            crown_item.setState(on(mode == LearningStrength::Crown));
+
+            let accum = NSString::from_str("累積（集合知として上がる・従来）");
+            let accum_item = submenu.addItemWithTitle_action_keyEquivalent(
+                &accum,
+                Some(sel!(nukoSetModeAccumulate:)),
+                &empty,
+            );
+            accum_item.setState(on(mode == LearningStrength::Strong));
+
+            let freq = NSString::from_str("頻度のみ（確定で上げない）");
+            let freq_item = submenu.addItemWithTitle_action_keyEquivalent(
+                &freq,
+                Some(sel!(nukoSetModeFrequencyOnly:)),
+                &empty,
+            );
+            freq_item.setState(on(mode == LearningStrength::Weak));
+
+            let mode_title = NSString::from_str("学習モード（確定で上げる強さ）");
+            let mode_parent = menu.addItemWithTitle_action_keyEquivalent(&mode_title, None, &empty);
+            mode_parent.setSubmenu(Some(&submenu));
         }
 
         // ── ④ 情報セクション ──
@@ -793,21 +863,30 @@ impl NukoInputController {
             return Bool::NO;
         }
         let mods = event.modifierFlags();
-        // Command/Control 併用はアプリのショートカット → IME は奪わない。
-        if mods.contains(NSEventModifierFlags::Command)
-            || mods.contains(NSEventModifierFlags::Control)
-        {
+        let key_code = event.keyCode();
+        let is_composing = self.ivars().state.borrow().is_composing;
+        let cmd = mods.contains(NSEventModifierFlags::Command);
+        let ctrl = mods.contains(NSEventModifierFlags::Control);
+        const KEYCODE_RETURN: u16 = 0x24;
+        let is_return = key_code == KEYCODE_RETURN;
+
+        // Command 併用はアプリのショートカット → 常に IME は奪わない。
+        // Control も原則アプリへ素通し。**例外は「composing 中の Ctrl+Enter」だけ**で、
+        // これは「降格確定」として横取りする (未確定文字がある最中なのでアプリは Enter を
+        // 期待しておらず、奪っても send 等を壊さない)。非 composing の Ctrl+Enter は
+        // 従来どおり素通し (Slack/Teams の送信等を壊さない)。
+        if cmd || (ctrl && !(is_composing && is_return)) {
             return Bool::NO;
         }
         let shift = mods.contains(NSEventModifierFlags::Shift);
-        let key_code = event.keyCode();
-        let is_composing = self.ivars().state.borrow().is_composing;
+        // ここに来る control は「composing 中の Ctrl+Enter」のときだけ true。
+        let control = ctrl;
 
         debug_log(&format!(
-            "handleEvent: keyCode={key_code} shift={shift} composing={is_composing}"
+            "handleEvent: keyCode={key_code} shift={shift} control={control} composing={is_composing}"
         ));
 
-        match crate::commit::command_for_keycode(key_code, shift, is_composing) {
+        match crate::commit::command_for_keycode(key_code, shift, control, is_composing) {
             crate::commit::KeyAction::Command(cmd) => self.run_command_action(cmd, client),
             crate::commit::KeyAction::Fkey(kind) => {
                 self.apply_fkey_conversion(client, kind);
@@ -1189,6 +1268,16 @@ impl NukoInputController {
             CommandAction::Commit => {
                 // Enter: 確定
                 self.do_commit(client);
+                Bool::YES
+            }
+            CommandAction::CommitTeach => {
+                // Shift+Enter: 確定しつつ「教える」(選んだ候補をモード無視で絶対1位へ)
+                self.do_commit_with_intent(client, CommitIntent::Teach);
+                Bool::YES
+            }
+            CommandAction::CommitDemote => {
+                // Ctrl+Enter: 確定しつつ「降格」(追い越しブーストを剥がして上げない)
+                self.do_commit_with_intent(client, CommitIntent::Demote);
                 Bool::YES
             }
             CommandAction::Cancel => {
@@ -1631,6 +1720,18 @@ impl NukoInputController {
     /// learn_targets の決定を委譲する設計。本関数は副作用 (= 学習記録、
     /// state.reset、insertText) だけを担う。
     fn do_commit(&self, client: &AnyObject) {
+        self.do_commit_with_intent(client, CommitIntent::Normal);
+    }
+
+    /// 確定の本体。`intent` で学習の振る舞いを変える (通常 / 教える / 降格)。
+    ///
+    /// - `Normal`: モード設定どおり `engine.commit` (王冠/累積/頻度のみ)。
+    /// - `Teach` (Shift+Enter): `engine.commit_teach` で選んだ候補を絶対1位へ。観察/打ち直し
+    ///   等の通常学習経路もそのまま走らせる (正しい候補を教える = 正当な確定なので)。
+    /// - `Demote` (Ctrl+Enter): `engine.demote_frequency` で追い越しブーストを剥がす。
+    ///   これは「上げたくない」確定なので、観察ログ/打ち直し/フレーズ/再学習の**加点系は走らせない**
+    ///   (走らせると auto_relearn が逆に押し上げてしまう)。テキスト挿入自体は通常どおり行う。
+    fn do_commit_with_intent(&self, client: &AnyObject, intent: CommitIntent) {
         let mut state = self.ivars().state.borrow_mut();
 
         // segmented モード: focused segment の selected を state.candidates から sync
@@ -1657,12 +1758,23 @@ impl NukoInputController {
         // 純粋関数で commit 決定 (← unit test でカバーする本丸)
         let decision = crate::commit::decide_commit(&state);
 
-        // 学習記録 (副作用)
+        // 学習記録 (副作用)。intent で分岐する。
         let ctx_snapshot = state.context.clone();
         for c in &decision.learn_targets {
-            with_engine_mut(|engine| {
-                if let Err(e) = engine.commit(c, &ctx_snapshot) {
-                    error!("学習記録エラー: {e}");
+            with_engine_mut(|engine| match intent {
+                CommitIntent::Normal => {
+                    if let Err(e) = engine.commit(c, &ctx_snapshot) {
+                        error!("学習記録エラー: {e}");
+                    }
+                }
+                CommitIntent::Teach => {
+                    if let Err(e) = engine.commit_teach(c, &ctx_snapshot) {
+                        error!("教える確定エラー: {e}");
+                    }
+                }
+                CommitIntent::Demote => {
+                    // 降格: 追い越しブーストを剥がす (記録=+10 もしない)。
+                    engine.demote_frequency(&c.reading, &c.surface);
                 }
             });
         }
@@ -1748,7 +1860,9 @@ impl NukoInputController {
             }
 
             // Layer 1: 観察ログに確定イベントを記録 (オプトイン無効なら no-op)。
-            if !reading.is_empty() && !is_datetime_commit {
+            // 降格 (Ctrl+Enter) は「上げたくない」確定なので、観察/打ち直し/フレーズ/
+            // 再学習の加点系は一切走らせない (走らせると auto_relearn が逆に押し上げる)。
+            if !reading.is_empty() && !is_datetime_commit && intent != CommitIntent::Demote {
                 let event = if obs_candidates.is_empty() {
                     ObservationEvent::commit(reading.as_str(), decision.commit_text.as_str())
                 } else {
