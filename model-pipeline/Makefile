@@ -147,6 +147,41 @@ $(SUDACHI_CORPUS): scripts/sudachi_to_corpus.py \
 	  $(WORK_DIR)/sudachi/notcore_lex.csv
 
 # -------------------------------------------------------------------------
+# Mozc OSS 辞書 → corpus 抽出 (語彙ブレンド、BSD-3-Clause / google/mozc)
+# -------------------------------------------------------------------------
+#
+# nuko は既に UniDic + SudachiDict + IPADIC コーパスを使うが、rare な固有名詞・熟語の
+# 「語彙穴」が残る。Mozc OSS 辞書 (約100万語) から漢字語彙を抽出し `--corpus` で足して埋める。
+# make_corpus_dict はフィルタなく全 word を追加するため、エンジン (libakaza) は不変。
+#
+# 実測 (2026-11-22, random Mozc 300 件): Top-5 46%→90% / Top-1 35%→67% / MRR 0.40→0.77。
+# 常用語 (eval/golden.tsv) は Top-1 80.65% 据え置き = **回帰なし**。追加語は fallback スコアで
+# Top-5 に入るが Top-1 化はコスト補間 (未実装) が要る。詳細 claudedocs/2026-11-22-mozc-vocab-blend-result.md。
+#
+# MOZC_BLEND=0 で無効化 (58MB DL と +30% 辞書サイズを避けたいとき)。
+# MOZC_REF で参照を固定 (既定 master。再現性重視なら commit/tag を指定)。
+MOZC_BLEND ?= 1
+MOZC_REF   ?= master
+MOZC_DICTS  = $(foreach n,00 01 02 03 04 05 06 07 08 09,$(WORK_DIR)/mozc/dictionary$(n).txt)
+MOZC_CORPUS = $(WORK_DIR)/mozc-kanji-corpus.txt
+
+$(WORK_DIR)/mozc/dictionary%.txt:
+	mkdir -p $(WORK_DIR)/mozc
+	curl -fL -o $@ \
+	  https://raw.githubusercontent.com/google/mozc/$(MOZC_REF)/src/data/dictionary_oss/dictionary$*.txt
+
+$(MOZC_CORPUS): scripts/mozc_to_corpus.py $(MOZC_DICTS)
+	python3 scripts/mozc_to_corpus.py $(MOZC_CORPUS) $(MOZC_DICTS)
+
+ifeq ($(MOZC_BLEND),1)
+  MOZC_CORPUS_DEP = $(MOZC_CORPUS)
+  MOZC_CORPUS_ARG = --corpus $(MOZC_CORPUS)
+else
+  MOZC_CORPUS_DEP =
+  MOZC_CORPUS_ARG =
+endif
+
+# -------------------------------------------------------------------------
 # SKK-JISYO.akaza generation
 # -------------------------------------------------------------------------
 
@@ -164,7 +199,8 @@ $(DATA_DIR)/SKK-JISYO.akaza: $(AKAZA_DATA) \
                               $(WORK_DIR)/sudachi/small_lex.csv \
                               $(WORK_DIR)/sudachi/core_lex.csv \
                               $(WORK_DIR)/sudachi/notcore_lex.csv \
-                              $(SUDACHI_CORPUS)
+                              $(SUDACHI_CORPUS) \
+                              $(MOZC_CORPUS_DEP)
 	mkdir -p $(DATA_DIR)
 	$(AKAZA_DATA) make-dict \
 	  --corpus dict/SKK-JISYO.akaza \
@@ -172,6 +208,7 @@ $(DATA_DIR)/SKK-JISYO.akaza: $(AKAZA_DATA) \
 	  --corpus training-corpus/should.txt \
 	  --corpus training-corpus/may.txt \
 	  --corpus $(SUDACHI_CORPUS) \
+	  $(MOZC_CORPUS_ARG) \
 	  --unidic $(UNIDIC_CSV) \
 	  --vocab $(VOCAB_FILE) \
 	  --sudachi-lex $(WORK_DIR)/sudachi/small_lex.csv \
