@@ -34,9 +34,6 @@ const PADDING: f64 = 8.0;
 const FONT_SIZE: f64 = 14.0;
 /// スコア併記用フォントサイズ (本文より小さく、桁揃えのため等幅数字で描く)。
 const SCORE_FONT_SIZE: f64 = 11.0;
-/// 操作ヒント (順位を上げる/下げる確定方法) を候補パネル末尾に常時表示する (#227)。
-/// キー自体は #220 実装済 (Shift+Enter=教える=上げる / Ctrl+Enter=降格=下げる)。淡色で描く。
-const KEY_HINT_FOOTER: &str = "⇧⏎=上げる  ⌃⏎=下げる";
 
 /// 自前の候補ウィンドウ
 ///
@@ -318,11 +315,15 @@ fn build_attributed_string(
     }
 
     // 5. 操作ヒント (順位を上げる/下げる確定方法) を常時表示する (#227)。淡色で 1 行。
+    //    表記はプラットフォームで変える (macOS=⇧⏎/⌃⏎、Win/Linux=Shift+Enter/Ctrl+Enter)。
+    //    真実の源は nuko-core::platform (キー配線と表記を 1 箇所で揃える)。
     //    範囲を記録して tertiaryLabelColor を後段で当てる (併記テキストは別経路+範囲記録の方針)。
     let key_hint_range: Option<(usize, usize)> = {
+        let hint =
+            nuko_core::platform::candidate_key_hint(nuko_core::platform::Platform::current());
         newline_if_needed(&mut combined);
         let start = combined.encode_utf16().count();
-        combined.push_str(KEY_HINT_FOOTER);
+        combined.push_str(&hint);
         let len = combined.encode_utf16().count() - start;
         line_count += 1;
         Some((start, len))

@@ -47,6 +47,7 @@ pub mod error;
 pub mod eval;
 pub mod input;
 pub mod learning;
+pub mod platform;
 pub mod update;
 
 /// よく使う型をまとめてインポートするためのプレリュード
