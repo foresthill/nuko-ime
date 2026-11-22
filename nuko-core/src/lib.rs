@@ -44,6 +44,7 @@ pub mod ai_log;
 pub mod conversion;
 pub mod dictionary;
 pub mod error;
+pub mod eval;
 pub mod input;
 pub mod learning;
 pub mod update;

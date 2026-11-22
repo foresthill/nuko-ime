@@ -54,6 +54,21 @@ enum Commands {
         #[arg(long)]
         explain: bool,
     },
+    /// 変換精度ベンチ (Golden Set で Top-1/Top-3/Top-5/MRR/Purity@5 を測る)
+    Eval {
+        /// Golden Set ファイル (reading<TAB>expected)。既定 eval/golden.tsv
+        #[arg(short, long, default_value = "eval/golden.tsv")]
+        file: PathBuf,
+        /// libakaza バックエンドを使う (実機相当。要モデル。未指定だと静的辞書のみ)
+        #[arg(long)]
+        libakaza: bool,
+        /// 実機と同じ個人学習をロードする
+        #[arg(long)]
+        personal: bool,
+        /// Top-1 を外したケースを一覧表示する
+        #[arg(long)]
+        show_misses: bool,
+    },
     /// ローマ字をかなに変換
     Romaji {
         /// 変換するローマ字
@@ -241,6 +256,12 @@ fn main() -> Result<()> {
             personal,
             explain,
         } => cmd_convert(&reading, count, libakaza, personal, explain),
+        Commands::Eval {
+            file,
+            libakaza,
+            personal,
+            show_misses,
+        } => cmd_eval(&file, libakaza, personal, show_misses),
         Commands::Romaji { input } => cmd_romaji(&input),
         Commands::Predict { prefix, count } => cmd_predict(&prefix, count),
         Commands::DictInfo => cmd_dict_info(),
@@ -341,6 +362,99 @@ fn cmd_convert(
         println!("  {} 他 {} 件", "...".dimmed(), candidates.len() - count);
     }
 
+    Ok(())
+}
+
+/// 変換精度ベンチ: Golden Set (reading<TAB>expected) で Top-1/Top-3/Top-5/MRR/Purity@5 を測る。
+///
+/// 「数千件のロングテール」を whack-a-mole でなく計測で相手にする土台 (Gemini レビュー C 軸)。
+/// 集計ロジックは `nuko_core::eval` の純粋関数 (CI でテスト済み)。ここは I/O と変換呼び出しだけ。
+/// libakaza 未指定だと静的辞書のみで低く出る (実機相当の数値は `--libakaza` + モデル必須)。
+fn cmd_eval(file: &Path, use_libakaza: bool, personal: bool, show_misses: bool) -> Result<()> {
+    use nuko_core::eval::{CaseResult, EvalSummary};
+
+    let text = std::fs::read_to_string(file)
+        .map_err(|e| anyhow::anyhow!("Golden Set を読めません {}: {e}", file.display()))?;
+    let engine = build_convert_engine(use_libakaza, personal)?;
+    let context = nuko_core::conversion::ConversionContext::new();
+
+    let mut summary = EvalSummary::new();
+    let mut misses: Vec<CaseResult> = Vec::new();
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((reading, expected)) = line.split_once('\t') else {
+            eprintln!("{} 区切り(TAB)が無い行をスキップ: {line}", "⚠".yellow());
+            continue;
+        };
+        let (reading, expected) = (reading.trim(), expected.trim());
+        let candidates = engine.convert(reading, &context)?;
+        let surfaces: Vec<String> = candidates.iter().map(|c| c.surface.clone()).collect();
+        let case = CaseResult::evaluate(reading, expected, &surfaces);
+        if !case.in_top(1) {
+            misses.push(case.clone());
+        }
+        summary.add(&case);
+    }
+
+    let backend = if use_libakaza {
+        "libakaza"
+    } else {
+        "静的辞書のみ"
+    };
+    let personal_note = if personal { " + 個人学習" } else { "" };
+    println!("{}", "=== 変換精度ベンチ ===".cyan().bold());
+    println!("Golden Set : {} ({} 件)", file.display(), summary.total);
+    println!("バックエンド: {backend}{personal_note}");
+    println!();
+    println!(
+        "  Top-1     : {:>6.2}%  ({}/{})",
+        summary.top1_rate() * 100.0,
+        summary.top1,
+        summary.total
+    );
+    println!(
+        "  Top-3     : {:>6.2}%  ({}/{})",
+        summary.top3_rate() * 100.0,
+        summary.top3,
+        summary.total
+    );
+    println!(
+        "  Top-5     : {:>6.2}%  ({}/{})",
+        summary.top5_rate() * 100.0,
+        summary.top5,
+        summary.total
+    );
+    println!("  MRR       : {:>6.3}", summary.mrr());
+    println!(
+        "  Purity@5  : {:>6.2}%  (上位5に実在語が占める平均割合)",
+        summary.mean_purity_at5() * 100.0
+    );
+
+    if show_misses && !misses.is_empty() {
+        println!();
+        println!(
+            "{}",
+            format!("=== Top-1 を外した {} 件 ===", misses.len())
+                .yellow()
+                .bold()
+        );
+        for m in &misses {
+            let rank = m
+                .rank
+                .map_or_else(|| "圏外".to_string(), |r| format!("{r}位"));
+            println!(
+                "  {} → 期待 {} ({})  実際: {}",
+                m.reading.dimmed(),
+                m.expected.white().bold(),
+                rank,
+                m.top.join(" / ").dimmed()
+            );
+        }
+    }
     Ok(())
 }
 
