@@ -67,6 +67,79 @@ fn is_kana_char(c: char) -> bool {
     )
 }
 
+/// 表層が全て かな/カナ/半角カナ/長音 か (= 機械生成されうる「疑似語」)。
+///
+/// 漢字・英字を含む実語は false。純カタカナの外来語 (リアクト/コーヒー) も true になるので、
+/// これ単体では降格しない。降格の可否は [`curate_pseudo_words`] が「最上位が実語か」で守る
+/// (= 未知語ガード、F7 強要の回避)。
+fn is_pseudo_word(surface: &str) -> bool {
+    !surface.is_empty() && surface.chars().all(is_kana_char)
+}
+
+/// 表層が全て半角カタカナ域か (ﾆﾝｲ / ﾌﾟﾛｸﾞﾗﾑ 等)。半角は常に下位へ沈める。
+fn is_halfwidth_kana_word(surface: &str) -> bool {
+    !surface.is_empty()
+        && surface
+            .chars()
+            .all(|c| matches!(c, '\u{FF61}'..='\u{FF9F}'))
+}
+
+/// 疑似語を降格するときに score から引く penalty。
+///
+/// 降格候補を「どんな実語よりも確実に下」へ送るための大きな一律ペナルティ。固定値 (-90 等) への
+/// 置換ではダメ: 経路でスコア帯が違う (flat は `LIBAKAZA_PRIORITY_BOOST` 込みで +97129 /
+/// segmented は libakaza 生スコアの -2871 等) ため、固定値だと segmented の大きな負値の実語
+/// (任い=-5578) より上に浮いてしまう。相対的に大きく引けば帯に依らず常に実語の下に行く。
+const PSEUDO_WORD_DEMOTE_PENALTY: i32 = 1_000_000;
+
+/// 候補キュレーション: 機械生成の疑似語 (かな/カナ/半角) を実語より下へ沈める。
+///
+/// libakaza は読みの transliteration (「にんに」→ にんに/ニンニ/ﾆﾝﾆ) を候補として返し、実語の漢字と
+/// 同じスコア空間で並ぶ (実測: flat は +97129、segmented は生の -2871)。結果「にんに→任意」の直下に
+/// ニンニ/にんに/ﾆﾝﾆ/ニンイ/ﾆﾝｲ が 5 連で並ぶ。これを出自でなく「疑似語か」で一網打尽に沈める。
+///
+/// ルール:
+/// - **実語の最高スコアが疑似語の最高スコア以上** のとき (= 読みが実語に解決した) だけ、
+///   ひらがな/全角カナの疑似語を降格する。**同点も実語を優先**する: segmented は学習なしだと
+///   任意/にんい/ニンイ が同点 (-2871) で並び、`max_by_key` の単純 top では疑似語が「top」に
+///   選ばれて降格をすり抜ける (2026-11-22 実測の回帰)。best_real vs best_pseudo で比較して防ぐ。
+/// - **実語が無い / 実語より疑似語が高い** (リアクト/コーヒー等の外来語で、カタカナ自体が答え)
+///   なら全角カナ・ひらがなは触らない = **未知語ガード** (降格すると毎回 F7 を強いるため)。
+/// - **半角カタカナは常に**下位へ (Mozc 定石: 半角は 1 ページ目に出さない)。
+///
+/// 降格は `PSEUDO_WORD_DEMOTE_PENALTY` を引くだけなので候補は**消えず**順序だけ下がる
+/// (「カタカナは必ず出る」等の既存テストは不変)。意図的に低スコアで足した代替読みのかな
+/// (`ALT_READING_KANA_SCORE`、しんに→しんい) も実語が勝つなら下へ送られるが候補には残る。
+/// 純粋関数。flat `convert()` と segmented の両経路から呼ぶ (CLAUDE.md #178/#184 の教訓)。
+fn curate_pseudo_words(cands: &mut [Candidate]) {
+    let best_real = cands
+        .iter()
+        .filter(|c| !is_pseudo_word(&c.surface))
+        .map(|c| c.score)
+        .max();
+    let best_pseudo = cands
+        .iter()
+        .filter(|c| is_pseudo_word(&c.surface))
+        .map(|c| c.score)
+        .max();
+    // 実語が疑似語と同点以上 = 読みが実語に解決 → 疑似語を降格。実語無し or 疑似語の方が高い
+    // (外来語) → 未知語ガードで全角カナ・ひらがなは据え置く。
+    let demote_pseudo = matches!((best_real, best_pseudo), (Some(r), Some(p)) if r >= p);
+    for c in cands.iter_mut() {
+        let is_half = is_halfwidth_kana_word(&c.surface);
+        let demote = is_half || (demote_pseudo && is_pseudo_word(&c.surface));
+        if demote {
+            // 半角カナは全角カナ/ひらがなより更に 1 段下へ。
+            let extra = i32::from(is_half);
+            c.score = c
+                .score
+                .saturating_sub(PSEUDO_WORD_DEMOTE_PENALTY)
+                .saturating_sub(extra);
+        }
+    }
+    cands.sort_by_key(|c| std::cmp::Reverse(c.score));
+}
+
 /// libakaza 由来候補に上乗せする優先度ブースト。
 ///
 /// 静的辞書のスコアは概ね -100〜100 のレンジ、libakaza の cost_to_score は
@@ -875,6 +948,10 @@ impl ConversionEngine {
             .collect();
         pin_user_dict_top(candidates.all_mut(), &user_surfaces);
 
+        // 候補キュレーション: 最上位が実語のとき、機械生成の疑似語 (かな/カナ/半角) を下位へ沈める。
+        // ソート直前 = 学習/ユーザー辞書/訂正の全ブーストが乗った最終スコアで「最上位が実語か」を見る。
+        curate_pseudo_words(candidates.all_mut());
+
         // スコア順にソート
         candidates.sort_by_score();
 
@@ -953,6 +1030,12 @@ impl ConversionEngine {
             for seg in &mut segmented.segments {
                 super::kyujitai::append_kyujitai_variants_vec(&mut seg.candidates);
             }
+        }
+        // 候補キュレーション: **文節ごとに** 機械生成の疑似語を下位へ沈める。flat の convert() と
+        // 同じ処理を segmented にも配線する (片方だけだと文中で再発する = CLAUDE.md #178/#184)。
+        // 全ブースト適用後 (旧字体含む最終候補集合) に最後に当てる。
+        for seg in &mut segmented.segments {
+            curate_pseudo_words(&mut seg.candidates);
         }
         Ok(Some(segmented))
     }
@@ -1458,6 +1541,139 @@ fn boost_representative_symbol(candidates: &mut CandidateList) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- 候補キュレーション (疑似語の降格) の純粋関数テスト ----
+
+    #[test]
+    fn is_pseudo_word_distinguishes_real_from_transliteration() {
+        assert!(!is_pseudo_word("任意"), "漢字=実語");
+        assert!(!is_pseudo_word("Re・Act"), "英字混じり=実語");
+        assert!(is_pseudo_word("にんに"), "ひらがな=疑似語");
+        assert!(is_pseudo_word("ニンニ"), "全角カナ=疑似語");
+        assert!(is_pseudo_word("ﾆﾝﾆ"), "半角カナ=疑似語");
+        assert!(
+            is_pseudo_word("リアクト"),
+            "純カタカナ外来語も疑似語扱い (降格は top で守る)"
+        );
+        assert!(!is_pseudo_word(""), "空は疑似語でない");
+    }
+
+    #[test]
+    fn is_halfwidth_kana_word_matches_only_halfwidth() {
+        assert!(is_halfwidth_kana_word("ﾆﾝｲ"));
+        assert!(!is_halfwidth_kana_word("ニンイ"), "全角カナは半角でない");
+        assert!(!is_halfwidth_kana_word("任意"));
+    }
+
+    /// 「にんに→任意」: 最上位が実語なら ニンニ/にんに/ﾆﾝﾆ/ニンイ/ﾆﾝｲ が実語の下へ沈む。
+    #[test]
+    fn curate_demotes_pseudo_when_top_is_real_word() {
+        let cand = |s: &str, score: i32| Candidate::new(s, "にんに").with_score(score);
+        // 実測 (スクショ相当) の並び。
+        let mut cands = vec![
+            cand("任意", 500_109),
+            cand("ニンニ", 97_803),
+            cand("にんに", 97_129),
+            cand("ﾆﾝﾆ", 97_129),
+            cand("ニンイ", 97_129),
+            cand("ﾆﾝｲ", 97_129),
+            cand("任に", 95_764),
+            cand("忍に", 95_630),
+        ];
+        curate_pseudo_words(&mut cands);
+
+        assert_eq!(cands[0].surface, "任意", "実語が最上位のまま");
+        assert_eq!(cands[1].surface, "任に", "次も実語 (疑似語が割り込まない)");
+        assert_eq!(cands[2].surface, "忍に", "実語が続く");
+        // 疑似語はすべて実語より下 (= 2 ページ目相当) に沈む。
+        for s in ["ニンニ", "にんに", "ﾆﾝﾆ", "ニンイ", "ﾆﾝｲ"] {
+            let c = cands.iter().find(|c| c.surface == s).unwrap();
+            assert!(c.score <= 0, "{s} は降格され負値帯 (score={})", c.score);
+            let real_min = cands
+                .iter()
+                .filter(|c| !is_pseudo_word(&c.surface))
+                .map(|c| c.score)
+                .min()
+                .unwrap();
+            assert!(c.score < real_min, "{s} は全ての実語より下");
+        }
+    }
+
+    /// 外来語ガード: 最上位が疑似語 (リアクト) なら全角カナ・ひらがなは触らない (F7 強要回避)。
+    /// 半角カナだけは常に沈める。
+    #[test]
+    fn curate_keeps_katakana_when_top_is_loanword() {
+        let cand = |s: &str, score: i32| Candidate::new(s, "りあくと").with_score(score);
+        let mut cands = vec![
+            cand("リアクト", 97_000), // 最上位が疑似語 (= 答え)
+            cand("りあくと", 96_000),
+            cand("ﾘｱｸﾄ", 95_000),     // 半角は常に沈める
+            cand("リア久斗", 88_000), // junk 実語
+        ];
+        curate_pseudo_words(&mut cands);
+
+        assert_eq!(cands[0].surface, "リアクト", "外来語カタカナは最上位を維持");
+        let half = cands.iter().find(|c| c.surface == "ﾘｱｸﾄ").unwrap();
+        assert!(half.score <= 0, "半角カナは top が外来語でも降格");
+        // 全角カタカナ (リアクト) は高スコアのまま。
+        assert!(
+            cands
+                .iter()
+                .find(|c| c.surface == "リアクト")
+                .unwrap()
+                .score
+                > 0,
+            "全角カタカナは未知語ガードで保全"
+        );
+    }
+
+    /// segmented 経路の帯 = libakaza の **生スコア (大きな負値)**。固定値への降格では実語より
+    /// 上に浮く不具合 (任意/にんい/任い が全て負値、任い=-5578 < 固定降格値 -100) を penalty 方式で防ぐ。
+    /// これが「flat は直ったが segmented の診断に にんい/ニンイ/ﾆﾝｲ が残る」の回帰 pin (実測 2026-11-22)。
+    #[test]
+    fn curate_demotes_pseudo_in_negative_score_band() {
+        let cand = |s: &str, score: i32| Candidate::new(s, "にんい").with_score(score);
+        // segmented の実測相当 (全候補が負値)。
+        let mut cands = vec![
+            cand("任意", -2871),
+            cand("にんい", -2871),
+            cand("ニンイ", -2871),
+            cand("ﾆﾝｲ", -2871),
+            cand("任い", -5578),
+        ];
+        curate_pseudo_words(&mut cands);
+
+        assert_eq!(cands[0].surface, "任意", "実語が最上位");
+        assert_eq!(
+            cands[1].surface, "任い",
+            "負値の実語 (-5578) も疑似語より上に残る"
+        );
+        for s in ["にんい", "ニンイ", "ﾆﾝｲ"] {
+            let c = cands.iter().find(|c| c.surface == s).unwrap();
+            assert!(
+                c.score < -5578,
+                "{s} は固定値でなく penalty で引かれ、負値の実語 任い(-5578) より下 (score={})",
+                c.score
+            );
+        }
+        // 候補は消えていない (降格のみ)。
+        assert_eq!(cands.len(), 5, "降格は候補を消さない");
+    }
+
+    /// 意図的に低スコアで足した代替読みのかな (ALT_READING_KANA_SCORE、しんに→しんい) は、
+    /// top が実語 (真意) なら下へ送られるが**候補には残る** (選べる = 機能は保たれる)。
+    #[test]
+    fn curate_demotes_but_keeps_intentional_alt_kana() {
+        let mut cands = vec![
+            Candidate::new("真意", "しんに").with_score(200_000),
+            Candidate::new("しんい", "しんに").with_score(-70), // = ALT_READING_KANA_SCORE
+        ];
+        curate_pseudo_words(&mut cands);
+        assert_eq!(cands[0].surface, "真意", "実語が最上位");
+        let kana = cands.iter().find(|c| c.surface == "しんい");
+        assert!(kana.is_some(), "かな候補は消えず残る (選択可能)");
+        assert!(kana.unwrap().score < 0, "ただし実語より下");
+    }
 
     #[test]
     fn test_engine_creation() {
