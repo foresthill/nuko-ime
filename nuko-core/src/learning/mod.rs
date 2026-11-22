@@ -22,7 +22,7 @@ pub use dreaming::{
 };
 pub use frequency::LearningStrength;
 pub use manager::LearningManager;
-pub use manual_score::{ManualScoreEntry, ManualScoreStore, MANUAL_SCORE_STEP};
+pub use manual_score::{ManualScoreEntry, ManualScoreStore, MANUAL_SCORE_MAX, MANUAL_SCORE_STEP};
 pub use observation::{
     filter_out_reading, prune_for_cap, ObservationEvent, ObservationLog, OBS_CAP_HIGH_WATERMARK,
     OBS_CAP_KEEP_RECENT_COMMITS,

@@ -23,7 +23,8 @@ pub const MANUAL_SCORE_STEP: i32 = 2_000;
 
 /// 手動バイアスの累積上限 (絶対値)。これ以上は増えない (暴走防止)。
 /// 学習 (200k) / 訂正 (300k) 帯より十分小さく、手動微調整が自動学習の決定を越えないようにする。
-const MANUAL_SCORE_MAX: i32 = 100_000;
+/// 公開するのは [`MANUAL_SCORE_STEP`] と対称 (doc から参照する・将来 controller 側が上限を知るため)。
+pub const MANUAL_SCORE_MAX: i32 = 100_000;
 
 /// 手動スコア調整 1 件。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
