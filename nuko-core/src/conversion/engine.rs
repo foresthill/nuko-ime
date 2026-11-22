@@ -11,7 +11,8 @@ use crate::dictionary::DictionaryManager;
 use crate::error::{NukoError, Result};
 use crate::input::{to_halfwidth_katakana, to_katakana};
 use crate::learning::{
-    CorrectionStore, DateFormatStore, LearningManager, PhraseStore, SegmentationStore,
+    CorrectionStore, DateFormatStore, LearningManager, ManualScoreStore, PhraseStore,
+    SegmentationStore,
 };
 
 /// 自然分割の境界 (`nat_bounds` = 0 と `total` を含む累積オフセット) に対し、
@@ -350,6 +351,53 @@ pub fn apply_segment_corrections(
     segmented.corrections_applied = any_changed;
 }
 
+/// flat の候補列に手動スコア調整 (#228, ⌥←→) の bias を加減算する。空なら無変化。
+fn apply_manual_scores_flat(
+    cands: &mut [Candidate],
+    manual_scores: &ManualScoreStore,
+    reading: &str,
+) {
+    if manual_scores.is_empty() {
+        return;
+    }
+    for c in cands.iter_mut() {
+        let b = manual_scores.bias(reading, &c.surface);
+        if b != 0 {
+            c.score = c.score.saturating_add(b);
+        }
+    }
+}
+
+/// 文節別変換結果に **文節ごとの** 手動スコア調整 (#228, ⌥←→) を適用し並べ替える。
+///
+/// flat の [`ConversionEngine::convert`] と同じ手動バイアスを segmented 経路にも効かせる
+/// (片方だけだと文中で効かない = [[nuko-ime-segment-frequency-gap]] #178/#184 の教訓)。
+/// 読み完全一致の候補だけに加減算する (接尾/分割流用はしない = 過剰汎化を避ける)。空なら無変化。
+#[cfg_attr(not(feature = "akaza"), allow(dead_code))]
+pub fn apply_segment_manual_scores(
+    segmented: &mut super::SegmentedConversion,
+    manual_scores: &crate::learning::ManualScoreStore,
+) {
+    if manual_scores.is_empty() {
+        return;
+    }
+    for seg in &mut segmented.segments {
+        let seg_reading = seg.reading.clone();
+        let mut changed = false;
+        for c in &mut seg.candidates {
+            let bias = manual_scores.bias(&seg_reading, &c.surface);
+            if bias != 0 {
+                c.score = c.score.saturating_add(bias);
+                changed = true;
+            }
+        }
+        if changed {
+            seg.candidates.sort_by_key(|c| std::cmp::Reverse(c.score));
+            seg.select(0);
+        }
+    }
+}
+
 /// 文節別変換結果に **文節ごとの** Layer 0 頻度学習を適用し並べ替える。
 ///
 /// flat の [`ConversionEngine::convert`] は頻度候補 ([`LearningManager::get_candidates`]) を
@@ -509,6 +557,8 @@ pub struct ConversionEngine {
     date_formats: DateFormatStore,
     /// `date_formats` の保存先 (set されていれば commit 時に自動 save)。
     date_formats_path: Option<PathBuf>,
+    /// 手動スコア調整 (#228, ⌥←→)。読み×表層へユーザーが付けた符号付きバイアス。空なら無変化。個人・非共有。
+    manual_scores: ManualScoreStore,
     /// 旧字体モード。ON なら候補の旧字体版 (國/體/學…) を末尾に追加する。既定 OFF。
     kyujitai_mode: bool,
 }
@@ -529,6 +579,7 @@ impl ConversionEngine {
             phrases: PhraseStore::default(),
             date_formats: DateFormatStore::default(),
             date_formats_path: None,
+            manual_scores: ManualScoreStore::default(),
             kyujitai_mode: false,
         })
     }
@@ -566,6 +617,7 @@ impl ConversionEngine {
             phrases: PhraseStore::default(),
             date_formats: DateFormatStore::default(),
             date_formats_path: None,
+            manual_scores: ManualScoreStore::default(),
             kyujitai_mode: false,
         })
     }
@@ -610,6 +662,35 @@ impl ConversionEngine {
         self.corrections = CorrectionStore::load(path)?;
         tracing::info!(count = self.corrections.len(), "訂正選好 (Layer 2) を load");
         Ok(())
+    }
+
+    /// 手動スコア調整 (#228, ⌥←→) を設定する (変換時に該当候補へ bias)。空なら無変化。
+    pub fn set_manual_scores(&mut self, manual_scores: ManualScoreStore) {
+        tracing::info!(count = manual_scores.len(), "手動スコア調整を設定");
+        self.manual_scores = manual_scores;
+    }
+
+    /// `manual_score.json` から手動スコア調整を load する (無ければ空)。
+    pub fn load_manual_scores(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        self.manual_scores = ManualScoreStore::load(path)?;
+        tracing::info!(count = self.manual_scores.len(), "手動スコア調整を load");
+        Ok(())
+    }
+
+    /// 読み×表層の手動スコアを `delta` 動かす (#228, ⌥←→)。新しいバイアスを返す。
+    /// controller がキー入力で呼び、直後に [`Self::save_manual_scores`] で永続化する。
+    pub fn nudge_manual_score(&mut self, reading: &str, surface: &str, delta: i32) -> i32 {
+        self.manual_scores.nudge(reading, surface, delta)
+    }
+
+    /// 手動スコア調整を `manual_score.json` に保存する。
+    pub fn save_manual_scores(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.manual_scores.save(path)
+    }
+
+    /// 手動スコア調整を全消去する。除去件数を返す (「学習を忘れる」用)。
+    pub fn forget_manual_scores(&mut self) -> usize {
+        self.manual_scores.forget_all()
     }
 
     /// `segmentations.toml` から文節位置の学習を load する(無ければ空)。
@@ -948,6 +1029,10 @@ impl ConversionEngine {
             .collect();
         pin_user_dict_top(candidates.all_mut(), &user_surfaces);
 
+        // 手動スコア調整 (#228, ⌥←→): 読み×表層へのユーザーのバイアスを加減算 (空なら無変化)。
+        // curate の前に当てて「最上位が実語か」の判定に反映させる。
+        apply_manual_scores_flat(candidates.all_mut(), &self.manual_scores, reading);
+
         // 候補キュレーション: 最上位が実語のとき、機械生成の疑似語 (かな/カナ/半角) を下位へ沈める。
         // ソート直前 = 学習/ユーザー辞書/訂正の全ブーストが乗った最終スコアで「最上位が実語か」を見る。
         curate_pseudo_words(candidates.all_mut());
@@ -1025,6 +1110,8 @@ impl ConversionEngine {
         // 1 位にするが、convert_segmented は未適用だったため「け→家 を登録しても文中では
         // 出ない」バグがあった (2026-11 ユーザー報告)。Layer0 の後に置き、登録語を最優先に。
         apply_segment_user_dict(&mut segmented, &self.dictionary);
+        // 手動スコア調整 (#228, ⌥←→): flat と同じ手動バイアスを文節候補へも当てる (両経路配線)。
+        apply_segment_manual_scores(&mut segmented, &self.manual_scores);
         // 旧字体モード: 各文節の候補に旧字体版を追加 (OFF 既定なら無変化)。
         if self.kyujitai_mode {
             for seg in &mut segmented.segments {
@@ -1673,6 +1760,44 @@ mod tests {
         let kana = cands.iter().find(|c| c.surface == "しんい");
         assert!(kana.is_some(), "かな候補は消えず残る (選択可能)");
         assert!(kana.unwrap().score < 0, "ただし実語より下");
+    }
+
+    // ---- 手動スコア調整 (#228, ⌥←→) の segmented 適用テスト ----
+
+    #[test]
+    fn apply_segment_manual_scores_reorders_by_bias() {
+        use crate::conversion::{Segment, SegmentedConversion};
+        use crate::learning::ManualScoreStore;
+        let mut store = ManualScoreStore::new();
+        store.nudge("ほう", "方", 50_000); // 方 を大きく上げる
+        let cand = |s: &str, score: i32| Candidate::new(s, "ほう").with_score(score);
+        let mut segmented = SegmentedConversion::new(vec![Segment::new(
+            "ほう",
+            vec![cand("法", 100), cand("方", 50)],
+        )]);
+        apply_segment_manual_scores(&mut segmented, &store);
+        assert_eq!(
+            segmented.segments[0].surface(),
+            Some("方"),
+            "手動バイアスで 方 が先頭に上がる"
+        );
+    }
+
+    #[test]
+    fn apply_segment_manual_scores_noop_when_empty() {
+        use crate::conversion::{Segment, SegmentedConversion};
+        use crate::learning::ManualScoreStore;
+        let cand = |s: &str, score: i32| Candidate::new(s, "ほう").with_score(score);
+        let mut segmented = SegmentedConversion::new(vec![Segment::new(
+            "ほう",
+            vec![cand("法", 100), cand("方", 50)],
+        )]);
+        apply_segment_manual_scores(&mut segmented, &ManualScoreStore::new());
+        assert_eq!(
+            segmented.segments[0].surface(),
+            Some("法"),
+            "空ストアは無変化 (元の先頭 法 のまま)"
+        );
     }
 
     #[test]
