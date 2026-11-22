@@ -56,7 +56,7 @@ enum Commands {
     },
     /// 変換精度ベンチ (Golden Set で Top-1/Top-3/Top-5/MRR/Purity@5 を測る)
     Eval {
-        /// Golden Set ファイル (reading<TAB>expected)。既定 eval/golden.tsv
+        /// Golden Set ファイル (`reading<TAB>expected`)。既定 eval/golden.tsv
         #[arg(short, long, default_value = "eval/golden.tsv")]
         file: PathBuf,
         /// libakaza バックエンドを使う (実機相当。要モデル。未指定だと静的辞書のみ)
@@ -365,7 +365,7 @@ fn cmd_convert(
     Ok(())
 }
 
-/// 変換精度ベンチ: Golden Set (reading<TAB>expected) で Top-1/Top-3/Top-5/MRR/Purity@5 を測る。
+/// 変換精度ベンチ: Golden Set (`reading<TAB>expected`) で Top-1/Top-3/Top-5/MRR/Purity@5 を測る。
 ///
 /// 「数千件のロングテール」を whack-a-mole でなく計測で相手にする土台 (Gemini レビュー C 軸)。
 /// 集計ロジックは `nuko_core::eval` の純粋関数 (CI でテスト済み)。ここは I/O と変換呼び出しだけ。
