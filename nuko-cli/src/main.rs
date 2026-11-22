@@ -565,6 +565,10 @@ fn load_personal_learning(engine: &mut ConversionEngine) {
     if let Err(e) = engine.load_date_formats(dir.join("date_format.json")) {
         eprintln!("(date_format.json load 失敗: {e})");
     }
+    // 手動スコア調整 (#228, ⌥←→)
+    if let Err(e) = engine.load_manual_scores(dir.join("manual_score.json")) {
+        eprintln!("(manual_score.json load 失敗: {e})");
+    }
 }
 
 /// 個人学習データの標準ディレクトリ (`$HOME/Library/Application Support/nuko-ime`)。
