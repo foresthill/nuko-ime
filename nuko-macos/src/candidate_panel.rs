@@ -34,6 +34,9 @@ const PADDING: f64 = 8.0;
 const FONT_SIZE: f64 = 14.0;
 /// スコア併記用フォントサイズ (本文より小さく、桁揃えのため等幅数字で描く)。
 const SCORE_FONT_SIZE: f64 = 11.0;
+/// 操作ヒント (順位を上げる/下げる確定方法) を候補パネル末尾に常時表示する (#227)。
+/// キー自体は #220 実装済 (Shift+Enter=教える=上げる / Ctrl+Enter=降格=下げる)。淡色で描く。
+const KEY_HINT_FOOTER: &str = "⇧⏎=上げる  ⌃⏎=下げる";
 
 /// 自前の候補ウィンドウ
 ///
@@ -314,6 +317,17 @@ fn build_attributed_string(
         }
     }
 
+    // 5. 操作ヒント (順位を上げる/下げる確定方法) を常時表示する (#227)。淡色で 1 行。
+    //    範囲を記録して tertiaryLabelColor を後段で当てる (併記テキストは別経路+範囲記録の方針)。
+    let key_hint_range: Option<(usize, usize)> = {
+        newline_if_needed(&mut combined);
+        let start = combined.encode_utf16().count();
+        combined.push_str(KEY_HINT_FOOTER);
+        let len = combined.encode_utf16().count() - start;
+        line_count += 1;
+        Some((start, len))
+    };
+
     let ns_str = NSString::from_str(&combined);
     let attr_string: Retained<NSMutableAttributedString> = unsafe {
         let allocated = NSMutableAttributedString::alloc();
@@ -352,16 +366,16 @@ fn build_attributed_string(
         }
     }
 
-    // 出所バッジは淡色の前景色 (tertiaryLabelColor) で添える。
-    // labelColor の後に適用して上書きする (バッジだけ目立たせない)。
-    for (start, len) in &badge_ranges {
-        if *len > 0 {
+    // 出所バッジ + 操作ヒント(#227) は淡色の前景色 (tertiaryLabelColor) で添える。
+    // labelColor の後に適用して上書きする (目立たせない)。
+    for (start, len) in badge_ranges.iter().copied().chain(key_hint_range) {
+        if len > 0 {
             unsafe {
                 let dim_color = NSColor::tertiaryLabelColor();
                 let key = NSForegroundColorAttributeName.copy();
                 let value: &AnyObject = (*dim_color).as_ref();
                 let dict = NSDictionary::from_slices(&[&*key], &[value]);
-                attr_string.addAttributes_range(&dict, NSRange::new(*start, *len));
+                attr_string.addAttributes_range(&dict, NSRange::new(start, len));
             }
         }
     }
