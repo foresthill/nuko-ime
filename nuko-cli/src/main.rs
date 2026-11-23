@@ -53,6 +53,10 @@ enum Commands {
         /// 「なぜこの候補が勝つのか」を可視化する。`--personal` と併用すると実データで見える。
         #[arg(long)]
         explain: bool,
+        /// 平仮名ライブ変換 (#229) の「確定前ベストゲス表層」を表示する。
+        /// 打鍵中に inline (marked text) で出る推測と同じ結果を実機モデルで確認するため。
+        #[arg(long)]
+        live: bool,
     },
     /// 変換精度ベンチ (Golden Set で Top-1/Top-3/Top-5/MRR/Purity@5 を測る)
     Eval {
@@ -255,7 +259,8 @@ fn main() -> Result<()> {
             libakaza,
             personal,
             explain,
-        } => cmd_convert(&reading, count, libakaza, personal, explain),
+            live,
+        } => cmd_convert(&reading, count, libakaza, personal, explain, live),
         Commands::Eval {
             file,
             libakaza,
@@ -299,6 +304,7 @@ fn cmd_convert(
     use_libakaza: bool,
     personal: bool,
     explain: bool,
+    live: bool,
 ) -> Result<()> {
     println!("{}", "ぬこIME 変換テスト".cyan().bold());
     println!("読み: {}", reading.yellow());
@@ -321,6 +327,13 @@ fn cmd_convert(
 
     let engine = build_convert_engine(use_libakaza, personal)?;
     let context = nuko_core::conversion::ConversionContext::new();
+
+    // --live: 打鍵中に inline 表示される「確定前ベストゲス」(#229) を表示して終了。
+    if live {
+        let guess = engine.live_convert(reading, &context);
+        println!("ライブ変換 (確定前の推測表示): {}", guess.green().bold());
+        return Ok(());
+    }
 
     // --explain 用: 個人学習 (Layer 0) の実 count を learning.json から読み、候補へ注釈する。
     // engine の内部スコアを分解せず「実データの回数」を直接見せる (推測でなく実値)。
