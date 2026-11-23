@@ -774,7 +774,7 @@ fn forget_corrections_core(
     dir: &Path,
     reading: &str,
     surface: Option<&str>,
-) -> Result<(usize, usize, usize)> {
+) -> Result<(usize, usize, usize, usize)> {
     use nuko_core::learning::filter_out_reading;
 
     let obs = ObservationLog::new(true, dir.join("observations.jsonl"));
@@ -793,6 +793,13 @@ fn forget_corrections_core(
         retype.save(dir.join("retype.json"))?;
     }
 
+    // 手動スコア調整 (manual_score.json, ⌥←→ #228) からも忘れる (設定窓と parity)。
+    let mut manual = nuko_core::learning::ManualScoreStore::load(dir.join("manual_score.json"))?;
+    let manual_removed = manual.forget(reading, surface);
+    if manual_removed > 0 {
+        manual.save(dir.join("manual_score.json"))?;
+    }
+
     // 観察ログを書き直し (削れた時だけ) → 残った観察 ∪ 残った打ち直し から再抽出・保存 (durable)。
     if obs_removed > 0 {
         obs.rewrite(&kept)?;
@@ -802,15 +809,16 @@ fn forget_corrections_core(
     let store = extract_corrections(&all, 2);
     store.save(dir.join("corrections.toml"))?;
 
-    Ok((obs_removed, retype_removed, store.len()))
+    Ok((obs_removed, retype_removed, manual_removed, store.len()))
 }
 
 /// 特定の読みの学習を忘れる。観察ログから該当イベントを除去して書き直し、
 /// 訂正選好を再抽出する (= 再学習しても戻らない、durable な忘却)。
 fn learn_forget(dir: &Path, reading: &str, surface: Option<&str>) -> Result<()> {
-    let (obs_removed, retype_removed, store_len) = forget_corrections_core(dir, reading, surface)?;
+    let (obs_removed, retype_removed, manual_removed, store_len) =
+        forget_corrections_core(dir, reading, surface)?;
 
-    if obs_removed + retype_removed == 0 {
+    if obs_removed + retype_removed + manual_removed == 0 {
         println!(
             "{} 読み「{}」{}の学習は見つかりませんでした。",
             "…".dimmed(),
@@ -821,12 +829,13 @@ fn learn_forget(dir: &Path, reading: &str, surface: Option<&str>) -> Result<()> 
     }
 
     println!(
-        "{} 読み「{}」{}の学習を忘れました (観察 {} 件・打ち直し {} 件除去、選好 {} 件に再構築)。",
+        "{} 読み「{}」{}の学習を忘れました (観察 {} 件・打ち直し {} 件・手動調整 {} 件除去、選好 {} 件に再構築)。",
         "✅".green(),
         reading.yellow(),
         surface.map(|s| format!("→「{s}」")).unwrap_or_default(),
         obs_removed.to_string().yellow(),
         retype_removed.to_string().yellow(),
+        manual_removed.to_string().yellow(),
         store_len.to_string().yellow()
     );
     println!(
@@ -851,11 +860,11 @@ fn learn_demote(dir: &Path, reading: &str, surface: &str) -> Result<()> {
         learning.save()?;
     }
 
-    // (2) Layer2: その表層の訂正・観察・打ち直しを忘れる (再学習でも戻らない)。
-    let (obs_removed, retype_removed, store_len) =
+    // (2) Layer2: その表層の訂正・観察・打ち直し・手動調整を忘れる (再学習でも戻らない)。
+    let (obs_removed, retype_removed, manual_removed, store_len) =
         forget_corrections_core(dir, reading, Some(surface))?;
 
-    if !boost_removed && obs_removed + retype_removed == 0 {
+    if !boost_removed && obs_removed + retype_removed + manual_removed == 0 {
         println!(
             "{} 「{}」→「{}」は学習に無いか、既に降格済みでした (変更なし)。",
             "…".dimmed(),
@@ -866,13 +875,14 @@ fn learn_demote(dir: &Path, reading: &str, surface: &str) -> Result<()> {
     }
 
     println!(
-        "{} 「{}」→「{}」を降格しました (頻度ブースト{}・訂正観察 {} 件・打ち直し {} 件を除去、使用回数は保持、選好 {} 件)。",
+        "{} 「{}」→「{}」を降格しました (頻度ブースト{}・訂正観察 {} 件・打ち直し {} 件・手動調整 {} 件を除去、使用回数は保持、選好 {} 件)。",
         "✅".green(),
         reading.yellow(),
         surface.yellow(),
         if boost_removed { "除去" } else { "なし" },
         obs_removed.to_string().yellow(),
         retype_removed.to_string().yellow(),
+        manual_removed.to_string().yellow(),
         store_len.to_string().yellow()
     );
     println!(

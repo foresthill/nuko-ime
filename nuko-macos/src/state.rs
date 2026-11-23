@@ -679,6 +679,7 @@ fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
     setup_learning_persistence(&mut engine);
     setup_corrections(&mut engine);
     setup_user_dictionary(&mut engine);
+    setup_manual_scores(&mut engine);
     engine.set_kyujitai_mode(kyujitai_enabled());
     engine.set_learning_strength(learning_mode());
     Ok(engine)
@@ -690,6 +691,7 @@ fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
     setup_learning_persistence(&mut engine);
     setup_corrections(&mut engine);
     setup_user_dictionary(&mut engine);
+    setup_manual_scores(&mut engine);
     engine.set_kyujitai_mode(kyujitai_enabled());
     engine.set_learning_strength(learning_mode());
     Ok(engine)
@@ -841,6 +843,52 @@ fn setup_user_dictionary(engine: &mut ConversionEngine) {
     if let Err(e) = engine.dictionary_mut().load_user_dictionary(&path) {
         tracing::warn!(error = %e, "ユーザー辞書 (単語登録) の load 失敗。空で継続");
     }
+}
+
+/// 手動スコア調整 (`manual_score.json`) の保存先パス。controller が `⌥←→` で保存に使う。
+#[must_use]
+pub fn manual_score_path() -> Option<std::path::PathBuf> {
+    nuko_app_support_dir().map(|d| d.join("manual_score.json"))
+}
+
+/// 手動スコア調整 (`manual_score.json`、#228) を起動時にロードする。
+///
+/// ファイルが無くても空で継続。以後 controller の `⌥←→` が nudge → 同 path に保存する。
+fn setup_manual_scores(engine: &mut ConversionEngine) {
+    let Some(path) = manual_score_path() else {
+        return;
+    };
+    if let Err(e) = engine.load_manual_scores(&path) {
+        tracing::warn!(error = %e, "手動スコア調整 (manual_score.json) の load 失敗。空で継続");
+    }
+}
+
+/// `⌥←→` 1 回で動かすスコア量 (刻み)。`MANUAL_SCORE_STEP` マーカー (整数テキスト) から読む。
+///
+/// 無効値 / 未設定なら既定 [`nuko_core::learning::MANUAL_SCORE_STEP`]。小〜特大の範囲にクランプ。
+#[must_use]
+pub fn manual_score_step() -> i32 {
+    use nuko_core::learning::{MANUAL_SCORE_STEP, MANUAL_SCORE_STEP_HUGE, MANUAL_SCORE_STEP_SMALL};
+    let parsed = nuko_app_support_dir()
+        .and_then(|d| std::fs::read_to_string(d.join("MANUAL_SCORE_STEP")).ok())
+        .and_then(|s| s.trim().parse::<i32>().ok());
+    match parsed {
+        Some(n) => n.clamp(MANUAL_SCORE_STEP_SMALL, MANUAL_SCORE_STEP_HUGE),
+        None => MANUAL_SCORE_STEP,
+    }
+}
+
+/// `⌥←→` の刻みを設定・永続化する (メニューの「スコア調整の刻み」から呼ぶ)。
+/// 小〜特大にクランプして `MANUAL_SCORE_STEP` マーカーへ書く。dir 取得不可時は何もしない。
+pub fn set_manual_score_step(step: i32) {
+    use nuko_core::learning::{MANUAL_SCORE_STEP_HUGE, MANUAL_SCORE_STEP_SMALL};
+    let Some(dir) = nuko_app_support_dir() else {
+        return;
+    };
+    let step = step.clamp(MANUAL_SCORE_STEP_SMALL, MANUAL_SCORE_STEP_HUGE);
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join("MANUAL_SCORE_STEP"), step.to_string().as_bytes());
+    tracing::info!(step, "手動スコア調整の刻みを設定");
 }
 
 /// この回数以上コミットされた (reading→surface) だけ選好化する (tunable)。
@@ -1859,7 +1907,18 @@ pub fn forget_learning_from_window() {
         let obs_removed = before - kept.len();
         // 打ち直しストア (retype.json, opt-in OFF ユーザーの打ち直しはここにしか無い) も忘れる。
         let retype_removed = forget_retype(reading, surface_opt);
-        let removed = obs_removed + retype_removed;
+        // 手動スコア調整 (manual_score.json, ⌥←→ #228) も忘れて同 path に保存する
+        // (でないと次の変換で手動バイアスが残り「忘れたのに効いてる」になる)。
+        let manual_removed = with_engine_mut(|engine| {
+            let n = engine.forget_manual_score(reading, surface_opt);
+            if n > 0 {
+                if let Some(path) = manual_score_path() {
+                    let _ = engine.save_manual_scores(&path);
+                }
+            }
+            n
+        });
+        let removed = obs_removed + retype_removed + manual_removed;
         if removed == 0 {
             win.set_status(&format!(
                 "… 読み「{reading}」{}の学習は見つかりませんでした",
@@ -1882,7 +1941,7 @@ pub fn forget_learning_from_window() {
 
         win.clear_forget_fields();
         win.set_status(&format!(
-            "✅ 読み「{reading}」{}の学習を忘れました（観察 {obs_removed} 件・打ち直し {retype_removed} 件除去・即反映）",
+            "✅ 読み「{reading}」{}の学習を忘れました（観察 {obs_removed} 件・打ち直し {retype_removed} 件・手動調整 {manual_removed} 件除去・即反映）",
             surface_opt.map(|s| format!("→「{s}」")).unwrap_or_default()
         ));
     });
