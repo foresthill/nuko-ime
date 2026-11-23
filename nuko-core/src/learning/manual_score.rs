@@ -5,10 +5,21 @@
 //! 貯め、次回以降の変換で候補スコアへ加点/減点する。
 //!
 //! phrase / retype / date_format と同じく **ローカル・非共有・churn-free** (読み×表層昇順で決定的保存)。
-//! 外部送信しない。1 回の `⌥` で [`MANUAL_SCORE_STEP`] 動かし、累積は ±[`MANUAL_SCORE_MAX`] にクランプ
-//! する (暴走防止 = 王冠モデル [[nuko-ime-crown-learning-mode]] の教訓)。クランプにより
-//! 訂正(correction)/教える(crown) の tier (≥300k/200k) は手動微調整では越えられない ⇒ 「一気に1位」は
-//! 教える(⇧⏎)、「じわっと調整」は ⌥←→、と役割が分かれる。
+//! 外部送信しない。1 回の `⌥` で [`MANUAL_SCORE_STEP`] 動かし、累積は ±[`MANUAL_SCORE_MAX`] にクランプする。
+//!
+//! # 「手動は学習より強い」設計 (2026-11-23 方針転換)
+//!
+//! 当初は「手動は学習を越えない微調整」にしていた (±100k クランプ) が、森岡さんが実機で
+//! テストして **「弱すぎて使えない」** と結論: レガシーの暴走学習 (旧「累積」モードで膨らんだ
+//! `厚意 478010` / `様 500000` 等) や、かな fallback (`よう -780000`) との桁差を ±100k では
+//! 越えられず「一生変えられない」。**明示的な手のかけ方 (⌥←→) は、推論でしかない自動学習より
+//! 優先されるべき** というユーザーの意思に合わせ、クランプを [`MANUAL_SCORE_MAX`] = ±2,000,000
+//! まで引き上げた (学習/訂正/王冠の全帯を越えられる = 下げれば確実に沈み、上げれば確実に1位)。
+//!
+//! 刻み ([`MANUAL_SCORE_STEP_SMALL`]〜[`MANUAL_SCORE_STEP_HUGE`]) は runtime で選択でき、矢印の
+//! **キーリピート**で押しっぱなしにすれば蓄積して一気に動く (「ゲームみたいにバーっと」)。
+//! 「下げるために確定」は不要 = ⌥← のライブ下げだけで沈む。churn-free は維持
+//! (読み×表層昇順で決定的保存)。関連: [[nuko-ime-crown-learning-mode]] / [[nuko-ime-manual-score-feature]]。
 
 use std::path::Path;
 use std::time::SystemTime;
@@ -17,14 +28,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{NukoError, Result};
 
-/// `⌥` 1 回で動かすスコア量。候補帯 (libakaza ~数百〜千差) の中で 1〜数回で並べ替わる程度。
-/// 「一気に1位」ではなく微調整なので中程度。controller から参照する。
-pub const MANUAL_SCORE_STEP: i32 = 2_000;
+/// `⌥` 1 回で動かすスコア量の既定値 (= [`MANUAL_SCORE_STEP_LARGE`])。runtime で下記 4 段階に切替可。
+/// controller は state の設定を読む (無ければこの既定)。
+pub const MANUAL_SCORE_STEP: i32 = MANUAL_SCORE_STEP_LARGE;
 
-/// 手動バイアスの累積上限 (絶対値)。これ以上は増えない (暴走防止)。
-/// 学習 (200k) / 訂正 (300k) 帯より十分小さく、手動微調整が自動学習の決定を越えないようにする。
-/// 公開するのは [`MANUAL_SCORE_STEP`] と対称 (doc から参照する・将来 controller 側が上限を知るため)。
-pub const MANUAL_SCORE_MAX: i32 = 100_000;
+/// 刻み「小」: 微調整。libakaza 帯 (~数百〜千差) の中で数回で並べ替わる。
+pub const MANUAL_SCORE_STEP_SMALL: i32 = 2_000;
+/// 刻み「中」: 1 回で libakaza 帯をまたぐ。
+pub const MANUAL_SCORE_STEP_MEDIUM: i32 = 20_000;
+/// 刻み「大」(既定): 数回で学習帯 (200k) をまたぐ。押しっぱなしで一気に。
+pub const MANUAL_SCORE_STEP_LARGE: i32 = 100_000;
+/// 刻み「特大」: 1〜数回で王冠/訂正/レガシー暴走学習 (〜500k) も越える。
+pub const MANUAL_SCORE_STEP_HUGE: i32 = 500_000;
+
+/// 手動バイアスの累積上限 (絶対値)。**明示操作は自動学習より強い**方針 (上記モジュール doc) に
+/// 従い、学習 (200k) / 訂正 (300k) / 王冠・レガシー暴走 (〜500k) / かな fallback (〜-800k) の
+/// 全帯を越えられる大きさにする。下げれば確実に最下位へ、上げれば確実に1位へ到達できる。
+pub const MANUAL_SCORE_MAX: i32 = 2_000_000;
 
 /// 手動スコア調整 1 件。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

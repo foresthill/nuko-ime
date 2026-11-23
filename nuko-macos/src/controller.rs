@@ -454,6 +454,30 @@ define_class!(
             crate::state::set_learning_mode(nuko_core::learning::LearningStrength::Weak);
         }
 
+        /// ⌥←→ の刻み「小」(微調整) を選ぶ。
+        #[unsafe(method(nukoSetScoreStepSmall:))]
+        fn nuko_set_score_step_small(&self, _sender: Option<&AnyObject>) {
+            crate::state::set_manual_score_step(nuko_core::learning::MANUAL_SCORE_STEP_SMALL);
+        }
+
+        /// ⌥←→ の刻み「中」を選ぶ。
+        #[unsafe(method(nukoSetScoreStepMedium:))]
+        fn nuko_set_score_step_medium(&self, _sender: Option<&AnyObject>) {
+            crate::state::set_manual_score_step(nuko_core::learning::MANUAL_SCORE_STEP_MEDIUM);
+        }
+
+        /// ⌥←→ の刻み「大」(既定) を選ぶ。
+        #[unsafe(method(nukoSetScoreStepLarge:))]
+        fn nuko_set_score_step_large(&self, _sender: Option<&AnyObject>) {
+            crate::state::set_manual_score_step(nuko_core::learning::MANUAL_SCORE_STEP_LARGE);
+        }
+
+        /// ⌥←→ の刻み「特大」(1〜数回で全帯を越える) を選ぶ。
+        #[unsafe(method(nukoSetScoreStepHuge:))]
+        fn nuko_set_score_step_huge(&self, _sender: Option<&AnyObject>) {
+            crate::state::set_manual_score_step(nuko_core::learning::MANUAL_SCORE_STEP_HUGE);
+        }
+
         // 注意: 本 IME は **方式3 (handleEvent:) 単独**。方式1 (inputText:/
         // didCommandBySelector:) は実装しない。3 方式は排他で、混在は落とし穴 #9
         // (打てない/クラッシュ, PR #51/#52)。方式3 一本化は keyCode/修飾キーを得るため
@@ -665,6 +689,50 @@ impl NukoInputController {
             let mode_title = NSString::from_str("学習モード（確定で上げる強さ）");
             let mode_parent = menu.addItemWithTitle_action_keyEquivalent(&mode_title, None, &empty);
             mode_parent.setSubmenu(Some(&submenu));
+
+            // ⌥←→ の刻み選択 (1 回でどれだけ動くか)。押しっぱなし=キーリピートで蓄積。
+            use nuko_core::learning::{
+                MANUAL_SCORE_STEP_HUGE, MANUAL_SCORE_STEP_LARGE, MANUAL_SCORE_STEP_MEDIUM,
+                MANUAL_SCORE_STEP_SMALL,
+            };
+            let step = crate::state::manual_score_step();
+            let step_menu = NSMenu::new(mtm);
+
+            let s_small = NSString::from_str("小（微調整）");
+            let i_small = step_menu.addItemWithTitle_action_keyEquivalent(
+                &s_small,
+                Some(sel!(nukoSetScoreStepSmall:)),
+                &empty,
+            );
+            i_small.setState(on(step == MANUAL_SCORE_STEP_SMALL));
+
+            let s_medium = NSString::from_str("中");
+            let i_medium = step_menu.addItemWithTitle_action_keyEquivalent(
+                &s_medium,
+                Some(sel!(nukoSetScoreStepMedium:)),
+                &empty,
+            );
+            i_medium.setState(on(step == MANUAL_SCORE_STEP_MEDIUM));
+
+            let s_large = NSString::from_str("大（既定）");
+            let i_large = step_menu.addItemWithTitle_action_keyEquivalent(
+                &s_large,
+                Some(sel!(nukoSetScoreStepLarge:)),
+                &empty,
+            );
+            i_large.setState(on(step == MANUAL_SCORE_STEP_LARGE));
+
+            let s_huge = NSString::from_str("特大（一気に最上位/最下位）");
+            let i_huge = step_menu.addItemWithTitle_action_keyEquivalent(
+                &s_huge,
+                Some(sel!(nukoSetScoreStepHuge:)),
+                &empty,
+            );
+            i_huge.setState(on(step == MANUAL_SCORE_STEP_HUGE));
+
+            let step_title = NSString::from_str("スコア調整の刻み（⌥←→ 1回の大きさ）");
+            let step_parent = menu.addItemWithTitle_action_keyEquivalent(&step_title, None, &empty);
+            step_parent.setSubmenu(Some(&step_menu));
         }
 
         // ── ④ 情報セクション ──
@@ -1345,12 +1413,13 @@ impl NukoInputController {
                 self.handle_segment_resize(client, /*extend_right=*/ true)
             }
             CommandAction::ScoreUp => {
-                // ⌥→: いま選んでいる候補のスコアを上げる (手動微調整 #228)
-                self.adjust_manual_score(client, nuko_core::learning::MANUAL_SCORE_STEP)
+                // ⌥→: いま選んでいる候補のスコアを上げる (#228)。刻みは runtime 設定。
+                // キーリピートで押しっぱなしにすると蓄積して一気に上がる。
+                self.adjust_manual_score(client, crate::state::manual_score_step())
             }
             CommandAction::ScoreDown => {
-                // ⌥←: いま選んでいる候補のスコアを下げる (手動微調整 #228)
-                self.adjust_manual_score(client, -nuko_core::learning::MANUAL_SCORE_STEP)
+                // ⌥←: いま選んでいる候補のスコアを下げる (#228)。確定不要のライブ下げ。
+                self.adjust_manual_score(client, -crate::state::manual_score_step())
             }
             CommandAction::RegisterWord => {
                 // Tab: 今の読みに登録候補があれば「登録してその語を確定」。

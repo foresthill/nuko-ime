@@ -863,6 +863,34 @@ fn setup_manual_scores(engine: &mut ConversionEngine) {
     }
 }
 
+/// `⌥←→` 1 回で動かすスコア量 (刻み)。`MANUAL_SCORE_STEP` マーカー (整数テキスト) から読む。
+///
+/// 無効値 / 未設定なら既定 [`nuko_core::learning::MANUAL_SCORE_STEP`]。小〜特大の範囲にクランプ。
+#[must_use]
+pub fn manual_score_step() -> i32 {
+    use nuko_core::learning::{MANUAL_SCORE_STEP, MANUAL_SCORE_STEP_HUGE, MANUAL_SCORE_STEP_SMALL};
+    let parsed = nuko_app_support_dir()
+        .and_then(|d| std::fs::read_to_string(d.join("MANUAL_SCORE_STEP")).ok())
+        .and_then(|s| s.trim().parse::<i32>().ok());
+    match parsed {
+        Some(n) => n.clamp(MANUAL_SCORE_STEP_SMALL, MANUAL_SCORE_STEP_HUGE),
+        None => MANUAL_SCORE_STEP,
+    }
+}
+
+/// `⌥←→` の刻みを設定・永続化する (メニューの「スコア調整の刻み」から呼ぶ)。
+/// 小〜特大にクランプして `MANUAL_SCORE_STEP` マーカーへ書く。dir 取得不可時は何もしない。
+pub fn set_manual_score_step(step: i32) {
+    use nuko_core::learning::{MANUAL_SCORE_STEP_HUGE, MANUAL_SCORE_STEP_SMALL};
+    let Some(dir) = nuko_app_support_dir() else {
+        return;
+    };
+    let step = step.clamp(MANUAL_SCORE_STEP_SMALL, MANUAL_SCORE_STEP_HUGE);
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join("MANUAL_SCORE_STEP"), step.to_string().as_bytes());
+    tracing::info!(step, "手動スコア調整の刻みを設定");
+}
+
 /// この回数以上コミットされた (reading→surface) だけ選好化する (tunable)。
 /// 起動時の [`setup_corrections`] とメニューからの [`relearn_now`] で共有する。
 const MIN_SEEN: u32 = 2;
