@@ -244,6 +244,10 @@ pub enum CommandAction {
     ResizeSegmentLeft,
     /// Shift+Right → focused 文節を伸ばす (segmented のみ)
     ResizeSegmentRight,
+    /// Option+Right (⌥→) → いま選んでいる候補のスコアを上げる (手動微調整 #228)
+    ScoreUp,
+    /// Option+Left (⌥←) → いま選んでいる候補のスコアを下げる (手動微調整 #228)
+    ScoreDown,
     /// Tab → 単語登録候補があれば登録 (無ければ素通し)
     RegisterWord,
 }
@@ -289,16 +293,20 @@ pub enum KeyAction {
     PassThrough,
 }
 
-/// macOS 仮想キーコード (`NSEvent.keyCode`, kVK_*) + Shift + composing から
+/// macOS 仮想キーコード (`NSEvent.keyCode`, kVK_*) + Shift/Control/Option + composing から
 /// [`KeyAction`] を決める純粋関数（方式3 移行の中核・テスト可能）。
 ///
 /// 一次ソース: Carbon `HIToolbox/Events.h` の `kVK_*`。実機 handleEvent のログでも確認する。
 /// 非 composing 時は特殊キーを横取りしない（未変換状態で特殊キーを奪わない）。
+///
+/// `option` は矢印キーにのみ効く (⌥←→ = スコア微調整 #228)。他キーでは無視する。
+/// 矢印の修飾優先順は ⌥ > Shift > 無印 (⌥ は明示のスコアキーなので最優先)。
 #[must_use]
 pub fn command_for_keycode(
     key_code: u16,
     shift: bool,
     control: bool,
+    option: bool,
     is_composing: bool,
 ) -> KeyAction {
     // モードキー (JIS かな=0x68 / 英数=0x66) は **文字ではない** → composing の有無に
@@ -333,20 +341,27 @@ pub fn command_for_keycode(
         0x33 => KeyAction::Command(CommandAction::Backspace), // Delete (Backspace)
         0x35 => KeyAction::Command(CommandAction::Cancel),    // Escape
         0x30 => KeyAction::Command(CommandAction::RegisterWord), // Tab
-        0x7B => KeyAction::Command(if shift {
+        // Left: ⌥=スコア下げ / Shift=文節縮小 / 無印=文節フォーカス前へ。
+        // ⌥ を最優先 (明示のスコアキー)。⌥ と Shift 同時押しは ⌥ 勝ち。
+        0x7B => KeyAction::Command(if option {
+            CommandAction::ScoreDown
+        } else if shift {
             CommandAction::ResizeSegmentLeft
         } else {
             CommandAction::FocusShiftLeft
-        }), // Left
-        0x7C => KeyAction::Command(if shift {
+        }),
+        // Right: ⌥=スコア上げ / Shift=文節伸長 / 無印=文節フォーカス後ろへ。
+        0x7C => KeyAction::Command(if option {
+            CommandAction::ScoreUp
+        } else if shift {
             CommandAction::ResizeSegmentRight
         } else {
             CommandAction::FocusShiftRight
-        }), // Right
+        }),
         0x7D => KeyAction::Command(CommandAction::SelectNext), // Down
         0x7E => KeyAction::Command(CommandAction::SelectPrev), // Up
-        0x61 => KeyAction::Fkey(FKeyConversion::Hiragana),    // F6
-        0x62 => KeyAction::Fkey(FKeyConversion::Katakana),    // F7
+        0x61 => KeyAction::Fkey(FKeyConversion::Hiragana),     // F6
+        0x62 => KeyAction::Fkey(FKeyConversion::Katakana),     // F7
         0x64 => KeyAction::Fkey(FKeyConversion::HalfwidthKatakana), // F8
         0x65 => KeyAction::Fkey(FKeyConversion::FullwidthAlnum), // F9
         0x6D => KeyAction::Fkey(FKeyConversion::HalfwidthAlnum), // F10
@@ -565,7 +580,7 @@ mod keycode_tests {
     fn non_composing_passes_through_everything() {
         for kc in [0x24, 0x33, 0x35, 0x7B, 0x62] {
             assert_eq!(
-                command_for_keycode(kc, false, false, false),
+                command_for_keycode(kc, false, false, false, false),
                 KeyAction::PassThrough
             );
         }
@@ -574,7 +589,7 @@ mod keycode_tests {
     /// ★ 編集キーが正しい CommandAction にマップされる。
     #[test]
     fn editing_keys_map_to_commands() {
-        let c = |kc, shift| command_for_keycode(kc, shift, false, true);
+        let c = |kc, shift| command_for_keycode(kc, shift, false, false, true);
         assert_eq!(c(0x24, false), KeyAction::Command(CommandAction::Commit)); // Return
         assert_eq!(c(0x33, false), KeyAction::Command(CommandAction::Backspace)); // BS
         assert_eq!(c(0x35, false), KeyAction::Command(CommandAction::Cancel)); // Esc
@@ -595,7 +610,7 @@ mod keycode_tests {
     /// ★ 矢印は Shift で文節移動 ⇄ 文節伸縮が切り替わる。
     #[test]
     fn arrows_depend_on_shift() {
-        let c = |kc, shift| command_for_keycode(kc, shift, false, true);
+        let c = |kc, shift| command_for_keycode(kc, shift, false, false, true);
         assert_eq!(
             c(0x7B, false),
             KeyAction::Command(CommandAction::FocusShiftLeft)
@@ -614,10 +629,45 @@ mod keycode_tests {
         );
     }
 
+    /// ★ Option+矢印 = スコア微調整 (#228)。⌥→ 上げ / ⌥← 下げ。
+    /// ⌥ は Shift より優先 (⌥+Shift+矢印 でも ⌥ 勝ち = スコア)。
+    #[test]
+    fn option_arrows_adjust_score() {
+        // option=true, shift=false
+        let o = |kc, shift| command_for_keycode(kc, shift, false, true, true);
+        assert_eq!(
+            o(0x7C, false),
+            KeyAction::Command(CommandAction::ScoreUp),
+            "⌥→ = スコア上げ"
+        );
+        assert_eq!(
+            o(0x7B, false),
+            KeyAction::Command(CommandAction::ScoreDown),
+            "⌥← = スコア下げ"
+        );
+        // ⌥ は Shift より優先 (伸縮でなくスコア)。
+        assert_eq!(
+            o(0x7C, true),
+            KeyAction::Command(CommandAction::ScoreUp),
+            "⌥+Shift+→ も ⌥ 勝ちでスコア上げ"
+        );
+        assert_eq!(
+            o(0x7B, true),
+            KeyAction::Command(CommandAction::ScoreDown),
+            "⌥+Shift+← も ⌥ 勝ちでスコア下げ"
+        );
+        // 非 composing では横取りしない (素通し)。
+        assert_eq!(
+            command_for_keycode(0x7C, false, false, true, false),
+            KeyAction::PassThrough,
+            "非 composing の ⌥→ は素通し (アプリの単語移動を壊さない)"
+        );
+    }
+
     /// ★ F6/F7/F8 が文字種変換にマップされる（方式3 の本命）。
     #[test]
     fn fkeys_map_to_conversion() {
-        let c = |kc| command_for_keycode(kc, false, false, true);
+        let c = |kc| command_for_keycode(kc, false, false, false, true);
         assert_eq!(c(0x61), KeyAction::Fkey(FKeyConversion::Hiragana)); // F6
         assert_eq!(c(0x62), KeyAction::Fkey(FKeyConversion::Katakana)); // F7
         assert_eq!(c(0x64), KeyAction::Fkey(FKeyConversion::HalfwidthKatakana));
@@ -633,19 +683,19 @@ mod keycode_tests {
     fn mode_keys_are_consumed_regardless_of_composing() {
         for &composing in &[false, true] {
             assert_eq!(
-                command_for_keycode(0x68, false, false, composing),
+                command_for_keycode(0x68, false, false, false, composing),
                 KeyAction::Consume,
                 "かなキー(0x68) は composing={composing} でも Consume"
             );
             assert_eq!(
-                command_for_keycode(0x66, false, false, composing),
+                command_for_keycode(0x66, false, false, false, composing),
                 KeyAction::Consume,
                 "英数キー(0x66) は composing={composing} でも Consume"
             );
         }
         // Shift 併用でもモードキーは Consume (念のため)。
         assert_eq!(
-            command_for_keycode(0x68, true, false, false),
+            command_for_keycode(0x68, true, false, false, false),
             KeyAction::Consume
         );
     }
@@ -655,23 +705,23 @@ mod keycode_tests {
     fn enter_modifiers_select_commit_variant() {
         // composing 中の Enter のみ (非 composing は PassThrough)。
         assert_eq!(
-            command_for_keycode(0x24, false, false, true),
+            command_for_keycode(0x24, false, false, false, true),
             KeyAction::Command(CommandAction::Commit),
             "Enter = 通常確定"
         );
         assert_eq!(
-            command_for_keycode(0x24, true, false, true),
+            command_for_keycode(0x24, true, false, false, true),
             KeyAction::Command(CommandAction::CommitTeach),
             "Shift+Enter = 教える"
         );
         assert_eq!(
-            command_for_keycode(0x24, false, true, true),
+            command_for_keycode(0x24, false, true, false, true),
             KeyAction::Command(CommandAction::CommitDemote),
             "Ctrl+Enter = 降格"
         );
         // Ctrl が Shift より優先 (Ctrl+Shift+Enter は降格)。
         assert_eq!(
-            command_for_keycode(0x24, true, true, true),
+            command_for_keycode(0x24, true, true, false, true),
             KeyAction::Command(CommandAction::CommitDemote),
             "Ctrl+Shift+Enter は降格 (Ctrl 優先)"
         );
@@ -680,7 +730,7 @@ mod keycode_tests {
     /// ★ 文字キー・Space・未対応 F キーは PassThrough（文字として処理）。
     #[test]
     fn chars_and_space_pass_through() {
-        let c = |kc| command_for_keycode(kc, false, false, true);
+        let c = |kc| command_for_keycode(kc, false, false, false, true);
         assert_eq!(c(0x31), KeyAction::PassThrough, "Space は文字扱い");
         assert_eq!(c(0x00), KeyAction::PassThrough, "A キー");
         assert_eq!(

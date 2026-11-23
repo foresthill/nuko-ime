@@ -693,6 +693,12 @@ impl ConversionEngine {
         self.manual_scores.forget_all()
     }
 
+    /// 読み (と任意で表層) の手動スコア調整を忘れる。除去件数を返す。
+    /// `surface` が `None` ならその読みの全表層。「読みを指定して忘れる」UI から呼ぶ。
+    pub fn forget_manual_score(&mut self, reading: &str, surface: Option<&str>) -> usize {
+        self.manual_scores.forget(reading, surface)
+    }
+
     /// `segmentations.toml` から文節位置の学習を load する(無ければ空)。
     ///
     /// # エラー

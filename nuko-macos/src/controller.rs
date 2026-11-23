@@ -881,12 +881,16 @@ impl NukoInputController {
         let shift = mods.contains(NSEventModifierFlags::Shift);
         // ここに来る control は「composing 中の Ctrl+Enter」のときだけ true。
         let control = ctrl;
+        // Option (⌥) は矢印キーにのみ効く (⌥←→ = スコア微調整 #228)。composing 中のみ
+        // 横取りするので、非 composing の ⌥←→ (アプリの単語移動) は command_for_keycode が
+        // 素通しする。Command/Control 併用は上の早期 return で既に除外済み。
+        let option = mods.contains(NSEventModifierFlags::Option);
 
         debug_log(&format!(
-            "handleEvent: keyCode={key_code} shift={shift} control={control} composing={is_composing}"
+            "handleEvent: keyCode={key_code} shift={shift} control={control} option={option} composing={is_composing}"
         ));
 
-        match crate::commit::command_for_keycode(key_code, shift, control, is_composing) {
+        match crate::commit::command_for_keycode(key_code, shift, control, option, is_composing) {
             crate::commit::KeyAction::Command(cmd) => self.run_command_action(cmd, client),
             crate::commit::KeyAction::Fkey(kind) => {
                 self.apply_fkey_conversion(client, kind);
@@ -1339,6 +1343,14 @@ impl NukoInputController {
             CommandAction::ResizeSegmentRight => {
                 // Shift+Right: focused 文節を伸ばす (segmented モードのみ)
                 self.handle_segment_resize(client, /*extend_right=*/ true)
+            }
+            CommandAction::ScoreUp => {
+                // ⌥→: いま選んでいる候補のスコアを上げる (手動微調整 #228)
+                self.adjust_manual_score(client, nuko_core::learning::MANUAL_SCORE_STEP)
+            }
+            CommandAction::ScoreDown => {
+                // ⌥←: いま選んでいる候補のスコアを下げる (手動微調整 #228)
+                self.adjust_manual_score(client, -nuko_core::learning::MANUAL_SCORE_STEP)
             }
             CommandAction::RegisterWord => {
                 // Tab: 今の読みに登録候補があれば「登録してその語を確定」。
@@ -2248,6 +2260,125 @@ impl NukoInputController {
         }
 
         Bool::YES
+    }
+
+    /// ⌥←→: いま選んでいる候補のスコアを `delta` だけ微調整し、`manual_score.json` に
+    /// 保存して新しい並びを即反映する (#228)。候補が出ていない / 読みが空なら消費して no-op。
+    ///
+    /// 調整した表層に選択を残すので、押しっぱなしで同じ候補を上げ下げし続けられる。
+    /// **現在の mode (flat / segmented) は保ったまま再変換する**: 手動スコアは文節分割に
+    /// 影響しないので、同じ読みを同じ経路に通せば同じ分割・同じ flat 列が再現し、候補順だけが
+    /// 新しいバイアスで並び替わる (mode を再判定しないので nn 曖昧語が勝手に segmented 化しない)。
+    ///
+    /// nudge のキーは `apply_*_manual_scores` と揃える: segmented=focused 文節の読み /
+    /// flat=composition。両経路に効かせるのが肝 ([[nuko-ime-segment-frequency-gap]] の教訓)。
+    fn adjust_manual_score(&self, client: &AnyObject, delta: i32) -> Bool {
+        // plan = (nudge のキー読み, 選択表層, Some((全文読み, focus))=segmented / None=flat)
+        let (nudge_reading, surface, seg_plan): (String, String, Option<(String, usize)>) = {
+            let state = self.ivars().state.borrow();
+            let Some(candidates) = state.candidates.as_ref() else {
+                return Bool::YES; // 候補が出ていない → 何もしない
+            };
+            let Some(sel) = candidates.selected() else {
+                return Bool::YES;
+            };
+            let surface = sel.surface.clone();
+            match state.segmented.as_ref() {
+                Some(seg) => match seg.focused_segment() {
+                    Some(fseg) if !fseg.reading.is_empty() => (
+                        fseg.reading.clone(),
+                        surface,
+                        Some((state.composition.clone(), seg.focused)),
+                    ),
+                    _ => return Bool::YES,
+                },
+                None => {
+                    if state.composition.is_empty() {
+                        return Bool::YES;
+                    }
+                    (state.composition.clone(), surface, None)
+                }
+            }
+        };
+
+        // nudge + 永続化 (ManualScoreStore は churn-free・冪等)。
+        let new_bias = with_engine_mut(|engine| {
+            let b = engine.nudge_manual_score(&nudge_reading, &surface, delta);
+            if let Some(path) = crate::state::manual_score_path() {
+                if let Err(e) = engine.save_manual_scores(&path) {
+                    warn!(error = %e, "manual_score.json の保存に失敗");
+                }
+            }
+            b
+        });
+        debug_log(&format!(
+            "adjust_manual_score: reading='{nudge_reading}' surface='{surface}' delta={delta} bias={new_bias} segmented={}",
+            seg_plan.is_some()
+        ));
+
+        // mode を保ったまま再変換 → 調整した表層に選択を戻す。
+        match seg_plan {
+            Some((whole_reading, focus)) => self.rescore_segmented(client, &whole_reading, focus),
+            None => self.rescore_flat(client, &nudge_reading, &surface),
+        }
+        Bool::YES
+    }
+
+    /// flat モードで手動スコア調整後に再変換し、`surface` を選択し直して panel/marked を更新する。
+    fn rescore_flat(&self, client: &AnyObject, reading: &str, surface: &str) {
+        let ctx = self.ivars().state.borrow().context.clone();
+        let Ok(mut candidates) = with_engine(|engine| engine.convert(reading, &ctx)) else {
+            return;
+        };
+        let idx = candidates.iter().position(|c| c.surface == surface);
+        if let Some(idx) = idx {
+            candidates.select(idx);
+        }
+        let display = candidates
+            .selected()
+            .map(|c| c.surface.clone())
+            .unwrap_or_default();
+        {
+            let mut state = self.ivars().state.borrow_mut();
+            state.segmented = None;
+            state.candidates = Some(candidates);
+        }
+        Self::set_marked_text_on_client(client, &display);
+        self.show_candidate_panel(client);
+    }
+
+    /// segmented モードで手動スコア調整後に同じ読みを再変換し、focus と各文節の選択を
+    /// 復元して panel/marked を更新する。分割は読みが同じなら不変なので focus index は有効。
+    fn rescore_segmented(&self, client: &AnyObject, whole_reading: &str, focus: usize) {
+        let old = { self.ivars().state.borrow().segmented.clone() };
+        let Some(old) = old else {
+            return;
+        };
+        #[cfg(feature = "akaza")]
+        let built = with_engine(|engine| engine.convert_segmented(whole_reading));
+        #[cfg(not(feature = "akaza"))]
+        let built: nuko_core::error::Result<
+            Option<nuko_core::conversion::SegmentedConversion>,
+        > = {
+            let _ = whole_reading;
+            Ok(None)
+        };
+        let Ok(Some(mut seg)) = built else {
+            return;
+        };
+        // 各文節の選択 (focused の scored surface を含む) を読み一致で復元 → focus を戻す。
+        Self::restore_segment_selections(&mut seg, &old);
+        seg.focus(focus);
+        let combined = seg.current_surface();
+        let (start, len) = seg.focused_surface_range_utf16();
+        let focused_list = Self::candidate_list_from_segment(&seg, seg.focused);
+        {
+            let mut state = self.ivars().state.borrow_mut();
+            state.segmented = Some(seg);
+            state.candidates = Some(focused_list);
+        }
+        Self::set_marked_text_focused(client, &combined, start, len);
+        self.show_candidate_panel(client);
     }
 
     /// flat モード (segmented=None) で Shift+←→ が押されたとき、現在の読みから

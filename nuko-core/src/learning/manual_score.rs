@@ -142,6 +142,24 @@ impl ManualScoreStore {
         self.entries.clear();
         n
     }
+
+    /// 読み (と任意で表層) の調整を忘れる。除去件数を返す。
+    ///
+    /// `surface` が `None` ならその読みの全表層、`Some(s)` ならその 1 件だけ。
+    /// 観察ログ `filter_out_reading` / `RetypeStore::forget` と対で「忘れる」操作から呼ぶ。
+    pub fn forget(&mut self, reading: &str, surface: Option<&str>) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|e| {
+            // MSRV 1.75 のため is_none_or は使わない (1.82 安定化)。
+            let surface_hit = match surface {
+                Some(s) => e.surface == s,
+                None => true,
+            };
+            let hit = e.reading == reading && surface_hit;
+            !hit
+        });
+        before - self.entries.len()
+    }
 }
 
 /// 現在の UNIX タイムスタンプ (秒)。
@@ -210,6 +228,24 @@ mod tests {
         assert_eq!(s.forget_all(), 2);
         assert!(s.is_empty());
         assert_eq!(s.bias("にんい", "任意"), 0);
+    }
+
+    #[test]
+    fn forget_removes_by_reading_and_optional_surface() {
+        let mut s = ManualScoreStore::new();
+        s.nudge("ほう", "方", MANUAL_SCORE_STEP);
+        s.nudge("ほう", "法", -MANUAL_SCORE_STEP);
+        s.nudge("よう", "用", MANUAL_SCORE_STEP);
+        // 表層指定 = その 1 件だけ。
+        assert_eq!(s.forget("ほう", Some("方")), 1);
+        assert_eq!(s.bias("ほう", "方"), 0);
+        assert_eq!(s.bias("ほう", "法"), -MANUAL_SCORE_STEP, "他表層は残る");
+        // 表層 None = その読みの残り全部。
+        assert_eq!(s.forget("ほう", None), 1);
+        assert_eq!(s.bias("ほう", "法"), 0);
+        assert_eq!(s.bias("よう", "用"), MANUAL_SCORE_STEP, "別読みは残る");
+        // 無い読みは 0 件。
+        assert_eq!(s.forget("ない", None), 0);
     }
 
     #[test]

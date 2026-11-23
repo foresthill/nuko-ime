@@ -41,18 +41,22 @@ impl Platform {
     }
 }
 
-/// 候補パネルの操作ヒント行 (順位を**上げる/下げる**確定キー) を、プラットフォーム表記で返す。
+/// 候補パネルの操作ヒント行 (順位を**上げる/下げる**確定キー と **スコア微調整**) を、
+/// プラットフォーム表記で返す。
 ///
-/// キー自体の配線は #220 済み (Shift+Enter=教える=上げる / Ctrl+Enter=降格=下げる)。
-/// macOS は修飾キー記号 (`⇧⏎` `⌃⏎`)、Windows/Linux は語 (`Shift+Enter` 等) で見せる。
+/// キーの配線: 上げ/下げ=#220 (Shift+Enter=教える=絶対1位 / Ctrl+Enter=降格)、
+/// スコア微調整=#228 (⌥→ で上げ / ⌥← で下げ、「じわっと」調整)。
+/// macOS は修飾キー記号 (`⇧⏎` `⌃⏎` `⌥←→`)、Windows/Linux は語 (`Shift+Enter` 等) で見せる。
+/// ⌥=Alt の物理対応に従い、Windows/Linux は `Alt+←→` と語表記する。
 ///
-/// スコア微調整 (`⌥←→` / `Alt+←→`、#228) は controller 配線 (smoke 必須) が済んでから
-/// この関数に 1 行足す。今はまだ出さない (= 動かないキーは表示しない)。
+/// すべて実際に配線済みのキーだけを出す (動かないキーは表示しない方針)。
 #[must_use]
 pub fn candidate_key_hint(platform: Platform) -> String {
     match platform {
-        Platform::MacOs => "⇧⏎=上げる  ⌃⏎=下げる".to_string(),
-        Platform::Windows | Platform::Linux => "Shift+Enter=上げる  Ctrl+Enter=下げる".to_string(),
+        Platform::MacOs => "⇧⏎=上げる  ⌃⏎=下げる  ⌥←→=スコア".to_string(),
+        Platform::Windows | Platform::Linux => {
+            "Shift+Enter=上げる  Ctrl+Enter=下げる  Alt+←→=スコア".to_string()
+        }
     }
 }
 
@@ -66,7 +70,8 @@ mod tests {
         assert!(h.contains('⇧'), "Shift 記号");
         assert!(h.contains('⌃'), "Control 記号");
         assert!(h.contains('⏎'), "Return 記号");
-        assert!(h.contains("上げる") && h.contains("下げる"));
+        assert!(h.contains('⌥'), "Option 記号 (スコア微調整)");
+        assert!(h.contains("上げる") && h.contains("下げる") && h.contains("スコア"));
     }
 
     #[test]
@@ -75,8 +80,10 @@ mod tests {
             let h = candidate_key_hint(p);
             assert!(h.contains("Shift+Enter"), "{p:?} は Shift+Enter 語表記");
             assert!(h.contains("Ctrl+Enter"), "{p:?} は Ctrl+Enter 語表記");
+            // ⌥=Alt の対応どおり、スコア微調整は Alt+←→ の語表記。
+            assert!(h.contains("Alt+←→"), "{p:?} は Alt+←→ 語表記");
             // macOS 記号は使わない。
-            assert!(!h.contains('⇧') && !h.contains('⌃') && !h.contains('⏎'));
+            assert!(!h.contains('⇧') && !h.contains('⌃') && !h.contains('⏎') && !h.contains('⌥'));
         }
     }
 
