@@ -803,6 +803,19 @@ impl ConversionEngine {
         self.manual_scores.nudge(reading, surface, delta)
     }
 
+    /// 読み×表層の手動スコアを絶対値 `value` に**上書き**する (#228, 候補パネルでのポイント直接指定)。
+    /// 新しいバイアスを返す。[`Self::nudge_manual_score`] の刻み調整に対し、こちらは打った数値を置く。
+    /// controller がスコア編集モードの確定で呼び、直後に [`Self::save_manual_scores`] で永続化する。
+    pub fn set_manual_score(&mut self, reading: &str, surface: &str, value: i32) -> i32 {
+        self.manual_scores.set_bias(reading, surface, value)
+    }
+
+    /// 読み×表層の現在の手動スコアバイアス (無ければ 0)。スコア編集モードの初期表示に使う。
+    #[must_use]
+    pub fn manual_score_bias(&self, reading: &str, surface: &str) -> i32 {
+        self.manual_scores.bias(reading, surface)
+    }
+
     /// 手動スコア調整を `manual_score.json` に保存する。
     pub fn save_manual_scores(&self, path: impl AsRef<Path>) -> Result<()> {
         self.manual_scores.save(path)

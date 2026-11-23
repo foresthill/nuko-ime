@@ -248,6 +248,8 @@ pub enum CommandAction {
     ScoreUp,
     /// Option+Left (⌥←) → いま選んでいる候補のスコアを下げる (手動微調整 #228)
     ScoreDown,
+    /// Option+Up (⌥↑) → スコア編集モードに入る (候補パネルでポイントを直接数値指定 #228)
+    ScoreEdit,
     /// Tab → 単語登録候補があれば登録 (無ければ素通し)
     RegisterWord,
 }
@@ -299,8 +301,8 @@ pub enum KeyAction {
 /// 一次ソース: Carbon `HIToolbox/Events.h` の `kVK_*`。実機 handleEvent のログでも確認する。
 /// 非 composing 時は特殊キーを横取りしない（未変換状態で特殊キーを奪わない）。
 ///
-/// `option` は矢印キーにのみ効く (⌥←→ = スコア微調整 #228)。他キーでは無視する。
-/// 矢印の修飾優先順は ⌥ > Shift > 無印 (⌥ は明示のスコアキーなので最優先)。
+/// `option` は矢印キーにのみ効く (⌥←→ = スコア微調整、⌥↑ = スコア編集モード #228)。
+/// 他キーでは無視する。矢印の修飾優先順は ⌥ > Shift > 無印 (⌥ は明示のスコアキーなので最優先)。
 #[must_use]
 pub fn command_for_keycode(
     key_code: u16,
@@ -359,9 +361,14 @@ pub fn command_for_keycode(
             CommandAction::FocusShiftRight
         }),
         0x7D => KeyAction::Command(CommandAction::SelectNext), // Down
-        0x7E => KeyAction::Command(CommandAction::SelectPrev), // Up
-        0x61 => KeyAction::Fkey(FKeyConversion::Hiragana),     // F6
-        0x62 => KeyAction::Fkey(FKeyConversion::Katakana),     // F7
+        // Up: ⌥=スコア編集モード (ポイント直接指定) / 無印=前候補。
+        0x7E => KeyAction::Command(if option {
+            CommandAction::ScoreEdit
+        } else {
+            CommandAction::SelectPrev
+        }),
+        0x61 => KeyAction::Fkey(FKeyConversion::Hiragana), // F6
+        0x62 => KeyAction::Fkey(FKeyConversion::Katakana), // F7
         0x64 => KeyAction::Fkey(FKeyConversion::HalfwidthKatakana), // F8
         0x65 => KeyAction::Fkey(FKeyConversion::FullwidthAlnum), // F9
         0x6D => KeyAction::Fkey(FKeyConversion::HalfwidthAlnum), // F10
@@ -656,11 +663,27 @@ mod keycode_tests {
             KeyAction::Command(CommandAction::ScoreDown),
             "⌥+Shift+← も ⌥ 勝ちでスコア下げ"
         );
+        // ⌥↑ = スコア編集モード (ポイント直接指定)。無印↑ は前候補のまま。
+        assert_eq!(
+            o(0x7E, false),
+            KeyAction::Command(CommandAction::ScoreEdit),
+            "⌥↑ = スコア編集モード"
+        );
+        assert_eq!(
+            command_for_keycode(0x7E, false, false, false, true),
+            KeyAction::Command(CommandAction::SelectPrev),
+            "無印↑ は前候補 (変更なし)"
+        );
         // 非 composing では横取りしない (素通し)。
         assert_eq!(
             command_for_keycode(0x7C, false, false, true, false),
             KeyAction::PassThrough,
             "非 composing の ⌥→ は素通し (アプリの単語移動を壊さない)"
+        );
+        assert_eq!(
+            command_for_keycode(0x7E, false, false, true, false),
+            KeyAction::PassThrough,
+            "非 composing の ⌥↑ は素通し"
         );
     }
 

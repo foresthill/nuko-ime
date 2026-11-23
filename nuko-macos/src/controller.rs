@@ -161,14 +161,37 @@ fn debug_log(msg: &str) {
 
 // --- Ivars ---
 
+/// スコア編集モード (#228, ⌥↑) の作業状態。候補パネルで、選んでいる候補の
+/// 手動スコアを**数値で直接**打ち込むためのモーダル副状態。有効な間は handleEvent が
+/// 数字 / Enter / Esc / Backspace を横取りして composition へ流さない。
+///
+/// `reading` / `surface` / `seg_plan` は入室時に確定し (= `manual_score_target` が返すもの)、
+/// `apply_*_manual_scores` と同じキーで `set_manual_score` する。`buffer` は打鍵中の数値文字列
+/// (先頭 `-` 可)、`current` は入室時点の既存バイアス (プロンプト表示用)。
+struct ScoreEditState {
+    reading: String,
+    surface: String,
+    /// `Some((全文読み, focus))` = segmented / `None` = flat。再変換先の選択に使う。
+    seg_plan: Option<(String, usize)>,
+    buffer: String,
+    current: i32,
+}
+
+/// 手動スコア調整の対象。`(nudge のキー読み, 選択表層, segmented plan)` で、plan は
+/// `Some((全文読み, focus))` が segmented、`None` が flat。⌥←→ (nudge) と ⌥↑ (編集モード) 共通。
+type ManualScoreTarget = (String, String, Option<(String, usize)>);
+
 pub struct NukoControllerIvars {
     state: RefCell<InputState>,
+    /// スコア編集モードの状態 (非 `None` の間だけ有効)。
+    score_edit: RefCell<Option<ScoreEditState>>,
 }
 
 impl Default for NukoControllerIvars {
     fn default() -> Self {
         Self {
             state: RefCell::new(InputState::new()),
+            score_edit: RefCell::new(None),
         }
     }
 }
@@ -980,6 +1003,13 @@ impl NukoInputController {
         const KEYCODE_RETURN: u16 = 0x24;
         let is_return = key_code == KEYCODE_RETURN;
 
+        // スコア編集モード (#228, ⌥↑) が有効な間は、このモードがキーボードを占有する:
+        // 数字 / Enter / Esc / Backspace を横取りして composition へ流さない。
+        // ただし Command 併用 (⌘Q / ⌘Tab 等) はアプリに渡す (握り潰さない)。
+        if !cmd && self.ivars().score_edit.borrow().is_some() {
+            return self.handle_score_edit_key(key_code, event, client);
+        }
+
         // Command 併用はアプリのショートカット → 常に IME は奪わない。
         // Control も原則アプリへ素通し。**例外は「composing 中の Ctrl+Enter」だけ**で、
         // これは「降格確定」として横取りする (未確定文字がある最中なのでアプリは Enter を
@@ -1464,6 +1494,10 @@ impl NukoInputController {
             CommandAction::ScoreDown => {
                 // ⌥←: いま選んでいる候補のスコアを下げる (#228)。確定不要のライブ下げ。
                 self.adjust_manual_score(client, -crate::state::manual_score_step())
+            }
+            CommandAction::ScoreEdit => {
+                // ⌥↑: スコア編集モードに入る (#228, ポイントを数値で直接指定)。
+                self.enter_score_edit(client)
             }
             CommandAction::RegisterWord => {
                 // Tab: 今の読みに登録候補があれば「登録してその語を確定」。
@@ -2006,6 +2040,9 @@ impl NukoInputController {
 
         state.reset();
         drop(state);
+        // 確定したらスコア編集モードは畳む (フォーカス喪失→deactivateServer 経由で
+        // ここに来た場合に stale な編集状態を残さない)。
+        *self.ivars().score_edit.borrow_mut() = None;
 
         if learn_segmentation {
             let seg_readings: Vec<String> = seg_observations
@@ -2139,6 +2176,7 @@ impl NukoInputController {
         let mut state = self.ivars().state.borrow_mut();
         state.reset();
         drop(state);
+        *self.ivars().score_edit.borrow_mut() = None;
 
         Self::hide_candidate_panel();
 
@@ -2271,10 +2309,13 @@ impl NukoInputController {
         let Some((items, selected, seg_info, badges, scores)) = snapshot else {
             return;
         };
-        // 単語登録ヒント: 今の読みが「直前に別読みで出した語」の登録対象なら、
+        // スコア編集モード (#228, ⌥↑) が有効なら、その入力プロンプトを最優先でフッターに出す。
+        // そうでなければ単語登録ヒント: 今の読みが「直前に別読みで出した語」の登録対象なら、
         // 候補ウィンドウ末尾に「⇥ Tab:「駒谷」を登録」を出す。
-        let hint = crate::state::pending_registration_for(&reading)
-            .map(|surface| format!("⇥ Tab:「{surface}」を登録"));
+        let hint = self.score_edit_prompt().or_else(|| {
+            crate::state::pending_registration_for(&reading)
+                .map(|surface| format!("⇥ Tab:「{surface}」を登録"))
+        });
         let position = Self::caret_screen_point(client);
         debug_log(&format!(
             "show_candidate_panel: items={} selected={selected} pos=({:.1},{:.1})",
@@ -2436,33 +2477,39 @@ impl NukoInputController {
     ///
     /// nudge のキーは `apply_*_manual_scores` と揃える: segmented=focused 文節の読み /
     /// flat=composition。両経路に効かせるのが肝 ([[nuko-ime-segment-frequency-gap]] の教訓)。
+    /// いまスコア調整すべき対象 = (nudge のキー読み, 選択表層, segmented plan)。
+    ///
+    /// キーは `apply_*_manual_scores` と揃える: segmented=focused 文節の読み / flat=composition。
+    /// `Some((全文読み, focus))` が segmented、`None` が flat。候補が無い / 選択が無い /
+    /// focused 文節の読みが空 / flat で composition が空、のときは `None` (= 対象なし)。
+    /// ⌥←→ (nudge) と ⌥↑ (スコア編集モード) の両方が同じ対象を使う。
+    fn manual_score_target(&self) -> Option<ManualScoreTarget> {
+        let state = self.ivars().state.borrow();
+        let candidates = state.candidates.as_ref()?;
+        let sel = candidates.selected()?;
+        let surface = sel.surface.clone();
+        match state.segmented.as_ref() {
+            Some(seg) => match seg.focused_segment() {
+                Some(fseg) if !fseg.reading.is_empty() => Some((
+                    fseg.reading.clone(),
+                    surface,
+                    Some((state.composition.clone(), seg.focused)),
+                )),
+                _ => None,
+            },
+            None => {
+                if state.composition.is_empty() {
+                    return None;
+                }
+                Some((state.composition.clone(), surface, None))
+            }
+        }
+    }
+
     fn adjust_manual_score(&self, client: &AnyObject, delta: i32) -> Bool {
         // plan = (nudge のキー読み, 選択表層, Some((全文読み, focus))=segmented / None=flat)
-        let (nudge_reading, surface, seg_plan): (String, String, Option<(String, usize)>) = {
-            let state = self.ivars().state.borrow();
-            let Some(candidates) = state.candidates.as_ref() else {
-                return Bool::YES; // 候補が出ていない → 何もしない
-            };
-            let Some(sel) = candidates.selected() else {
-                return Bool::YES;
-            };
-            let surface = sel.surface.clone();
-            match state.segmented.as_ref() {
-                Some(seg) => match seg.focused_segment() {
-                    Some(fseg) if !fseg.reading.is_empty() => (
-                        fseg.reading.clone(),
-                        surface,
-                        Some((state.composition.clone(), seg.focused)),
-                    ),
-                    _ => return Bool::YES,
-                },
-                None => {
-                    if state.composition.is_empty() {
-                        return Bool::YES;
-                    }
-                    (state.composition.clone(), surface, None)
-                }
-            }
+        let Some((nudge_reading, surface, seg_plan)) = self.manual_score_target() else {
+            return Bool::YES; // 対象なし → 何もしない
         };
 
         // nudge + 永続化 (ManualScoreStore は churn-free・冪等)。
@@ -2486,6 +2533,148 @@ impl NukoInputController {
             None => self.rescore_flat(client, &nudge_reading, &surface),
         }
         Bool::YES
+    }
+
+    /// スコア編集モード (#228, ⌥↑) に入る。選んでいる候補の手動スコアを数値で直接指定する。
+    ///
+    /// 対象 (読み/表層/segmented plan) を [`Self::manual_score_target`] で確定し、入室時点の
+    /// 既存バイアスを `current` に控えてプロンプトに出す。以降 handleEvent は数字 / Enter /
+    /// Esc / Backspace を [`Self::handle_score_edit_key`] に横取りさせる。対象が無ければ no-op。
+    fn enter_score_edit(&self, client: &AnyObject) -> Bool {
+        let Some((reading, surface, seg_plan)) = self.manual_score_target() else {
+            return Bool::YES;
+        };
+        let current = with_engine(|e| e.manual_score_bias(&reading, &surface));
+        *self.ivars().score_edit.borrow_mut() = Some(ScoreEditState {
+            reading,
+            surface,
+            seg_plan,
+            buffer: String::new(),
+            current,
+        });
+        // プロンプト (編集中の buffer と現在値) をパネル下部に出す。
+        self.show_candidate_panel(client);
+        Bool::YES
+    }
+
+    /// スコア編集モード中のキー。数字 / `-` は buffer へ、Enter=確定・Esc=取消・Backspace=1桁削除。
+    /// それ以外は握り潰して (Bool::YES) モードを維持する (composition へは一切流さない)。
+    fn handle_score_edit_key(&self, key_code: u16, event: &NSEvent, client: &AnyObject) -> Bool {
+        const KEYCODE_RETURN: u16 = 0x24;
+        const KEYCODE_ENTER: u16 = 0x4C; // テンキー Enter
+        const KEYCODE_ESC: u16 = 0x35;
+        const KEYCODE_BACKSPACE: u16 = 0x33;
+        match key_code {
+            KEYCODE_RETURN | KEYCODE_ENTER => self.score_edit_apply(client),
+            KEYCODE_ESC => self.score_edit_cancel(client),
+            KEYCODE_BACKSPACE => {
+                {
+                    let mut edit = self.ivars().score_edit.borrow_mut();
+                    if let Some(e) = edit.as_mut() {
+                        e.buffer.pop();
+                    }
+                }
+                self.show_candidate_panel(client);
+                Bool::YES
+            }
+            _ => {
+                // 生 NSEvent の characters() は IME 前の物理キー文字 → 日本語モードでも "1" "-"。
+                if let Some(s) = event.characters() {
+                    let mut changed = false;
+                    {
+                        let mut edit = self.ivars().score_edit.borrow_mut();
+                        if let Some(e) = edit.as_mut() {
+                            for ch in s.to_string().chars() {
+                                if Self::score_edit_push_char(&mut e.buffer, ch) {
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                    if changed {
+                        self.show_candidate_panel(client);
+                    }
+                }
+                Bool::YES
+            }
+        }
+    }
+
+    /// buffer に 1 文字取り込む。受理したら true。
+    /// 受理: ASCII 数字、先頭のみ `-` (符号)。桁数は i32 の範囲に収まる 8 文字 (符号込み) で打ち止め。
+    fn score_edit_push_char(buffer: &mut String, ch: char) -> bool {
+        const MAX_LEN: usize = 8; // 例 -2000000 (符号 + 7 桁)
+        if buffer.len() >= MAX_LEN {
+            return false;
+        }
+        // 受理: ASCII 数字、または先頭のみ `-` (符号)。
+        let accept = ch.is_ascii_digit() || (ch == '-' && buffer.is_empty());
+        if accept {
+            buffer.push(ch);
+        }
+        accept
+    }
+
+    /// スコア編集モードを確定する。buffer を数値に解釈して `set_manual_score` で上書き保存し、
+    /// モードを抜けて再変換・パネル更新する。buffer が空 / 符号のみ / 解釈不能なら取消扱い (無変更)。
+    fn score_edit_apply(&self, client: &AnyObject) -> Bool {
+        let Some(edit) = self.ivars().score_edit.borrow_mut().take() else {
+            return Bool::YES;
+        };
+        // 空 / "-" だけ → 取消 (何もしない)。
+        let value: Option<i32> = match edit.buffer.parse::<i64>() {
+            Ok(v) => Some(v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32),
+            Err(_) => None,
+        };
+        let Some(value) = value else {
+            // 無効入力は取消と同じ (モードは既に take 済み)。
+            self.show_candidate_panel(client);
+            return Bool::YES;
+        };
+        let new_bias = with_engine_mut(|engine| {
+            let b = engine.set_manual_score(&edit.reading, &edit.surface, value);
+            if let Some(path) = crate::state::manual_score_path() {
+                if let Err(e) = engine.save_manual_scores(&path) {
+                    warn!(error = %e, "manual_score.json の保存に失敗");
+                }
+            }
+            b
+        });
+        debug_log(&format!(
+            "score_edit_apply: reading='{}' surface='{}' typed={value} bias={new_bias} segmented={}",
+            edit.reading,
+            edit.surface,
+            edit.seg_plan.is_some()
+        ));
+        // モードを保ったまま再変換 → 指定した表層に選択を戻す (adjust_manual_score と同じ)。
+        match edit.seg_plan {
+            Some((whole_reading, focus)) => self.rescore_segmented(client, &whole_reading, focus),
+            None => self.rescore_flat(client, &edit.reading, &edit.surface),
+        }
+        Bool::YES
+    }
+
+    /// スコア編集モードを取消す (無変更)。パネルは通常ヒントに戻して再描画する。
+    fn score_edit_cancel(&self, client: &AnyObject) -> Bool {
+        *self.ivars().score_edit.borrow_mut() = None;
+        self.show_candidate_panel(client);
+        Bool::YES
+    }
+
+    /// スコア編集モードが有効ならパネル下部に出すプロンプト文字列を返す。
+    /// 例: `✎ 点数: 200000｜現在 0pt  ⏎確定 ⎋取消 ⌫削除`。buffer が空なら数値部は `_`。
+    fn score_edit_prompt(&self) -> Option<String> {
+        let edit = self.ivars().score_edit.borrow();
+        let e = edit.as_ref()?;
+        let typed = if e.buffer.is_empty() {
+            "_".to_string()
+        } else {
+            e.buffer.clone()
+        };
+        Some(format!(
+            "✎ 点数: {typed}｜現在 {}pt  ⏎確定 ⎋取消 ⌫削除",
+            e.current
+        ))
     }
 
     /// flat モードで手動スコア調整後に再変換し、`surface` を選択し直して panel/marked を更新する。
