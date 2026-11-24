@@ -680,6 +680,7 @@ fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
     setup_corrections(&mut engine);
     setup_user_dictionary(&mut engine);
     setup_manual_scores(&mut engine);
+    setup_context_freq(&mut engine);
     engine.set_kyujitai_mode(kyujitai_enabled());
     engine.set_learning_strength(learning_mode());
     Ok(engine)
@@ -692,6 +693,7 @@ fn build_engine() -> nuko_core::error::Result<ConversionEngine> {
     setup_corrections(&mut engine);
     setup_user_dictionary(&mut engine);
     setup_manual_scores(&mut engine);
+    setup_context_freq(&mut engine);
     engine.set_kyujitai_mode(kyujitai_enabled());
     engine.set_learning_strength(learning_mode());
     Ok(engine)
@@ -860,6 +862,24 @@ fn setup_manual_scores(engine: &mut ConversionEngine) {
     };
     if let Err(e) = engine.load_manual_scores(&path) {
         tracing::warn!(error = %e, "手動スコア調整 (manual_score.json) の load 失敗。空で継続");
+    }
+}
+
+/// 文脈つき候補学習 (`context_freq.json`、#228/A) の保存先パス。
+#[must_use]
+pub fn context_freq_path() -> Option<std::path::PathBuf> {
+    nuko_app_support_dir().map(|d| d.join("context_freq.json"))
+}
+
+/// 文脈つき候補学習 (`context_freq.json`、#228/A) を起動時にロードする。
+///
+/// ファイルが無くても空で継続。以後 commit が「直前文節→今の表層」を記録し同 path に保存する。
+fn setup_context_freq(engine: &mut ConversionEngine) {
+    let Some(path) = context_freq_path() else {
+        return;
+    };
+    if let Err(e) = engine.load_context_freq(&path) {
+        tracing::warn!(error = %e, "文脈学習 (context_freq.json) の load 失敗。空で継続");
     }
 }
 
@@ -1918,7 +1938,10 @@ pub fn forget_learning_from_window() {
             }
             n
         });
-        let removed = obs_removed + retype_removed + manual_removed;
+        // 文脈つき候補学習 (context_freq.json, #228/A) も忘れる (engine が自動 save)。
+        let context_removed =
+            with_engine_mut(|engine| engine.forget_context_freq_for(reading, surface_opt));
+        let removed = obs_removed + retype_removed + manual_removed + context_removed;
         if removed == 0 {
             win.set_status(&format!(
                 "… 読み「{reading}」{}の学習は見つかりませんでした",
@@ -1941,7 +1964,7 @@ pub fn forget_learning_from_window() {
 
         win.clear_forget_fields();
         win.set_status(&format!(
-            "✅ 読み「{reading}」{}の学習を忘れました（観察 {obs_removed} 件・打ち直し {retype_removed} 件・手動調整 {manual_removed} 件除去・即反映）",
+            "✅ 読み「{reading}」{}の学習を忘れました（観察 {obs_removed} 件・打ち直し {retype_removed} 件・手動調整 {manual_removed} 件・文脈 {context_removed} 件除去・即反映）",
             surface_opt.map(|s| format!("→「{s}」")).unwrap_or_default()
         ));
     });

@@ -1841,15 +1841,26 @@ impl NukoInputController {
 
         // 学習記録 (副作用)。intent で分岐する。
         let ctx_snapshot = state.context.clone();
-        for c in &decision.learn_targets {
+        for (i, c) in decision.learn_targets.iter().enumerate() {
+            // 文脈つき候補学習 (#228/A): segmented の 2 文節目以降は **直前文節の表層** を
+            // 文脈にして記録する (ctx.prev_words の末尾を engine.commit が拾う)。先頭文節は
+            // 直前の確定文 (global prev) をそのまま文脈にする。これで「どう の後の しよう は
+            // しよう」を覚える。convert 側 apply_segment_frequency と同じ「直前文節表層」キー。
+            let ctx_for = if i == 0 {
+                ctx_snapshot.clone()
+            } else {
+                let mut cx = ctx_snapshot.clone();
+                cx.push_prev_word(&decision.learn_targets[i - 1].surface);
+                cx
+            };
             with_engine_mut(|engine| match intent {
                 CommitIntent::Normal => {
-                    if let Err(e) = engine.commit(c, &ctx_snapshot) {
+                    if let Err(e) = engine.commit(c, &ctx_for) {
                         error!("学習記録エラー: {e}");
                     }
                 }
                 CommitIntent::Teach => {
-                    if let Err(e) = engine.commit_teach(c, &ctx_snapshot) {
+                    if let Err(e) = engine.commit_teach(c, &ctx_for) {
                         error!("教える確定エラー: {e}");
                     }
                 }

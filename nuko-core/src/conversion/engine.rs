@@ -11,8 +11,8 @@ use crate::dictionary::DictionaryManager;
 use crate::error::{NukoError, Result};
 use crate::input::{to_halfwidth_katakana, to_katakana};
 use crate::learning::{
-    CorrectionStore, DateFormatStore, LearningManager, ManualScoreStore, PhraseStore,
-    SegmentationStore,
+    ContextFrequencyStore, CorrectionStore, DateFormatStore, LearningManager, ManualScoreStore,
+    PhraseStore, SegmentationStore,
 };
 
 /// 自然分割の境界 (`nat_bounds` = 0 と `total` を含む累積オフセット) に対し、
@@ -420,47 +420,105 @@ pub fn apply_segment_manual_scores(
 pub fn apply_segment_frequency(
     segmented: &mut super::SegmentedConversion,
     learning: &LearningManager,
+    context_freq: &ContextFrequencyStore,
 ) {
     let ctx = ConversionContext::new();
-    for seg in &mut segmented.segments {
-        let seg_reading = seg.reading.clone();
-        let Ok(learned) = learning.get_candidates(&seg_reading, &ctx) else {
-            continue;
+    let n = segmented.segments.len();
+    // index ループ: 文脈つき学習 (#228/A) で「直前文節の現在表層」を読むため。
+    // 直前文節は本ループで既に Layer0/文脈適用済みなので、その確定表層が文脈になる (cascade)。
+    for i in 0..n {
+        // 文脈 = 直前文節の現在表層。先頭文節 (i==0) は文内に直前が無いので文脈適用しない
+        // (記録側 commit は文頭でも global prev で記録するが、convert 時はここに global prev が
+        //  無いので i>=1 のみ。どう|しよう の主要ケースは i>=1 で成立する)。
+        let prev_surface: Option<String> = if i == 0 {
+            None
+        } else {
+            segmented.segments[i - 1].surface().map(|s| s.to_string())
         };
+
+        let seg = &mut segmented.segments[i];
+        let seg_reading = seg.reading.clone();
         let mut changed = false;
-        for lc in learned {
-            // 一過性の日付/時刻表層 (きょう→2026年…) は学習に載せない。commit 側で記録を
-            // 抑止済みだが、古い learning.json 掃除を兼ねた belt-and-suspenders (flat と同じ)。
-            if super::datetime::is_datetime_surface(&seg_reading, &lc.surface) {
-                continue;
-            }
-            // 読み完全一致の学習表層: Layer 0 頻度スコアを **max で引き上げる** (加算ではない)。
-            //
-            // ★なぜ max か (2026-11-12、--explain でスコア内訳を透明化して判明した回帰の根治):
-            // 既存候補を「加算」にすると、libakaza の基礎スコア (ログ確率ベースで多くは負値、
-            // 例 ように = −1408) を学習スコアに足し込むため、同じ count でも基礎が負に沈んで
-            // いる表層ほど不利になる。一方、候補に無い表層は下の else で **純 Layer 0** を注入
-            // するので、低 count の注入表層が高 count の既存表層に勝つ非対称が生まれていた
-            // (例: 用に count 4 = 200040 が ように count 36 = −1408+200360 = 198952 に勝つ)。
-            // → 既存も注入も **純 Layer 0 スコア** に揃え、count 順の正しい並びに戻す。
-            // 基礎が学習より高い稀なケース (強い libakaza 候補) は max がそのまま基礎を残す。
-            if let Some(c) = seg.candidates.iter_mut().find(|c| c.surface == lc.surface) {
-                c.score = c.score.max(lc.score);
-                changed = true;
-            } else {
-                seg.candidates.push(
-                    Candidate::new(&lc.surface, &seg_reading)
-                        .with_score(lc.score)
-                        .with_source(CandidateSource::User),
-                );
-                changed = true;
+
+        // --- Layer 0 頻度 (読み完全一致・max 合成) ---
+        if let Ok(learned) = learning.get_candidates(&seg_reading, &ctx) {
+            for lc in learned {
+                // 一過性の日付/時刻表層 (きょう→2026年…) は学習に載せない。commit 側で記録を
+                // 抑止済みだが、古い learning.json 掃除を兼ねた belt-and-suspenders (flat と同じ)。
+                if super::datetime::is_datetime_surface(&seg_reading, &lc.surface) {
+                    continue;
+                }
+                // 読み完全一致の学習表層: Layer 0 頻度スコアを **max で引き上げる** (加算ではない)。
+                //
+                // ★なぜ max か (2026-11-12、--explain でスコア内訳を透明化して判明した回帰の根治):
+                // 既存候補を「加算」にすると、libakaza の基礎スコア (ログ確率ベースで多くは負値、
+                // 例 ように = −1408) を学習スコアに足し込むため、同じ count でも基礎が負に沈んで
+                // いる表層ほど不利になる。一方、候補に無い表層は下の else で **純 Layer 0** を注入
+                // するので、低 count の注入表層が高 count の既存表層に勝つ非対称が生まれていた
+                // (例: 用に count 4 = 200040 が ように count 36 = −1408+200360 = 198952 に勝つ)。
+                // → 既存も注入も **純 Layer 0 スコア** に揃え、count 順の正しい並びに戻す。
+                // 基礎が学習より高い稀なケース (強い libakaza 候補) は max がそのまま基礎を残す。
+                if let Some(c) = seg.candidates.iter_mut().find(|c| c.surface == lc.surface) {
+                    c.score = c.score.max(lc.score);
+                    changed = true;
+                } else {
+                    seg.candidates.push(
+                        Candidate::new(&lc.surface, &seg_reading)
+                            .with_score(lc.score)
+                            .with_source(CandidateSource::User),
+                    );
+                    changed = true;
+                }
             }
         }
+
+        // --- 文脈つき学習 (#228 残件③/A): 直前文節が文脈に一致する表層を他候補の上へ ---
+        //
+        // 例「どうしようかな」= どう|しよう|… で、しよう の直前が どう のとき、過去に
+        // (しよう, しよう, prev=どう) を確定していれば しよう を 1 位へ。別文脈 (仕様書など) で
+        // 学習した 仕様 (Layer0・文脈なし) に、文脈一致の しよう が勝てるようにする。
+        //
+        // 持ち上げ先は「他候補の最上位のすぐ上」= 文脈一致候補が確実に 1 位。ただし訂正tier
+        // (CORRECTION_BOOST) **未満**にクランプするので、打ち直し訂正・強い手動スコアは文脈より
+        // 上に残る (階層: 教える/訂正/手動 > 文脈 > 素の Layer0 > libakaza)。
+        if let Some(prev) = prev_surface.as_deref() {
+            if !context_freq.is_empty() {
+                if let Some((surf, _count)) = context_freq.best_surface(&seg_reading, prev) {
+                    let surf = surf.to_string();
+                    let max_other = seg
+                        .candidates
+                        .iter()
+                        .filter(|c| c.surface != surf)
+                        .map(|c| c.score)
+                        .max()
+                        .unwrap_or(i32::MIN);
+                    let target = max_other
+                        .saturating_add(crate::learning::CONTEXT_MATCH_MARGIN)
+                        .min(crate::learning::correction::CORRECTION_BOOST - 1);
+                    if let Some(c) = seg.candidates.iter_mut().find(|c| c.surface == surf) {
+                        if target > c.score {
+                            c.score = target;
+                            changed = true;
+                        }
+                    } else {
+                        seg.candidates.push(
+                            Candidate::new(&surf, &seg_reading)
+                                .with_score(target)
+                                .with_source(CandidateSource::User),
+                        );
+                        changed = true;
+                    }
+                }
+            }
+        }
+
         if changed {
             seg.candidates.sort_by_key(|c| std::cmp::Reverse(c.score));
             seg.select(0); // 並べ替え後の先頭 (最良) を選択に戻す
-                           // 学習が効いた = Layer 2 と同様「学習適用」フラグを立てる。
-                           // controller は nn 曖昧語で segmented を flat より優先する判定に使う。
+        }
+        // 学習が効いた = Layer 2 と同様「学習適用」フラグを立てる (seg borrow を離してから)。
+        // controller は nn 曖昧語で segmented を flat より優先する判定に使う。
+        if changed {
             segmented.corrections_applied = true;
         }
     }
@@ -559,6 +617,10 @@ pub struct ConversionEngine {
     date_formats_path: Option<PathBuf>,
     /// 手動スコア調整 (#228, ⌥←→)。読み×表層へユーザーが付けた符号付きバイアス。空なら無変化。個人・非共有。
     manual_scores: ManualScoreStore,
+    /// 文脈つき候補学習 (#228 残件③/A)。(読み,表層,直前文節表層) ごとの確定回数。空なら無変化。個人・非共有。
+    context_freq: ContextFrequencyStore,
+    /// `context_freq` の保存先 (set されていれば commit 時に自動 save)。
+    context_freq_path: Option<PathBuf>,
     /// 旧字体モード。ON なら候補の旧字体版 (國/體/學…) を末尾に追加する。既定 OFF。
     kyujitai_mode: bool,
 }
@@ -580,6 +642,8 @@ impl ConversionEngine {
             date_formats: DateFormatStore::default(),
             date_formats_path: None,
             manual_scores: ManualScoreStore::default(),
+            context_freq: ContextFrequencyStore::default(),
+            context_freq_path: None,
             kyujitai_mode: false,
         })
     }
@@ -618,6 +682,8 @@ impl ConversionEngine {
             date_formats: DateFormatStore::default(),
             date_formats_path: None,
             manual_scores: ManualScoreStore::default(),
+            context_freq: ContextFrequencyStore::default(),
+            context_freq_path: None,
             kyujitai_mode: false,
         })
     }
@@ -773,6 +839,47 @@ impl ConversionEngine {
     #[must_use]
     pub fn phrases(&self) -> &PhraseStore {
         &self.phrases
+    }
+
+    /// `context_freq.json` から文脈つき候補学習を load する (無ければ空)。保存先も覚える。
+    pub fn load_context_freq(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        self.context_freq = ContextFrequencyStore::load(path.as_ref())?;
+        self.context_freq_path = Some(path.as_ref().to_path_buf());
+        tracing::info!(count = self.context_freq.len(), "文脈学習を load");
+        Ok(())
+    }
+
+    /// 文脈つき候補学習への参照 (保存・表示・テスト用)。
+    #[must_use]
+    pub fn context_freq(&self) -> &ContextFrequencyStore {
+        &self.context_freq
+    }
+
+    /// 文脈つき候補学習を全消しして保存する (「学習を忘れる」用)。除去件数を返す。
+    pub fn forget_context_freq(&mut self) -> usize {
+        let n = self.context_freq.forget_all();
+        if n > 0 {
+            if let Some(path) = &self.context_freq_path {
+                if let Err(e) = self.context_freq.save(path) {
+                    tracing::warn!(error = %e, "context_freq.json の保存に失敗 (forget)");
+                }
+            }
+        }
+        n
+    }
+
+    /// 読み (と任意で表層) の文脈つき候補学習を忘れて保存する。除去件数を返す。
+    /// 「読みを指定して忘れる」UI から、手動スコア等と対で呼ぶ。
+    pub fn forget_context_freq_for(&mut self, reading: &str, surface: Option<&str>) -> usize {
+        let n = self.context_freq.forget(reading, surface);
+        if n > 0 {
+            if let Some(path) = &self.context_freq_path {
+                if let Err(e) = self.context_freq.save(path) {
+                    tracing::warn!(error = %e, "context_freq.json の保存に失敗 (forget)");
+                }
+            }
+        }
+        n
     }
 
     /// 旧字体モードを設定する。ON なら候補に旧字体版を追加する (既定 OFF)。
@@ -1110,7 +1217,7 @@ impl ConversionEngine {
         // 未参照だったため、「文中の語」を何度確定しても次回の文節変換で頻度が無視され、
         // libakaza の既定順が永遠に勝っていた (2026-11「砲→方 / 用→様 が勝てない」)。
         // 観察ログ opt-in に依存しない常時 ON 経路なので、未オプトインでも「直したら次回勝つ」。
-        apply_segment_frequency(&mut segmented, &self.learning);
+        apply_segment_frequency(&mut segmented, &self.learning, &self.context_freq);
         // 単語登録 (ユーザー辞書): **文節ごとに** 登録語を注入して最優先にする。
         // flat の convert() は辞書 lookup で source=User 候補に USER_DICT_BOOST を足して
         // 1 位にするが、convert_segmented は未適用だったため「け→家 を登録しても文中では
@@ -1471,6 +1578,20 @@ impl ConversionEngine {
             return Ok(());
         }
         self.learning.record(candidate, context)?;
+
+        // 文脈つき候補学習 (#228 残件③/A): 直前文節 (context.prev_words の末尾) のもとで
+        // この (読み, 表層) を選んだ回数を記録する。これで「どうしようかな の中の しよう は
+        // しよう、仕様書の文脈では 仕様」を両立できる。prev が無い (文頭) なら記録しない。
+        // 記録は Layer0 の record と独立 (ContextFrequencyStore = churn-free・加法的)。
+        if let Some(prev) = context.prev_words.last() {
+            self.context_freq
+                .record(&candidate.reading, &candidate.surface, prev);
+            if let Some(path) = &self.context_freq_path {
+                if let Err(e) = self.context_freq.save(path) {
+                    tracing::warn!(error = %e, "context_freq.json の保存に失敗");
+                }
+            }
+        }
 
         // 学習モードに応じて確定ブーストを積む (#183 スコア可視化の次段 / 王冠 2026-11-21)。
         // - Crown (既定): 上限付き王冠。他表層の王冠を剥奪して「最後に確定した 1 つ」だけを
@@ -1986,7 +2107,7 @@ mod tests {
             "適用前は libakaza 既定 砲"
         );
 
-        apply_segment_frequency(&mut segmented, &learning);
+        apply_segment_frequency(&mut segmented, &learning, &ContextFrequencyStore::new());
 
         assert_eq!(
             segmented.segments[0].surface(),
@@ -2024,7 +2145,7 @@ mod tests {
         let mut segmented =
             SegmentedConversion::new(vec![Segment::new("ほう", vec![cand("砲", "ほう", 99_900)])]);
 
-        apply_segment_frequency(&mut segmented, &learning);
+        apply_segment_frequency(&mut segmented, &learning, &ContextFrequencyStore::new());
 
         assert_eq!(
             segmented.segments[0].surface(),
@@ -2049,7 +2170,7 @@ mod tests {
             vec![cand("砲", "ほう", 99_900), cand("方", "ほう", 99_800)],
         )]);
 
-        apply_segment_frequency(&mut segmented, &learning);
+        apply_segment_frequency(&mut segmented, &learning, &ContextFrequencyStore::new());
 
         assert_eq!(
             segmented.segments[0].surface(),
@@ -2059,6 +2180,109 @@ mod tests {
         assert!(
             !segmented.corrections_applied,
             "★ 学習が無ければ corrections_applied は立たない"
+        );
+    }
+
+    /// ★★ 文脈つき学習 (#228/A): 「どうしようかな」= どう|しよう で、仕様 を別文脈で
+    /// 何度も確定していても、しよう の直前が どう のとき (しよう,しよう,prev=どう) を
+    /// 学習済みなら しよう が勝つ。文脈なしだと 仕様 が勝つ (= 森岡さん報告の再現と根治)。
+    #[test]
+    fn segment_context_frequency_prefers_contextual_surface() {
+        use crate::conversion::{Segment, SegmentedConversion};
+
+        // Layer0: 仕様 を 24 回 (別文脈で) 確定済み → しよう 文節で既定上位になる。
+        let mut learning = LearningManager::new().unwrap();
+        let ctx = ConversionContext::new();
+        for _ in 0..24 {
+            learning
+                .record(&Candidate::new("仕様", "しよう"), &ctx)
+                .unwrap();
+        }
+        // しよう (平仮名) も使うが回数は少なめ。
+        learning
+            .record(&Candidate::new("しよう", "しよう"), &ctx)
+            .unwrap();
+
+        let cand = |s: &str, r: &str, score: i32| {
+            Candidate::new(s, r)
+                .with_score(score)
+                .with_source(CandidateSource::System)
+        };
+        let build = || {
+            SegmentedConversion::new(vec![
+                Segment::new("どう", vec![cand("どう", "どう", 99_900)]),
+                Segment::new(
+                    "しよう",
+                    vec![cand("しよう", "しよう", 50), cand("仕様", "しよう", 99_800)],
+                ),
+            ])
+        };
+
+        // 文脈なし: Layer0 で 仕様 (count24) が しよう (count1) に勝つ。
+        let mut seg_no_ctx = build();
+        apply_segment_frequency(&mut seg_no_ctx, &learning, &ContextFrequencyStore::new());
+        assert_eq!(
+            seg_no_ctx.segments[1].surface(),
+            Some("仕様"),
+            "文脈なしなら Layer0 で 仕様 が勝つ (= 報告された誤変換)"
+        );
+
+        // 文脈あり: (しよう,しよう,prev=どう) を学習済み → しよう が勝つ。
+        let mut context_freq = ContextFrequencyStore::new();
+        context_freq.record("しよう", "しよう", "どう");
+        let mut seg_ctx = build();
+        apply_segment_frequency(&mut seg_ctx, &learning, &context_freq);
+        assert_eq!(
+            seg_ctx.segments[1].surface(),
+            Some("しよう"),
+            "★ 直前が どう のとき文脈学習した しよう が 1 位 (#228/A 根治)"
+        );
+        // 訂正tier未満に収まる (打ち直し訂正は文脈より上に残る階層)。
+        let shiyou_score = seg_ctx.segments[1]
+            .candidates
+            .iter()
+            .find(|c| c.surface == "しよう")
+            .unwrap()
+            .score;
+        assert!(
+            shiyou_score < crate::learning::correction::CORRECTION_BOOST,
+            "文脈持ち上げは訂正tier未満 (score={shiyou_score})"
+        );
+    }
+
+    /// ★ 文脈が別 (prev が一致しない) なら文脈学習は発火せず Layer0 のまま (回帰ゼロ)。
+    #[test]
+    fn segment_context_frequency_noop_when_prev_differs() {
+        use crate::conversion::{Segment, SegmentedConversion};
+
+        let mut learning = LearningManager::new().unwrap();
+        let ctx = ConversionContext::new();
+        for _ in 0..24 {
+            learning
+                .record(&Candidate::new("仕様", "しよう"), &ctx)
+                .unwrap();
+        }
+        let cand = |s: &str, r: &str, score: i32| {
+            Candidate::new(s, r)
+                .with_score(score)
+                .with_source(CandidateSource::System)
+        };
+        // 直前が 「この」 (どう ではない)。
+        let mut segmented = SegmentedConversion::new(vec![
+            Segment::new("この", vec![cand("この", "この", 99_900)]),
+            Segment::new(
+                "しよう",
+                vec![cand("しよう", "しよう", 50), cand("仕様", "しよう", 99_800)],
+            ),
+        ]);
+        let mut context_freq = ContextFrequencyStore::new();
+        context_freq.record("しよう", "しよう", "どう"); // どう の文脈だけ学習
+
+        apply_segment_frequency(&mut segmented, &learning, &context_freq);
+        assert_eq!(
+            segmented.segments[1].surface(),
+            Some("仕様"),
+            "★ prev が この なら どう の文脈学習は効かず Layer0 の 仕様 のまま"
         );
     }
 
@@ -2191,7 +2415,7 @@ mod tests {
             vec![cand("ように", "ように", -500), cand("様に", "ように", -800)],
         )]);
 
-        apply_segment_frequency(&mut segmented, &learning);
+        apply_segment_frequency(&mut segmented, &learning, &ContextFrequencyStore::new());
 
         assert_eq!(
             segmented.segments[0].surface(),

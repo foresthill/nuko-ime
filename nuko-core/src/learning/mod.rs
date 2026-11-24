@@ -2,6 +2,7 @@
 //!
 //! ユーザーの入力パターンを学習し、変換精度を向上させます。
 
+pub mod context;
 pub mod correction;
 pub mod date_format;
 pub mod dream_history;
@@ -14,6 +15,7 @@ pub mod phrase;
 pub mod retype;
 pub mod segmentation;
 
+pub use context::{ContextFrequencyEntry, ContextFrequencyStore, CONTEXT_MATCH_MARGIN};
 pub use correction::{extract_corrections, CorrectionStore, Preference};
 pub use date_format::{DateFormatEntry, DateFormatStore};
 pub use dreaming::{

@@ -569,6 +569,12 @@ fn load_personal_learning(engine: &mut ConversionEngine) {
     if let Err(e) = engine.load_manual_scores(dir.join("manual_score.json")) {
         eprintln!("(manual_score.json load 失敗: {e})");
     }
+    // 文脈つき候補学習 (#228/A, 直前文節で候補を選好)
+    if let Err(e) = engine.load_context_freq(dir.join("context_freq.json")) {
+        eprintln!("(context_freq.json load 失敗: {e})");
+    } else {
+        eprintln!("(context_freq: {} 件)", engine.context_freq().len());
+    }
 }
 
 /// 個人学習データの標準ディレクトリ (`$HOME/Library/Application Support/nuko-ime`)。
