@@ -161,24 +161,32 @@ fn debug_log(msg: &str) {
 
 // --- Ivars ---
 
-/// スコア編集モード (#228, ⌥↑) の作業状態。候補パネルで、選んでいる候補の
-/// 手動スコアを**数値で直接**打ち込むためのモーダル副状態。有効な間は handleEvent が
+/// スコア編集モード (#228, ⌥=) の作業状態。候補パネルで、選んでいる候補の点数を
+/// **数値で直接**指定するためのモーダル副状態。有効な間は handleEvent が
 /// 数字 / Enter / Esc / Backspace を横取りして composition へ流さない。
 ///
-/// `reading` / `surface` / `seg_plan` は入室時に確定し (= `manual_score_target` が返すもの)、
-/// `apply_*_manual_scores` と同じキーで `set_manual_score` する。`buffer` は打鍵中の数値文字列
-/// (先頭 `-` 可)、`current` は入室時点の既存バイアス (プロンプト表示用)。
+/// `reading` / `surface` / `seg_plan` は入室時に確定 (= `manual_score_target` が返すもの)。
+/// `buffer` は打鍵中の数値 (先頭 `-` 可)。
+///
+/// **絶対指定の意味づけ**: ユーザーが打つ数値は「その候補の“実効スコア”をいくつにするか」。
+/// `effective` = 入室時点のその候補の表示スコア (例 500335、プロンプトで「現在 Npt」と見せる)。
+/// `base` = `effective - 現在の手動バイアス` (= 手動を除いた素点)。確定時は
+/// `手動バイアス = 打った値 - base` を `set_manual_score` で置くので、実効スコアが打った値になる。
+/// 「現在 0pt」と出て 500335 と矛盾する問題 (2026-11 森岡さん) を、現在値=実効スコア表示で解消。
 struct ScoreEditState {
     reading: String,
     surface: String,
     /// `Some((全文読み, focus))` = segmented / `None` = flat。再変換先の選択に使う。
     seg_plan: Option<(String, usize)>,
     buffer: String,
-    current: i32,
+    /// 入室時点のその候補の実効スコア (プロンプト「現在 Npt」表示用)。
+    effective: i32,
+    /// 手動バイアスを除いた素点 (= effective - 現在バイアス)。確定時の目標計算に使う。
+    base: i32,
 }
 
 /// 手動スコア調整の対象。`(nudge のキー読み, 選択表層, segmented plan)` で、plan は
-/// `Some((全文読み, focus))` が segmented、`None` が flat。⌥←→ (nudge) と ⌥↑ (編集モード) 共通。
+/// `Some((全文読み, focus))` が segmented、`None` が flat。⌥←→ (nudge) と ⌥= (編集モード) 共通。
 type ManualScoreTarget = (String, String, Option<(String, usize)>);
 
 pub struct NukoControllerIvars {
@@ -1003,7 +1011,7 @@ impl NukoInputController {
         const KEYCODE_RETURN: u16 = 0x24;
         let is_return = key_code == KEYCODE_RETURN;
 
-        // スコア編集モード (#228, ⌥↑) が有効な間は、このモードがキーボードを占有する:
+        // スコア編集モード (#228, ⌥=) が有効な間は、このモードがキーボードを占有する:
         // 数字 / Enter / Esc / Backspace を横取りして composition へ流さない。
         // ただし Command 併用 (⌘Q / ⌘Tab 等) はアプリに渡す (握り潰さない)。
         if !cmd && self.ivars().score_edit.borrow().is_some() {
@@ -1496,7 +1504,7 @@ impl NukoInputController {
                 self.adjust_manual_score(client, -crate::state::manual_score_step())
             }
             CommandAction::ScoreEdit => {
-                // ⌥↑: スコア編集モードに入る (#228, ポイントを数値で直接指定)。
+                // ⌥=: スコア編集モードに入る (#228, ポイントを数値で直接指定)。
                 self.enter_score_edit(client)
             }
             CommandAction::RegisterWord => {
@@ -2309,7 +2317,7 @@ impl NukoInputController {
         let Some((items, selected, seg_info, badges, scores)) = snapshot else {
             return;
         };
-        // スコア編集モード (#228, ⌥↑) が有効なら、その入力プロンプトを最優先でフッターに出す。
+        // スコア編集モード (#228, ⌥=) が有効なら、その入力プロンプトを最優先でフッターに出す。
         // そうでなければ単語登録ヒント: 今の読みが「直前に別読みで出した語」の登録対象なら、
         // 候補ウィンドウ末尾に「⇥ Tab:「駒谷」を登録」を出す。
         let hint = self.score_edit_prompt().or_else(|| {
@@ -2482,7 +2490,7 @@ impl NukoInputController {
     /// キーは `apply_*_manual_scores` と揃える: segmented=focused 文節の読み / flat=composition。
     /// `Some((全文読み, focus))` が segmented、`None` が flat。候補が無い / 選択が無い /
     /// focused 文節の読みが空 / flat で composition が空、のときは `None` (= 対象なし)。
-    /// ⌥←→ (nudge) と ⌥↑ (スコア編集モード) の両方が同じ対象を使う。
+    /// ⌥←→ (nudge) と ⌥= (スコア編集モード) の両方が同じ対象を使う。
     fn manual_score_target(&self) -> Option<ManualScoreTarget> {
         let state = self.ivars().state.borrow();
         let candidates = state.candidates.as_ref()?;
@@ -2535,7 +2543,7 @@ impl NukoInputController {
         Bool::YES
     }
 
-    /// スコア編集モード (#228, ⌥↑) に入る。選んでいる候補の手動スコアを数値で直接指定する。
+    /// スコア編集モード (#228, ⌥=) に入る。選んでいる候補の手動スコアを数値で直接指定する。
     ///
     /// 対象 (読み/表層/segmented plan) を [`Self::manual_score_target`] で確定し、入室時点の
     /// 既存バイアスを `current` に控えてプロンプトに出す。以降 handleEvent は数字 / Enter /
@@ -2544,15 +2552,28 @@ impl NukoInputController {
         let Some((reading, surface, seg_plan)) = self.manual_score_target() else {
             return Bool::YES;
         };
-        let current = with_engine(|e| e.manual_score_bias(&reading, &surface));
+        // 入室時点のその候補の実効スコア (= パネルに出ている数値)。選択候補から取る。
+        let effective = {
+            let state = self.ivars().state.borrow();
+            state
+                .candidates
+                .as_ref()
+                .and_then(|c| c.selected())
+                .map_or(0, |c| c.score)
+        };
+        // 素点 = 実効 − 現在の手動バイアス。確定時に「打った値 − base」を手動バイアスに置けば
+        // 実効スコアが打った値になる (絶対指定)。
+        let bias = with_engine(|e| e.manual_score_bias(&reading, &surface));
+        let base = effective.saturating_sub(bias);
         *self.ivars().score_edit.borrow_mut() = Some(ScoreEditState {
             reading,
             surface,
             seg_plan,
             buffer: String::new(),
-            current,
+            effective,
+            base,
         });
-        // プロンプト (編集中の buffer と現在値) をパネル下部に出す。
+        // プロンプト (編集中の buffer と現在の実効スコア) をパネル下部に出す。
         self.show_candidate_panel(client);
         Bool::YES
     }
@@ -2615,24 +2636,27 @@ impl NukoInputController {
         accept
     }
 
-    /// スコア編集モードを確定する。buffer を数値に解釈して `set_manual_score` で上書き保存し、
-    /// モードを抜けて再変換・パネル更新する。buffer が空 / 符号のみ / 解釈不能なら取消扱い (無変更)。
+    /// スコア編集モードを確定する。buffer を「目標の実効スコア」と解釈し、手動バイアス=
+    /// `目標 − base` を `set_manual_score` で置いて実効スコアを目標値にする (絶対指定)。
+    /// 保存後モードを抜けて再変換・パネル更新。buffer が空 / 符号のみ / 解釈不能なら取消 (無変更)。
     fn score_edit_apply(&self, client: &AnyObject) -> Bool {
         let Some(edit) = self.ivars().score_edit.borrow_mut().take() else {
             return Bool::YES;
         };
         // 空 / "-" だけ → 取消 (何もしない)。
-        let value: Option<i32> = match edit.buffer.parse::<i64>() {
+        let target: Option<i32> = match edit.buffer.parse::<i64>() {
             Ok(v) => Some(v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32),
             Err(_) => None,
         };
-        let Some(value) = value else {
+        let Some(target) = target else {
             // 無効入力は取消と同じ (モードは既に take 済み)。
             self.show_candidate_panel(client);
             return Bool::YES;
         };
+        // 手動バイアス = 目標実効スコア − 素点。set_manual_score が ±MAX にクランプする。
+        let bias = target.saturating_sub(edit.base);
         let new_bias = with_engine_mut(|engine| {
-            let b = engine.set_manual_score(&edit.reading, &edit.surface, value);
+            let b = engine.set_manual_score(&edit.reading, &edit.surface, bias);
             if let Some(path) = crate::state::manual_score_path() {
                 if let Err(e) = engine.save_manual_scores(&path) {
                     warn!(error = %e, "manual_score.json の保存に失敗");
@@ -2641,9 +2665,10 @@ impl NukoInputController {
             b
         });
         debug_log(&format!(
-            "score_edit_apply: reading='{}' surface='{}' typed={value} bias={new_bias} segmented={}",
+            "score_edit_apply: reading='{}' surface='{}' target={target} base={} bias={new_bias} segmented={}",
             edit.reading,
             edit.surface,
+            edit.base,
             edit.seg_plan.is_some()
         ));
         // モードを保ったまま再変換 → 指定した表層に選択を戻す (adjust_manual_score と同じ)。
@@ -2662,7 +2687,8 @@ impl NukoInputController {
     }
 
     /// スコア編集モードが有効ならパネル下部に出すプロンプト文字列を返す。
-    /// 例: `✎ 点数: 200000｜現在 0pt  ⏎確定 ⎋取消 ⌫削除`。buffer が空なら数値部は `_`。
+    /// 例: `✎ この候補を何点に? 600000 ｜現在 500335pt  Enter=決定 Esc=やめる BS=1字消す`。
+    /// buffer が空なら数値部は `_`。「現在」はその候補の実効スコア (パネル表示値と一致)。
     fn score_edit_prompt(&self) -> Option<String> {
         let edit = self.ivars().score_edit.borrow();
         let e = edit.as_ref()?;
@@ -2672,8 +2698,8 @@ impl NukoInputController {
             e.buffer.clone()
         };
         Some(format!(
-            "✎ 点数: {typed}｜現在 {}pt  ⏎確定 ⎋取消 ⌫削除",
-            e.current
+            "✎ 何点にする? {typed} ｜現在 {}pt   Enter=決定  Esc=やめる  BS=1字消す",
+            e.effective
         ))
     }
 

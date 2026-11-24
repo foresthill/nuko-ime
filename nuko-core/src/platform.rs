@@ -46,17 +46,18 @@ impl Platform {
 ///
 /// キーの配線: 上げ/下げ=#220 (Shift+Enter=教える=絶対1位 / Ctrl+Enter=降格)、
 /// スコア微調整=#228 (⌥→ で上げ / ⌥← で下げ、「じわっと」調整)、
-/// ポイント直接指定=#228 (⌥↑ でスコア編集モード → 数値を打って Enter で確定)。
-/// macOS は修飾キー記号 (`⇧⏎` `⌃⏎` `⌥←→` `⌥↑`)、Windows/Linux は語 (`Shift+Enter` 等) で見せる。
-/// ⌥=Alt の物理対応に従い、Windows/Linux は `Alt+←→` / `Alt+↑` と語表記する。
+/// ポイント直接指定=#228 (⌥= でスコア編集モード → 数値を打って Enter で確定。縦矢印 ⌥↑ は
+/// Claude Desktop 等の会話切替と衝突するため非矢印の = を使う)。
+/// macOS は修飾キー記号 (`⇧⏎` `⌃⏎` `⌥←→` `⌥=`)、Windows/Linux は語 (`Shift+Enter` 等) で見せる。
+/// ⌥=Alt の物理対応に従い、Windows/Linux は `Alt+←→` / `Alt+=` と語表記する。
 ///
 /// すべて実際に配線済みのキーだけを出す (動かないキーは表示しない方針)。
 #[must_use]
 pub fn candidate_key_hint(platform: Platform) -> String {
     match platform {
-        Platform::MacOs => "⇧⏎=上げる  ⌃⏎=下げる  ⌥←→=スコア  ⌥↑=点数".to_string(),
+        Platform::MacOs => "⇧⏎=上げる  ⌃⏎=下げる  ⌥←→=スコア  ⌥=で点数指定".to_string(),
         Platform::Windows | Platform::Linux => {
-            "Shift+Enter=上げる  Ctrl+Enter=下げる  Alt+←→=スコア  Alt+↑=点数".to_string()
+            "Shift+Enter=上げる  Ctrl+Enter=下げる  Alt+←→=スコア  Alt+=で点数指定".to_string()
         }
     }
 }
@@ -84,7 +85,7 @@ mod tests {
             assert!(h.contains("Ctrl+Enter"), "{p:?} は Ctrl+Enter 語表記");
             // ⌥=Alt の対応どおり、スコア微調整は Alt+←→ の語表記。
             assert!(h.contains("Alt+←→"), "{p:?} は Alt+←→ 語表記");
-            assert!(h.contains("Alt+↑"), "{p:?} はポイント直接指定 Alt+↑ 語表記");
+            assert!(h.contains("Alt+="), "{p:?} はポイント直接指定 Alt+= 語表記");
             // macOS 記号は使わない。
             assert!(!h.contains('⇧') && !h.contains('⌃') && !h.contains('⏎') && !h.contains('⌥'));
         }
