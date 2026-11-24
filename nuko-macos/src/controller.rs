@@ -1873,12 +1873,21 @@ impl NukoInputController {
         // 埋めてから通常確定へ流す (= 学習/観察/文節位置学習の全経路をそのまま再利用)。
         // do_convert → 以降の確定は同一イベント内の同期実行で、間に run loop が回らないため
         // 候補パネルは実質描画されない (ちらつき無し。記号 commit-then-seed 等と同じ原理)。
+        //
+        // ★ 変換するのは **romaji バッファが空のときだけ**。`composing_display` がライブ推測を
+        // 出すのも同条件 (バッファが空＝確定した読み) なので、こうすると「Enter は見えている
+        // プレビューを確定する」が常に成り立つ (WYSIWYG)。バッファに未確定の mora が残る間
+        // (例「かねちゃん」= ka-ne-cha-**n** で末尾 n が ん 未確定) はプレビューが生かな
+        // 「かねちゃん」のままなので、ここで変換すると表示と食い違って「平仮名のはずが
+        // カネちゃんになる」事故になる (2026-11 森岡さん報告)。空でないときは通常確定へ流し、
+        // バッファを flush した生かなをそのまま確定する (= プレビュー一致)。
         if crate::state::live_conversion_enabled() {
             let needs_convert = {
                 let s = self.ivars().state.borrow();
                 s.candidates.is_none()
                     && s.segmented.is_none()
-                    && (!s.composition.is_empty() || !s.romaji.buffer().is_empty())
+                    && s.romaji.buffer().is_empty()
+                    && !s.composition.is_empty()
             };
             if needs_convert {
                 self.do_convert(client);
