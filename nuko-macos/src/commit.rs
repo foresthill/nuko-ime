@@ -361,17 +361,23 @@ pub fn command_for_keycode(
             CommandAction::FocusShiftRight
         }),
         0x7D => KeyAction::Command(CommandAction::SelectNext), // Down
-        0x7E => KeyAction::Command(CommandAction::SelectPrev), // Up (無印=前候補)
-        // ⌥= (Option + イコール): スコア編集モード (ポイント直接指定 #228)。
-        // ⌥↑ は Claude Desktop 等の「会話切替」(縦矢印) と衝突するため矢印をやめた
-        // (横 ⌥←→ は衝突しないが縦は OS/アプリに取られる。2026-11 森岡さん報告)。
-        // = は非矢印なので会話切替に奪われない。無印 = は文字として PassThrough。
-        0x18 if option => KeyAction::Command(CommandAction::ScoreEdit), // kVK_ANSI_Equal
-        0x61 => KeyAction::Fkey(FKeyConversion::Hiragana),              // F6
-        0x62 => KeyAction::Fkey(FKeyConversion::Katakana),              // F7
-        0x64 => KeyAction::Fkey(FKeyConversion::HalfwidthKatakana),     // F8
-        0x65 => KeyAction::Fkey(FKeyConversion::FullwidthAlnum),        // F9
-        0x6D => KeyAction::Fkey(FKeyConversion::HalfwidthAlnum),        // F10
+        // Up: Shift+↑ = スコア編集モード (ポイント直接指定 #228) / 無印 = 前候補。
+        //
+        // ★ トリガーに Shift+↑ を選ぶ理由 (2026-11 森岡さん実機): `⌥↑`(縦矢印=会話切替) も
+        // `⌥=`(ズーム等) も、Claude Desktop 等が **IME より先にアプリ accelerator として奪う**
+        // ため IME に届かなかった。一方 矢印 / Shift+矢印 / Enter / Esc は「テキスト編集キー」で
+        // アプリに奪われず IME に確実に届く (ユーザーが候補移動・Shift+←→ 伸縮を使えている事実)。
+        // そこで奪われない Shift+↑ を使う。Shift+←→ は文節伸縮なので縦の Shift+↑ を点数に充てる。
+        0x7E => KeyAction::Command(if shift {
+            CommandAction::ScoreEdit
+        } else {
+            CommandAction::SelectPrev
+        }),
+        0x61 => KeyAction::Fkey(FKeyConversion::Hiragana), // F6
+        0x62 => KeyAction::Fkey(FKeyConversion::Katakana), // F7
+        0x64 => KeyAction::Fkey(FKeyConversion::HalfwidthKatakana), // F8
+        0x65 => KeyAction::Fkey(FKeyConversion::FullwidthAlnum), // F9
+        0x6D => KeyAction::Fkey(FKeyConversion::HalfwidthAlnum), // F10
         // Space(0x31) や英字は文字として characters() で処理する → PassThrough。
         _ => KeyAction::PassThrough,
     }
@@ -663,28 +669,18 @@ mod keycode_tests {
             KeyAction::Command(CommandAction::ScoreDown),
             "⌥+Shift+← も ⌥ 勝ちでスコア下げ"
         );
-        // ⌥= (0x18) = スコア編集モード (ポイント直接指定)。矢印でないので会話切替と衝突しない。
+        // Shift+↑ (0x7E) = スコア編集モード (ポイント直接指定)。テキスト編集キーなので
+        // アプリ accelerator に奪われず IME に届く (⌥↑/⌥= は奪われた)。
         assert_eq!(
-            o(0x18, false),
+            command_for_keycode(0x7E, true, false, false, true),
             KeyAction::Command(CommandAction::ScoreEdit),
-            "⌥= = スコア編集モード"
+            "Shift+↑ = スコア編集モード"
         );
-        // ⌥↑/無印↑ はどちらも前候補 (縦矢印は会話切替と衝突するのでスコアに使わない)。
-        assert_eq!(
-            o(0x7E, false),
-            KeyAction::Command(CommandAction::SelectPrev),
-            "⌥↑ は前候補 (スコア編集には使わない)"
-        );
+        // 無印↑ は前候補 (変更なし)。
         assert_eq!(
             command_for_keycode(0x7E, false, false, false, true),
             KeyAction::Command(CommandAction::SelectPrev),
             "無印↑ は前候補"
-        );
-        // 無印 = は文字として素通し (スコア編集に入らない)。
-        assert_eq!(
-            command_for_keycode(0x18, false, false, false, true),
-            KeyAction::PassThrough,
-            "無印 = は文字 (PassThrough)"
         );
         // 非 composing では横取りしない (素通し)。
         assert_eq!(
@@ -693,9 +689,9 @@ mod keycode_tests {
             "非 composing の ⌥→ は素通し (アプリの単語移動を壊さない)"
         );
         assert_eq!(
-            command_for_keycode(0x18, false, false, true, false),
+            command_for_keycode(0x7E, true, false, false, false),
             KeyAction::PassThrough,
-            "非 composing の ⌥= は素通し"
+            "非 composing の Shift+↑ は素通し"
         );
     }
 

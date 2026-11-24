@@ -161,7 +161,7 @@ fn debug_log(msg: &str) {
 
 // --- Ivars ---
 
-/// スコア編集モード (#228, ⌥=) の作業状態。候補パネルで、選んでいる候補の点数を
+/// スコア編集モード (#228, ⇧↑) の作業状態。候補パネルで、選んでいる候補の点数を
 /// **数値で直接**指定するためのモーダル副状態。有効な間は handleEvent が
 /// 数字 / Enter / Esc / Backspace を横取りして composition へ流さない。
 ///
@@ -186,7 +186,7 @@ struct ScoreEditState {
 }
 
 /// 手動スコア調整の対象。`(nudge のキー読み, 選択表層, segmented plan)` で、plan は
-/// `Some((全文読み, focus))` が segmented、`None` が flat。⌥←→ (nudge) と ⌥= (編集モード) 共通。
+/// `Some((全文読み, focus))` が segmented、`None` が flat。⌥←→ (nudge) と ⇧↑ (編集モード) 共通。
 type ManualScoreTarget = (String, String, Option<(String, usize)>);
 
 pub struct NukoControllerIvars {
@@ -1011,7 +1011,7 @@ impl NukoInputController {
         const KEYCODE_RETURN: u16 = 0x24;
         let is_return = key_code == KEYCODE_RETURN;
 
-        // スコア編集モード (#228, ⌥=) が有効な間は、このモードがキーボードを占有する:
+        // スコア編集モード (#228, ⇧↑) が有効な間は、このモードがキーボードを占有する:
         // 数字 / Enter / Esc / Backspace を横取りして composition へ流さない。
         // ただし Command 併用 (⌘Q / ⌘Tab 等) はアプリに渡す (握り潰さない)。
         if !cmd && self.ivars().score_edit.borrow().is_some() {
@@ -1504,7 +1504,7 @@ impl NukoInputController {
                 self.adjust_manual_score(client, -crate::state::manual_score_step())
             }
             CommandAction::ScoreEdit => {
-                // ⌥=: スコア編集モードに入る (#228, ポイントを数値で直接指定)。
+                // ⇧↑: スコア編集モードに入る (#228, ポイントを数値で直接指定)。
                 self.enter_score_edit(client)
             }
             CommandAction::RegisterWord => {
@@ -2317,7 +2317,7 @@ impl NukoInputController {
         let Some((items, selected, seg_info, badges, scores)) = snapshot else {
             return;
         };
-        // スコア編集モード (#228, ⌥=) が有効なら、その入力プロンプトを最優先でフッターに出す。
+        // スコア編集モード (#228, ⇧↑) が有効なら、その入力プロンプトを最優先でフッターに出す。
         // そうでなければ単語登録ヒント: 今の読みが「直前に別読みで出した語」の登録対象なら、
         // 候補ウィンドウ末尾に「⇥ Tab:「駒谷」を登録」を出す。
         let hint = self.score_edit_prompt().or_else(|| {
@@ -2490,7 +2490,7 @@ impl NukoInputController {
     /// キーは `apply_*_manual_scores` と揃える: segmented=focused 文節の読み / flat=composition。
     /// `Some((全文読み, focus))` が segmented、`None` が flat。候補が無い / 選択が無い /
     /// focused 文節の読みが空 / flat で composition が空、のときは `None` (= 対象なし)。
-    /// ⌥←→ (nudge) と ⌥= (スコア編集モード) の両方が同じ対象を使う。
+    /// ⌥←→ (nudge) と ⇧↑ (スコア編集モード) の両方が同じ対象を使う。
     fn manual_score_target(&self) -> Option<ManualScoreTarget> {
         let state = self.ivars().state.borrow();
         let candidates = state.candidates.as_ref()?;
@@ -2543,7 +2543,7 @@ impl NukoInputController {
         Bool::YES
     }
 
-    /// スコア編集モード (#228, ⌥=) に入る。選んでいる候補の手動スコアを数値で直接指定する。
+    /// スコア編集モード (#228, ⇧↑) に入る。選んでいる候補の手動スコアを数値で直接指定する。
     ///
     /// 対象 (読み/表層/segmented plan) を [`Self::manual_score_target`] で確定し、入室時点の
     /// 既存バイアスを `current` に控えてプロンプトに出す。以降 handleEvent は数字 / Enter /
