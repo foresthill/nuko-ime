@@ -834,6 +834,40 @@ pub fn toggle_candidate_source_badge() -> bool {
     now_on
 }
 
+/// 平仮名ライブ変換 (#229) が有効か。
+/// app support dir の `LIVE_CONVERSION_ENABLED` マーカーの有無。既定 OFF (opt-in)。
+///
+/// ON のとき、打鍵中 (Space 前) の未確定表示を平仮名でなく「推測変換」(漢字) にする。
+/// 描画・marked text だけの話で、変換結果・学習・エンジン既定には影響しない。
+/// 旧字体/スコア可視化/出所バッジと同じ marker 方式 (読むのは controller の表示時)。
+#[must_use]
+pub fn live_conversion_enabled() -> bool {
+    nuko_app_support_dir()
+        .map(|d| d.join("LIVE_CONVERSION_ENABLED").exists())
+        .unwrap_or(false)
+}
+
+/// ライブ変換をトグルして **新しい状態** を返す。
+///
+/// マーカーファイル `LIVE_CONVERSION_ENABLED` を作成/削除するだけ。エンジンへの
+/// 反映は不要 (表示時に [`live_conversion_enabled`] を読む)。dir 取得不可時は false。
+pub fn toggle_live_conversion() -> bool {
+    let Some(dir) = nuko_app_support_dir() else {
+        return false;
+    };
+    let marker = dir.join("LIVE_CONVERSION_ENABLED");
+    let now_on = if marker.exists() {
+        let _ = std::fs::remove_file(&marker);
+        false
+    } else {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(&marker, b"");
+        true
+    };
+    tracing::info!(enabled = now_on, "平仮名ライブ変換を切り替え");
+    now_on
+}
+
 /// 単語登録の永続辞書 (`~/…/nuko-ime/user_dict.json`) を起動時にロードする。
 ///
 /// ファイルが無くても path を設定するため、以後の [`register_word`] の保存が効く。

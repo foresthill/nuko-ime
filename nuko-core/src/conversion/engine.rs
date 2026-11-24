@@ -717,6 +717,60 @@ impl ConversionEngine {
             .unwrap_or(false)
     }
 
+    /// この読みに対して **segmented 変換を flat より優先すべきか** の判定（唯一の真実源）。
+    ///
+    /// `do_convert`（controller）と `live_convert`（#229 ライブ変換）の両方がこの 1 つを使い、
+    /// 経路選択のロジックが 2 箇所に分裂しないようにする（CLAUDE.md「コメント/コード乖離の防止」
+    /// と同じ思想＝規則は 1 箇所）。条件（do_convert の旧インライン判定を移設）:
+    /// - 2 文節以上であること（単一文節は flat の方が候補が豊富）。
+    /// - whole-reading 訂正 or 静的辞書の語があるなら flat 優先（segmented は誤分割で不発し得る）。
+    /// - nn 曖昧語（ん＋な行↔ん＋母音）は原則 flat（flat は代替読みをマージする）。ただし
+    ///   per-segment 訂正が効いた（`corrections_applied`）ときは segmented を優先。
+    ///
+    /// libakaza (`akaza` feature) 無効ビルドには segmented 経路自体が無いので gate する。
+    #[cfg(feature = "akaza")]
+    #[must_use]
+    pub fn segmented_preferred(&self, reading: &str, seg: &SegmentedConversion) -> bool {
+        if seg.segments.len() < 2 {
+            return false;
+        }
+        let nn_ambiguous = nn_alternate_readings(reading).len() > 1;
+        let prefer_flat = self.has_whole_correction(reading) || self.has_dict_word(reading);
+        !prefer_flat && (!nn_ambiguous || seg.corrections_applied)
+    }
+
+    /// 平仮名ライブ変換（#229）の「推測表層」を返す。
+    ///
+    /// 打鍵中に marked text として inline 表示するための、**確定前のベストゲス**。
+    /// `segmented_preferred` で `do_convert` と同じ経路選択（segmented 優先 /
+    /// 条件次第で flat）を行い、**表層文字列のみ** を返す（候補リスト・パネルは作らない）。
+    /// （intra-doc link にしないのは `segmented_preferred` が `akaza` feature gated で、
+    /// 無効ビルドの rustdoc がリンクを解決できず `-Dwarnings` で落ちるため。）
+    /// 変換不能・空読み・エラー時は読みをそのまま返す（呼び出し側が平仮名表示にフォールバック）。
+    #[must_use]
+    pub fn live_convert(&self, reading: &str, context: &ConversionContext) -> String {
+        if reading.is_empty() {
+            return String::new();
+        }
+        // segmented を優先（libakaza 有効時のみ。無効ビルドは flat 一択）。
+        #[cfg(feature = "akaza")]
+        {
+            if let Ok(Some(seg)) = self.convert_segmented(reading) {
+                if self.segmented_preferred(reading, &seg) {
+                    return seg.current_surface();
+                }
+            }
+        }
+        // flat（単一文節 / segmented 非優先 / libakaza 無効）。
+        match self.convert(reading, context) {
+            Ok(candidates) => candidates
+                .selected()
+                .map(|c| c.surface.clone())
+                .unwrap_or_else(|| reading.to_string()),
+            Err(_) => reading.to_string(),
+        }
+    }
+
     /// Layer 2 訂正選好を設定する(変換時に該当候補へ bias)。
     pub fn set_corrections(&mut self, corrections: CorrectionStore) {
         tracing::info!(count = corrections.len(), "訂正選好 (Layer 2) を設定");
@@ -2024,6 +2078,55 @@ mod tests {
         // 空 prefix / max=0 は空。
         assert!(engine.predict("", 9).unwrap().is_empty());
         assert!(engine.predict("にほん", 0).unwrap().is_empty());
+    }
+
+    /// ライブ変換 (#229): 空読みは空、非空読みは flat 変換の 1 位表層と一致する
+    /// (libakaza 無効ビルドでは convert_segmented が Ok(None) なので常に flat 経路)。
+    #[test]
+    fn live_convert_matches_flat_top() {
+        let engine = ConversionEngine::new().unwrap();
+        let ctx = ConversionContext::new();
+        assert_eq!(engine.live_convert("", &ctx), "", "空読みは空");
+        let flat_top = engine
+            .convert("わたし", &ctx)
+            .unwrap()
+            .selected()
+            .map(|c| c.surface.clone())
+            .expect("flat に選択候補があるはず");
+        assert_eq!(
+            engine.live_convert("わたし", &ctx),
+            flat_top,
+            "ライブ表層は flat 1 位と一致 (単一文節/akaza 無効)"
+        );
+    }
+
+    /// segmented_preferred: 単一文節は false、2 文節で nn 曖昧/訂正/辞書語が無ければ true。
+    /// (do_convert と live_convert が共有する経路選択の唯一の真実源)
+    #[cfg(feature = "akaza")]
+    #[test]
+    fn segmented_preferred_rules() {
+        use crate::conversion::{Segment, SegmentedConversion};
+        let engine = ConversionEngine::new().unwrap();
+        let cand = |s: &str, r: &str| {
+            Candidate::new(s, r)
+                .with_score(0)
+                .with_source(CandidateSource::System)
+        };
+        // 単一文節 → 常に flat (false)
+        let single = SegmentedConversion::new(vec![Segment::new("あ", vec![cand("亜", "あ")])]);
+        assert!(
+            !engine.segmented_preferred("あ", &single),
+            "単一文節は false"
+        );
+        // 2 文節・nn 非曖昧・辞書語/訂正無し → segmented 優先 (true)
+        let two = SegmentedConversion::new(vec![
+            Segment::new("ねこ", vec![cand("猫", "ねこ")]),
+            Segment::new("かわいい", vec![cand("かわいい", "かわいい")]),
+        ]);
+        assert!(
+            engine.segmented_preferred("ねこかわいい", &two),
+            "2 文節・非曖昧は segmented 優先"
+        );
     }
 
     /// ★ 学習 (corrections) が **文節ごと** に効き、複数文節の文の中でも順位が直る。

@@ -436,6 +436,12 @@ define_class!(
             self._toggle_source_badge_impl();
         }
 
+        /// メニュー項目「平仮名ライブ変換」のアクション (ON/OFF トグル, #229)。
+        #[unsafe(method(nukoToggleLiveConversion:))]
+        fn nuko_toggle_live_conversion(&self, _sender: Option<&AnyObject>) {
+            self._toggle_live_conversion_impl();
+        }
+
         /// 学習モード「王冠（既定・上限あり）」を選ぶ。
         #[unsafe(method(nukoSetModeCrown:))]
         fn nuko_set_mode_crown(&self, _sender: Option<&AnyObject>) {
@@ -644,6 +650,19 @@ impl NukoInputController {
                 &empty,
             );
             badge_item.setState(if crate::state::candidate_source_badge_enabled() {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            });
+
+            // 平仮名ライブ変換 (#229, 既定 OFF): 打鍵中に推測漢字を inline 表示する。
+            let live = NSString::from_str("平仮名ライブ変換（打鍵中に推測を表示）");
+            let live_item = menu.addItemWithTitle_action_keyEquivalent(
+                &live,
+                Some(sel!(nukoToggleLiveConversion:)),
+                &empty,
+            );
+            live_item.setState(if crate::state::live_conversion_enabled() {
                 NSControlStateValueOn
             } else {
                 NSControlStateValueOff
@@ -868,6 +887,29 @@ impl NukoInputController {
             .to_string()
         } else {
             "⬜️ 候補に出所を表示: OFF\n\n印を付けずに候補だけを表示します。".to_string()
+        };
+        self._present_learning(&text);
+    }
+
+    /// メニュー「平仮名ライブ変換」: ON/OFF をトグルして結果をパネル表示する (#229)。
+    ///
+    /// ON のとき、打鍵中 (Space 前) の未確定表示を平仮名でなく推測漢字にする。
+    /// 変換結果・学習・順位には影響せず、表示 (marked text) だけを変える opt-in 機能。
+    fn _toggle_live_conversion_impl(&self) {
+        let on = crate::state::toggle_live_conversion();
+        let text = if on {
+            concat!(
+                "✅ 平仮名ライブ変換: ON\n\n",
+                "打鍵中に、確定前でも推測変換 (漢字) を inline 表示します。\n",
+                "  Space … いつもどおり候補パネルを開いて訂正\n",
+                "  Enter … 表示されている推測をそのまま確定\n\n",
+                "※ 変換結果・順位・学習は変わりません (表示だけ)。\n",
+                "※ 一部アプリ (Claude Code / VS Code 等 Electron) で未確定の\n",
+                "　書き換えが不安定なら OFF に戻せます。",
+            )
+            .to_string()
+        } else {
+            "⬜️ 平仮名ライブ変換: OFF\n\n打鍵中は従来どおり平仮名で表示します。".to_string()
         };
         self._present_learning(&text);
     }
@@ -1294,7 +1336,8 @@ impl NukoInputController {
             }
             let composing = !state.composition.is_empty() || !state.romaji.buffer().is_empty();
             state.is_composing = composing;
-            let display = state.display_text();
+            // ライブ変換 ON なら推測漢字を inline 表示 (#229)。OFF / 子音途中は平仮名。
+            let display = self.composing_display(&state);
             drop(state);
             if !passthrough.is_empty() {
                 Self::insert_text_on_client(client, &passthrough);
@@ -1324,7 +1367,8 @@ impl NukoInputController {
 
         state.is_composing = true;
 
-        let display = state.display_text();
+        // ライブ変換 ON なら推測漢字を inline 表示 (#229)。OFF / 子音途中は平仮名。
+        let display = self.composing_display(&state);
         drop(state);
         Self::set_marked_text_on_client(client, &display);
 
@@ -1630,6 +1674,26 @@ impl NukoInputController {
     ///
     /// libakaza が無効ないし複数文節を返さない場合は、従来通り `engine.convert`
     /// で flat な候補リストを取得して `state.candidates` のみ設定する。
+    /// 打鍵中 (未確定) の marked text に出す文字列を返す。
+    ///
+    /// 平仮名ライブ変換 (#229) が ON かつ **安定したかな境界** (ローマ字 buffer が空) で
+    /// composition が非空なら、`engine.live_convert` の「推測漢字」を返す。それ以外
+    /// (ライブ OFF / 子音入力途中 / 空) は従来どおり `state.display_text()` (平仮名)。
+    ///
+    /// buffer 非空時に変換しないのは、未完成の子音 ("k" 等) を含む読みを変換させない
+    /// ため。かなが 1 文字完成するたび (buffer が空になるたび) に推測が更新される。
+    /// 表示専用: state.composition は生読みのまま保持し、Space/Backspace/確定は読みに効く。
+    fn composing_display(&self, state: &crate::state::InputState) -> String {
+        if crate::state::live_conversion_enabled()
+            && state.romaji.buffer().is_empty()
+            && !state.composition.is_empty()
+        {
+            with_engine(|e| e.live_convert(&state.composition, &state.context))
+        } else {
+            state.display_text()
+        }
+    }
+
     fn do_convert(&self, client: &AnyObject) {
         let mut state = self.ivars().state.borrow_mut();
 
@@ -1659,22 +1723,13 @@ impl NukoInputController {
         // (nn_ambiguous 判定は libakaza 経路でしか使わないため akaza 枝の中に置く)
         #[cfg(feature = "akaza")]
         let segmented_result = {
-            let nn_ambiguous = nuko_core::conversion::nn_alternate_readings(&composition).len() > 1;
-            // 読み全体に学習 (whole-reading の訂正) か 静的辞書の語 があるなら flat 優先。
-            // segmented だと複合語が誤分割されて出ないことがある
-            // (例: さわれる→[さ][割れる] で 触れる 不発、よしゅく→[よ][しゅく] で 予祝 不発)。
-            // flat なら convert() が静的辞書/訂正表層を候補に含めて 1 語で出す
-            // (2026-09 ユーザー報告)。
-            let prefer_flat = with_engine(|e| {
-                e.has_whole_correction(&composition) || e.has_dict_word(&composition)
-            });
+            // 経路選択 (segmented を flat より優先するか) は engine.segmented_preferred に
+            // 一本化した。ライブ変換 (live_convert, #229) と同じ 1 つの判定を共有し、ロジックが
+            // 2 箇所に分裂しないようにする (旧: ここに nn_ambiguous/prefer_flat/use_segmented を
+            // インライン展開していた)。判定の中身・根拠は engine.segmented_preferred の doc 参照。
             match with_engine(|engine| engine.convert_segmented(&composition)) {
                 Ok(Some(seg)) => {
-                    // nn 曖昧語は学習が効いたときだけ segmented を使う (それ以外は flat へ)。
-                    let use_segmented = seg.segments.len() >= 2
-                        && !prefer_flat
-                        && (!nn_ambiguous || seg.corrections_applied);
-                    if use_segmented {
+                    if with_engine(|e| e.segmented_preferred(&composition, &seg)) {
                         Ok(Some(seg))
                     } else {
                         Ok(None)
@@ -1813,6 +1868,32 @@ impl NukoInputController {
     ///   これは「上げたくない」確定なので、観察ログ/打ち直し/フレーズ/再学習の**加点系は走らせない**
     ///   (走らせると auto_relearn が逆に押し上げてしまう)。テキスト挿入自体は通常どおり行う。
     fn do_commit_with_intent(&self, client: &AnyObject, intent: CommitIntent) {
+        // ライブ変換 (#229) ON で、Space を押さず Enter した場合 (候補も segmented も無い
+        // 生読み): 生かなでなく「推測漢字」を確定する。do_convert で state に変換結果を
+        // 埋めてから通常確定へ流す (= 学習/観察/文節位置学習の全経路をそのまま再利用)。
+        // do_convert → 以降の確定は同一イベント内の同期実行で、間に run loop が回らないため
+        // 候補パネルは実質描画されない (ちらつき無し。記号 commit-then-seed 等と同じ原理)。
+        //
+        // ★ 変換するのは **romaji バッファが空のときだけ**。`composing_display` がライブ推測を
+        // 出すのも同条件 (バッファが空＝確定した読み) なので、こうすると「Enter は見えている
+        // プレビューを確定する」が常に成り立つ (WYSIWYG)。バッファに未確定の mora が残る間
+        // (例「かねちゃん」= ka-ne-cha-**n** で末尾 n が ん 未確定) はプレビューが生かな
+        // 「かねちゃん」のままなので、ここで変換すると表示と食い違って「平仮名のはずが
+        // カネちゃんになる」事故になる (2026-11 森岡さん報告)。空でないときは通常確定へ流し、
+        // バッファを flush した生かなをそのまま確定する (= プレビュー一致)。
+        if crate::state::live_conversion_enabled() {
+            let needs_convert = {
+                let s = self.ivars().state.borrow();
+                s.candidates.is_none()
+                    && s.segmented.is_none()
+                    && s.romaji.buffer().is_empty()
+                    && !s.composition.is_empty()
+            };
+            if needs_convert {
+                self.do_convert(client);
+            }
+        }
+
         let mut state = self.ivars().state.borrow_mut();
 
         // segmented モード: focused segment の selected を state.candidates から sync
@@ -2081,7 +2162,8 @@ impl NukoInputController {
                 // 変換結果 (flat / segmented 両方) をクリアして未確定表示に戻す
                 state.candidates = None;
                 state.segmented = None;
-                let display = state.display_text();
+                // ライブ変換 ON なら平仮名でなく推測漢字で未確定表示 (#229・打鍵中と一貫)。
+                let display = self.composing_display(&state);
                 drop(state);
                 Self::hide_candidate_panel();
                 Self::set_marked_text_on_client(client, &display);
@@ -2098,7 +2180,8 @@ impl NukoInputController {
             }
             BackspaceAction::ClearRomajiRedisplay => {
                 state.romaji.clear();
-                let display = state.display_text();
+                // buffer を消すと安定境界になるので、ライブ ON なら推測漢字で再表示 (#229)。
+                let display = self.composing_display(&state);
                 drop(state);
                 Self::set_marked_text_on_client(client, &display);
             }
@@ -2111,7 +2194,8 @@ impl NukoInputController {
             }
             BackspaceAction::PopCompositionRedisplay => {
                 state.composition.pop();
-                let display = state.display_text();
+                // 1 文字削ったあとの読みを、ライブ ON なら推測漢字で再表示 (#229)。
+                let display = self.composing_display(&state);
                 drop(state);
                 Self::set_marked_text_on_client(client, &display);
             }
