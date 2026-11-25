@@ -135,6 +135,35 @@ impl ManualScoreStore {
         }
     }
 
+    /// 読み×表層のバイアスを絶対値 `value` に**上書き**する (累積でない)。±[`MANUAL_SCORE_MAX`]
+    /// にクランプし、設定後のバイアスを返す。空の読み/表層は無視して 0 を返す。
+    ///
+    /// 候補パネルからの「ポイント直接指定」(#228) 用。[`Self::nudge`] が刻みで相対調整するのに対し、
+    /// こちらはユーザーが打った数値をそのまま置く (現在値は [`Self::bias`] で読める)。
+    pub fn set_bias(&mut self, reading: &str, surface: &str, value: i32) -> i32 {
+        if reading.is_empty() || surface.is_empty() {
+            return 0;
+        }
+        let value = value.clamp(-MANUAL_SCORE_MAX, MANUAL_SCORE_MAX);
+        let now = current_timestamp();
+        if let Some(e) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.reading == reading && e.surface == surface)
+        {
+            e.bias = value;
+            e.last_used = now;
+        } else {
+            self.entries.push(ManualScoreEntry {
+                reading: reading.to_string(),
+                surface: surface.to_string(),
+                bias: value,
+                last_used: now,
+            });
+        }
+        value
+    }
+
     /// 読み×表層のバイアス (無ければ 0)。候補スコアへの加点/減点に使う。
     #[must_use]
     pub fn bias(&self, reading: &str, surface: &str) -> i32 {
@@ -207,6 +236,28 @@ mod tests {
         );
         assert_eq!(s.bias("にんい", "任意"), MANUAL_SCORE_STEP * 2);
         assert_eq!(s.bias("にんい", "忍意"), 0, "未調整は 0");
+    }
+
+    #[test]
+    fn set_bias_overwrites_and_clamps() {
+        let mut s = ManualScoreStore::new();
+        // 累積で +step してから絶対値で上書き → 上書きが勝つ (累積しない)。
+        s.nudge("てん", "点", MANUAL_SCORE_STEP);
+        assert_eq!(s.set_bias("てん", "点", 123_456), 123_456);
+        assert_eq!(
+            s.bias("てん", "点"),
+            123_456,
+            "set は上書き (nudge を足さない)"
+        );
+        // 上限超えはクランプ。
+        assert_eq!(
+            s.set_bias("てん", "点", MANUAL_SCORE_MAX + 1),
+            MANUAL_SCORE_MAX
+        );
+        // 負値もそのまま置ける。
+        assert_eq!(s.set_bias("てん", "点", -5_000), -5_000);
+        // 空キーは無視。
+        assert_eq!(s.set_bias("", "点", 100), 0);
     }
 
     #[test]
