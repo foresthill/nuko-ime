@@ -174,6 +174,20 @@ const ALT_READING_KANA_SCORE: i32 = -70;
 /// libakaza より大きいブーストを乗せる。
 const USER_DICT_BOOST: i32 = 200_000;
 
+/// 平仮名ライブ変換 (#229) で、1 打鍵ごとの推測変換を走らせる**読みの最大文字数**。
+///
+/// ライブ変換は未確定の読み全体を毎打鍵 [`ConversionEngine::live_convert`] に渡すが、その中身
+/// (libakaza のラティス k-best 探索。segmented も flat も内部で `backend.convert` を呼ぶ) は
+/// **読みが長くなるとほぼ二次的にコストが増える**。実測 (2026-11, Apple Silicon・実モデル) では
+/// 約 20 字までは 1 打鍵あたりの増分がほぼ無視できるのに対し、40 字強で ~1 秒/打鍵に達し、
+/// それ以上では打鍵のたびにアプリがひっかかる (= 実用不能)。
+///
+/// そこで、この文字数を超える読みは**推測変換を行わず生のかなをそのまま返す** (O(1))。
+/// 普通の文節変換は Space を押すまで 20 字未満に収まるので実害は無く、超長文の未確定ランだけ
+/// 「かな表示のまま」に degrade する (Space を押せば通常どおり変換される)。
+/// 値を上げるとより長い読みでもライブ推測が効くが、その分 1 打鍵の最悪レイテンシが伸びる。
+const LIVE_CONVERT_MAX_READING_CHARS: usize = 24;
+
 /// 「ん + な行(な/に/ぬ/ね/の)」を「ん + 母音(あ/い/う/え/お)」に置換した **代替読み** を生成する。
 ///
 /// ローマ字の「nn+母音」は `ん+な行` に固定されるため (`jikannarutoki→じかんなるとき`)、
@@ -751,6 +765,11 @@ impl ConversionEngine {
     pub fn live_convert(&self, reading: &str, context: &ConversionContext) -> String {
         if reading.is_empty() {
             return String::new();
+        }
+        // 長すぎる読みは推測変換を走らせず生かなを返す (打鍵レイテンシの上限を担保)。
+        // 理由と閾値は LIVE_CONVERT_MAX_READING_CHARS の doc を参照。
+        if reading.chars().count() > LIVE_CONVERT_MAX_READING_CHARS {
+            return reading.to_string();
         }
         // segmented を優先（libakaza 有効時のみ。無効ビルドは flat 一択）。
         #[cfg(feature = "akaza")]
@@ -2111,6 +2130,25 @@ mod tests {
             flat_top,
             "ライブ表層は flat 1 位と一致 (単一文節/akaza 無効)"
         );
+    }
+
+    /// ライブ変換 (#229): 上限 (LIVE_CONVERT_MAX_READING_CHARS) を超える読みは推測変換を
+    /// 走らせず生かなをそのまま返す (打鍵レイテンシの上限担保)。上限ちょうどは変換を走らせる。
+    #[test]
+    fn live_convert_caps_very_long_reading_to_raw_kana() {
+        let engine = ConversionEngine::new().unwrap();
+        let ctx = ConversionContext::new();
+        // 上限超え → 生かなをそのまま返す (変換コストを払わない)。
+        let too_long: String = "あ".repeat(LIVE_CONVERT_MAX_READING_CHARS + 1);
+        assert_eq!(
+            engine.live_convert(&too_long, &ctx),
+            too_long,
+            "上限超えの読みは生かなのまま返す"
+        );
+        // 上限ちょうど → 生かな素通しの対象外 (通常経路を通る)。
+        let at_cap: String = "あ".repeat(LIVE_CONVERT_MAX_READING_CHARS);
+        let out = engine.live_convert(&at_cap, &ctx);
+        assert!(!out.is_empty(), "上限ちょうどは通常どおり何か返す");
     }
 
     /// segmented_preferred: 単一文節は false、2 文節で nn 曖昧/訂正/辞書語が無ければ true。
