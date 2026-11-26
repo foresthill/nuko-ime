@@ -2524,9 +2524,10 @@ impl NukoInputController {
             seg_plan.is_some()
         ));
 
-        // mode を保ったまま再変換 → 調整した表層に選択を戻す。
+        // mode を保ったまま再変換 → 調整した表層に選択を戻す。segmented は分割境界を維持する
+        // (whole_reading は使わない: 境界は現在の state.segmented から取る)。
         match seg_plan {
-            Some((whole_reading, focus)) => self.rescore_segmented(client, &whole_reading, focus),
+            Some((_whole_reading, focus)) => self.rescore_segmented(client, focus),
             None => self.rescore_flat(client, &nudge_reading, &surface),
         }
         Bool::YES
@@ -2661,8 +2662,9 @@ impl NukoInputController {
             edit.seg_plan.is_some()
         ));
         // モードを保ったまま再変換 → 指定した表層に選択を戻す (adjust_manual_score と同じ)。
+        // segmented は分割境界を維持する (whole_reading は使わない)。
         match edit.seg_plan {
-            Some((whole_reading, focus)) => self.rescore_segmented(client, &whole_reading, focus),
+            Some((_whole_reading, focus)) => self.rescore_segmented(client, focus),
             None => self.rescore_flat(client, &edit.reading, &edit.surface),
         }
         Bool::YES
@@ -2715,22 +2717,24 @@ impl NukoInputController {
         self.show_candidate_panel(client);
     }
 
-    /// segmented モードで手動スコア調整後に同じ読みを再変換し、focus と各文節の選択を
-    /// 復元して panel/marked を更新する。分割は読みが同じなら不変なので focus index は有効。
-    fn rescore_segmented(&self, client: &AnyObject, whole_reading: &str, focus: usize) {
+    /// segmented モードで手動スコア調整後に **現在の文節境界を保ったまま** 再変換し、
+    /// focus と各文節の選択を復元して panel/marked を更新する。
+    ///
+    /// 読みから自動分割し直す `convert_segmented` ではなく
+    /// [`ConversionEngine::reconvert_segmented_preserving`] を使う。自動分割だと、ユーザーが
+    /// Shift+←→ で切り直した (まだ未確定=学習ストア未登録の) 区切りが失われて元の分割に
+    /// 戻ってしまうため (2026-11 ユーザー報告)。分割は不変なので focus index は有効。
+    fn rescore_segmented(&self, client: &AnyObject, focus: usize) {
         let old = { self.ivars().state.borrow().segmented.clone() };
         let Some(old) = old else {
             return;
         };
         #[cfg(feature = "akaza")]
-        let built = with_engine(|engine| engine.convert_segmented(whole_reading));
+        let built = with_engine(|engine| engine.reconvert_segmented_preserving(&old));
         #[cfg(not(feature = "akaza"))]
         let built: nuko_core::error::Result<
             Option<nuko_core::conversion::SegmentedConversion>,
-        > = {
-            let _ = whole_reading;
-            Ok(None)
-        };
+        > = Ok(None);
         let Ok(Some(mut seg)) = built else {
             return;
         };
