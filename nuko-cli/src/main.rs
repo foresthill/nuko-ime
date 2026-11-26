@@ -61,8 +61,9 @@ enum Commands {
     /// 変換精度ベンチ (Golden Set で Top-1/Top-3/Top-5/MRR/Purity@5 を測る)
     Eval {
         /// Golden Set ファイル (`reading<TAB>expected`)。既定 eval/golden.tsv
-        #[arg(short, long, default_value = "eval/golden.tsv")]
-        file: PathBuf,
+        /// `--segment` 時は境界注記 Golden Set (`reading<TAB>seg1|seg2|...`)。既定 eval/golden_seg.tsv
+        #[arg(short, long)]
+        file: Option<PathBuf>,
         /// libakaza バックエンドを使う (実機相当。要モデル。未指定だと静的辞書のみ)
         #[arg(long)]
         libakaza: bool,
@@ -72,6 +73,10 @@ enum Commands {
         /// Top-1 を外したケースを一覧表示する
         #[arg(long)]
         show_misses: bool,
+        /// 文節境界 (区切り) の精度を測る。表層でなく「どこで切るか」を 境界 P/R/F1 と
+        /// 文完全一致率 で評価する。convert_segmented を使うので `--features akaza` 必須。
+        #[arg(long)]
+        segment: bool,
     },
     /// ローマ字をかなに変換
     Romaji {
@@ -266,7 +271,16 @@ fn main() -> Result<()> {
             libakaza,
             personal,
             show_misses,
-        } => cmd_eval(&file, libakaza, personal, show_misses),
+            segment,
+        } => {
+            if segment {
+                let path = file.unwrap_or_else(|| PathBuf::from("eval/golden_seg.tsv"));
+                cmd_eval_segment(&path, libakaza, personal, show_misses)
+            } else {
+                let path = file.unwrap_or_else(|| PathBuf::from("eval/golden.tsv"));
+                cmd_eval(&path, libakaza, personal, show_misses)
+            }
+        }
         Commands::Romaji { input } => cmd_romaji(&input),
         Commands::Predict { prefix, count } => cmd_predict(&prefix, count),
         Commands::DictInfo => cmd_dict_info(),
@@ -469,6 +483,119 @@ fn cmd_eval(file: &Path, use_libakaza: bool, personal: bool, show_misses: bool) 
         }
     }
     Ok(())
+}
+
+/// 文節境界ベンチ: 境界注記 Golden Set (`reading<TAB>seg1|seg2|...`) で 境界 P/R/F1 と
+/// 文完全一致率 を測る。表層 Top-1 とは別軸で「どこで切るか」の精度を見る。
+///
+/// 予測区切りは `engine.convert_segmented(reading)` (実機と同じ libakaza 文節分割) から取る。
+/// 集計は `nuko_core::eval` の純粋関数 (CI でテスト済み)。ここは I/O と変換呼び出しだけ。
+#[cfg(feature = "akaza")]
+fn cmd_eval_segment(
+    file: &Path,
+    use_libakaza: bool,
+    personal: bool,
+    show_misses: bool,
+) -> Result<()> {
+    use nuko_core::eval::{split_gold_segments, SegCaseResult, SegEvalSummary};
+
+    if !use_libakaza {
+        anyhow::bail!(
+            "文節境界ベンチは実機の文節分割 (libakaza) を測るものです。`--libakaza` を付けてください\n\
+             (静的辞書のみでは convert_segmented が区切りを返しません)"
+        );
+    }
+
+    let text = std::fs::read_to_string(file)
+        .map_err(|e| anyhow::anyhow!("境界 Golden Set を読めません {}: {e}", file.display()))?;
+    let engine = build_convert_engine(use_libakaza, personal)?;
+
+    let mut summary = SegEvalSummary::new();
+    let mut misses: Vec<SegCaseResult> = Vec::new();
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((reading, gold_spec)) = line.split_once('\t') else {
+            eprintln!("{} 区切り(TAB)が無い行をスキップ: {line}", "⚠".yellow());
+            continue;
+        };
+        let reading = reading.trim();
+        let gold_segs = split_gold_segments(gold_spec);
+        // 正解の文節を連結すると読みに一致するか検証 (注記ミスを弾く)。
+        let gold_concat: String = gold_segs.concat();
+        if gold_concat != reading {
+            eprintln!(
+                "{} 正解区切りの連結 '{gold_concat}' が読み '{reading}' と一致しない行をスキップ",
+                "⚠".yellow()
+            );
+            continue;
+        }
+
+        let pred_segs: Vec<String> = match engine.convert_segmented(reading)? {
+            Some(seg) => seg.segments.iter().map(|s| s.reading.clone()).collect(),
+            None => Vec::new(), // 区切りが取れない = 1 文節扱い (境界なし)
+        };
+
+        let case = SegCaseResult::evaluate(reading, &gold_segs, &pred_segs);
+        if !case.exact {
+            misses.push(case.clone());
+        }
+        summary.add(&case);
+    }
+
+    let personal_note = if personal { " + 個人学習" } else { "" };
+    let (p, r, f1) = summary.micro_prf();
+    println!("{}", "=== 文節境界ベンチ ===".cyan().bold());
+    println!("境界 Golden Set: {} ({} 件)", file.display(), summary.total);
+    println!("バックエンド   : libakaza{personal_note}");
+    println!();
+    println!(
+        "  文完全一致   : {:>6.2}%  ({}/{})  (区切りが丸ごと正解)",
+        summary.exact_rate() * 100.0,
+        summary.exact,
+        summary.total
+    );
+    println!("  境界 Precision: {:>6.2}%  (切った所の正しさ)", p * 100.0);
+    println!(
+        "  境界 Recall  : {:>6.2}%  (切るべき所を切れたか)",
+        r * 100.0
+    );
+    println!("  境界 F1      : {:>6.2}%", f1 * 100.0);
+
+    if show_misses && !misses.is_empty() {
+        println!();
+        println!(
+            "{}",
+            format!("=== 区切りを外した {} 件 ===", misses.len())
+                .yellow()
+                .bold()
+        );
+        for m in &misses {
+            println!(
+                "  {} → 正解 {}  予測 {}",
+                m.reading.dimmed(),
+                m.gold_segs.join("|").white().bold(),
+                m.pred_segs.join("|").yellow(),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(feature = "akaza"))]
+fn cmd_eval_segment(
+    _file: &Path,
+    _use_libakaza: bool,
+    _personal: bool,
+    _show_misses: bool,
+) -> Result<()> {
+    anyhow::bail!(
+        "文節境界ベンチは libakaza の文節分割が必要です。`--features akaza` でビルドしてください"
+    )
 }
 
 /// `learning.json` を読み、`(読み, 表層) -> count` のマップにする (--explain 用)。
