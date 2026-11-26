@@ -1287,43 +1287,90 @@ impl ConversionEngine {
             // 学習済みの切り方が無ければ、訂正読みを境界ヒントにして再分割する。
             segmented = forced;
         }
-        // Layer 2: **文節ごとに** 個人選好 (訂正学習) の bias を適用して並べ替える。
-        // flat の convert() では適用済みだが convert_segmented では未適用だったため、
-        // 「まつや→松谷」等の学習が **複数文節の文の中では効かない** バグがあった
-        // (2026-09 ユーザー報告: 単体「まつや」は松谷、「まつやさんと…」は松也)。
-        apply_segment_corrections(&mut segmented, &self.corrections);
-        // P2 (2026-10 ユーザー報告「文中で 単位 が出ない」): ん+母音 の代替候補を
-        // 各文節の **末尾に追加** する。flat の convert() は原文＋代替読みをマージして
-        // 「じかんあるとき」等を出すが、segmented は未対応だった (= 文中の 単位/範囲/
-        // 千円 等が出なかった)。末尾追加のみで既存の順序・選択は変えないので、
-        // 残念/案内 等を displace しない (回帰ゼロ優先)。
-        self.merge_nn_alternates_into_segments(backend, &mut segmented);
-        // Layer 0: **文節ごとに** 頻度学習を適用する (nn 代替候補も含む最終候補集合に効かせ
-        // たいので nn マージの後)。flat の convert() は頻度を参照するが convert_segmented は
-        // 未参照だったため、「文中の語」を何度確定しても次回の文節変換で頻度が無視され、
-        // libakaza の既定順が永遠に勝っていた (2026-11「砲→方 / 用→様 が勝てない」)。
-        // 観察ログ opt-in に依存しない常時 ON 経路なので、未オプトインでも「直したら次回勝つ」。
-        apply_segment_frequency(&mut segmented, &self.learning, &self.context_freq);
-        // 単語登録 (ユーザー辞書): **文節ごとに** 登録語を注入して最優先にする。
-        // flat の convert() は辞書 lookup で source=User 候補に USER_DICT_BOOST を足して
-        // 1 位にするが、convert_segmented は未適用だったため「け→家 を登録しても文中では
-        // 出ない」バグがあった (2026-11 ユーザー報告)。Layer0 の後に置き、登録語を最優先に。
-        apply_segment_user_dict(&mut segmented, &self.dictionary);
-        // 手動スコア調整 (#228, ⌥←→): flat と同じ手動バイアスを文節候補へも当てる (両経路配線)。
-        apply_segment_manual_scores(&mut segmented, &self.manual_scores);
+        self.apply_segment_layers(backend, &mut segmented);
+        Ok(Some(segmented))
+    }
+
+    /// `convert_segmented` が分割確定後に当てるスコア層をまとめて適用する
+    /// (訂正学習 → ん+母音代替マージ → 頻度 Layer0 → 単語登録 → 手動スコア → 旧字体 →
+    /// 疑似語キュレーションの順)。
+    ///
+    /// 分割を変えずに再変換する [`Self::reconvert_segmented_preserving`] からも呼ぶので、
+    /// **スコア層を足すときはここ 1 箇所に足せば両経路に効く** (= 片方だけ配線して文中で
+    /// 再発する CLAUDE.md #178/#184 の罠を避ける)。各層の経緯は呼び出し元と各 `fn` の doc 参照。
+    #[cfg(feature = "akaza")]
+    fn apply_segment_layers(
+        &self,
+        backend: &LibakazaBackend,
+        segmented: &mut super::SegmentedConversion,
+    ) {
+        // Layer 2: 文節ごとに個人選好 (訂正学習) の bias を適用して並べ替える
+        // (単体「まつや」は松谷なのに文中で松也になる、を防ぐ 2026-09)。
+        apply_segment_corrections(segmented, &self.corrections);
+        // ん+母音 の代替候補を各文節末尾に追加 (文中で 単位/範囲/千円 等が出るように 2026-10)。
+        self.merge_nn_alternates_into_segments(backend, segmented);
+        // Layer 0: 頻度学習を適用 (nn 代替も含む最終候補集合に効かせたいので nn マージの後)。
+        // 「砲→方 / 用→様 が勝てない」を常時 ON で救う (2026-11)。
+        apply_segment_frequency(segmented, &self.learning, &self.context_freq);
+        // 単語登録 (ユーザー辞書) を文節ごとに注入して最優先に (「け→家 が文中で出ない」2026-11)。
+        apply_segment_user_dict(segmented, &self.dictionary);
+        // 手動スコア調整 (#228, ⌥←→ / ⇧↑): flat と同じ手動バイアスを文節候補へ当てる。
+        apply_segment_manual_scores(segmented, &self.manual_scores);
         // 旧字体モード: 各文節の候補に旧字体版を追加 (OFF 既定なら無変化)。
         if self.kyujitai_mode {
             for seg in &mut segmented.segments {
                 super::kyujitai::append_kyujitai_variants_vec(&mut seg.candidates);
             }
         }
-        // 候補キュレーション: **文節ごとに** 機械生成の疑似語を下位へ沈める。flat の convert() と
-        // 同じ処理を segmented にも配線する (片方だけだと文中で再発する = CLAUDE.md #178/#184)。
-        // 全ブースト適用後 (旧字体含む最終候補集合) に最後に当てる。
+        // 候補キュレーション: 機械生成の疑似語を下位へ沈める (全ブースト適用後に最後)。
         for seg in &mut segmented.segments {
             curate_pseudo_words(&mut seg.candidates);
         }
-        Ok(Some(segmented))
+    }
+
+    /// 現在の文節境界を**保ったまま**再変換する (手動スコア調整後に分割を維持する用, #228)。
+    ///
+    /// 読みから自動分割し直す [`Self::convert_segmented`] と違い、与えられた `segmented` の
+    /// 各文節読みを `force_ranges` にして libakaza に固定境界で変換させ ([`resize_segment`] と
+    /// 同じ機構)、同じスコア層 ([`Self::apply_segment_layers`]) を当てる。
+    ///
+    /// ユーザーが Shift+←→ で切り直した境界は **確定するまで学習ストアに入らない** ので、
+    /// 未確定セッション中にスコア調整 (⌥←→ / ⇧↑) で `convert_segmented` を呼ぶと自動分割に
+    /// 戻ってしまう (2026-11 ユーザー報告「変換範囲をかえてスコア上下すると区切りが戻る」)。
+    ///
+    /// [`resize_segment`]: Self::resize_segment
+    ///
+    /// # 戻り値
+    /// - `Ok(Some(_))` — 境界を保った再変換結果 (focus は 0。呼び出し元で復元する)
+    /// - `Ok(None)` — libakaza 無効 / 文節が空 / 読み連結が壊れている / 固定境界での変換が空
+    #[cfg(feature = "akaza")]
+    pub fn reconvert_segmented_preserving(
+        &self,
+        segmented: &super::SegmentedConversion,
+    ) -> Result<Option<SegmentedConversion>> {
+        let Some(backend) = &self.libakaza else {
+            return Ok(None);
+        };
+        let readings: Vec<String> = segmented
+            .segments
+            .iter()
+            .map(|s| s.reading.clone())
+            .collect();
+        if readings.is_empty() {
+            return Ok(None);
+        }
+        let full_reading = readings.concat();
+        let Some(force) =
+            crate::learning::ranges_from_segment_readings(&readings, full_reading.len())
+        else {
+            return Ok(None); // 連結不一致 (壊れた状態) は再変換しない
+        };
+        let mut seg = backend.convert_segmented_forced(&full_reading, &force)?;
+        if seg.is_empty() {
+            return Ok(None);
+        }
+        self.apply_segment_layers(backend, &mut seg);
+        Ok(Some(seg))
     }
 
     /// 文全体の「ん＋母音」代替読みのうち **flat 変換の文全体最良スコアが原文を上回る**
@@ -3529,6 +3576,57 @@ mod tests {
         assert!(
             gokakunin.contains("ご確認いただけ"),
             "★ 単一n の ご確認いただけ は救えるべき (実機: {gokakunin})"
+        );
+    }
+
+    /// ★ 回帰 (2026-11 実機「変換範囲をかえてスコア上下すると区切りが戻る」):
+    /// `reconvert_segmented_preserving` は手動で切り直した文節境界を保つこと。
+    /// 自動分割 (`convert_segmented`) と違い、与えた segmented の各文節読みを維持する。
+    ///
+    /// 実行: `cargo test -p nuko-core --release --features akaza reconvert_segmented_preserving_keeps -- --ignored --nocapture`
+    #[cfg(feature = "akaza")]
+    #[test]
+    #[ignore = "実機モデルが要る"]
+    fn reconvert_segmented_preserving_keeps_boundaries() {
+        let home = std::env::var("HOME").expect("HOME");
+        let model = format!("{home}/Library/Application Support/nuko-ime/akaza-model");
+        let engine = ConversionEngine::with_libakaza(&model).unwrap();
+        if !engine.has_libakaza() {
+            eprintln!("モデル未配置のためスキップ: {model}");
+            return;
+        }
+        let readings = |s: &super::SegmentedConversion| -> Vec<String> {
+            s.segments.iter().map(|seg| seg.reading.clone()).collect()
+        };
+        // 自然分割を取り、Shift+→ 相当で先頭文節を 1 文字伸ばして「切り直した」状態を作る。
+        let natural = engine
+            .convert_segmented("きょうはいいてんきだ")
+            .unwrap()
+            .expect("自然分割が取れること");
+        assert!(
+            natural.segments.len() >= 2,
+            "テスト前提: 2 文節以上に割れること ({:?})",
+            readings(&natural)
+        );
+        let resized = engine
+            .resize_segment(&natural, true)
+            .unwrap()
+            .expect("伸縮できること");
+        let resized_readings = readings(&resized);
+        assert_ne!(
+            resized_readings,
+            readings(&natural),
+            "テスト前提: 伸縮で分割が変わること"
+        );
+        // 切り直した境界でスコア再変換 → 分割 (各文節読み) が維持されるべき。
+        let rescored = engine
+            .reconvert_segmented_preserving(&resized)
+            .unwrap()
+            .expect("境界保持再変換が結果を返すこと");
+        assert_eq!(
+            readings(&rescored),
+            resized_readings,
+            "★ スコア再変換で手動の文節境界が元に戻ってはいけない"
         );
     }
 
