@@ -531,8 +531,6 @@ enum CommitIntent {
     Normal,
     /// Shift+Enter: 確定しつつ「教える」(選んだ候補をモード無視で絶対1位へ)。
     Teach,
-    /// Ctrl+Enter: 確定しつつ「降格」(追い越しブーストを剥がす。+10 の加点もしない)。
-    Demote,
 }
 
 impl NukoInputController {
@@ -1020,14 +1018,16 @@ impl NukoInputController {
 
         // Command 併用はアプリのショートカット → 常に IME は奪わない。
         // Control も原則アプリへ素通し。**例外は「composing 中の Ctrl+Enter」だけ**で、
-        // これは「降格確定」として横取りする (未確定文字がある最中なのでアプリは Enter を
-        // 期待しておらず、奪っても send 等を壊さない)。非 composing の Ctrl+Enter は
-        // 従来どおり素通し (Slack/Teams の送信等を壊さない)。
+        // これは横取りして**通常確定**する (未確定文字がある最中なのでアプリは Enter を
+        // 期待しておらず、奪っても send 等を壊さない。素通しすると未確定マークが残ったまま
+        // Slack 等が送信してしまう)。⌃⏎=降格 は廃止したので確定の種類は変わらない。
+        // 非 composing の Ctrl+Enter は従来どおり素通し (送信等を壊さない)。
         if cmd || (ctrl && !(is_composing && is_return)) {
             return Bool::NO;
         }
         let shift = mods.contains(NSEventModifierFlags::Shift);
         // ここに来る control は「composing 中の Ctrl+Enter」のときだけ true。
+        // (command_for_keycode は現在 control を見ない = ⌃⏎ も通常確定。下の引数は規約保持。)
         let control = ctrl;
         // Option (⌥) は矢印キーにのみ効く (⌥←→ = スコア微調整 #228)。composing 中のみ
         // 横取りするので、非 composing の ⌥←→ (アプリの単語移動) は command_for_keycode が
@@ -1427,11 +1427,6 @@ impl NukoInputController {
             CommandAction::CommitTeach => {
                 // Shift+Enter: 確定しつつ「教える」(選んだ候補をモード無視で絶対1位へ)
                 self.do_commit_with_intent(client, CommitIntent::Teach);
-                Bool::YES
-            }
-            CommandAction::CommitDemote => {
-                // Ctrl+Enter: 確定しつつ「降格」(追い越しブーストを剥がして上げない)
-                self.do_commit_with_intent(client, CommitIntent::Demote);
                 Bool::YES
             }
             CommandAction::Cancel => {
@@ -1901,14 +1896,14 @@ impl NukoInputController {
         self.do_commit_with_intent(client, CommitIntent::Normal);
     }
 
-    /// 確定の本体。`intent` で学習の振る舞いを変える (通常 / 教える / 降格)。
+    /// 確定の本体。`intent` で学習の振る舞いを変える (通常 / 教える)。
     ///
     /// - `Normal`: モード設定どおり `engine.commit` (王冠/累積/頻度のみ)。
     /// - `Teach` (Shift+Enter): `engine.commit_teach` で選んだ候補を絶対1位へ。観察/打ち直し
     ///   等の通常学習経路もそのまま走らせる (正しい候補を教える = 正当な確定なので)。
-    /// - `Demote` (Ctrl+Enter): `engine.demote_frequency` で追い越しブーストを剥がす。
-    ///   これは「上げたくない」確定なので、観察ログ/打ち直し/フレーズ/再学習の**加点系は走らせない**
-    ///   (走らせると auto_relearn が逆に押し上げてしまう)。テキスト挿入自体は通常どおり行う。
+    ///
+    /// (⌃⏎=降格 の手動トリガーは 2026-11 に廃止。下げは ⌥← / 点数指定 / 打ち直し訂正が担う。
+    /// 王冠モデルが確定時に他表層のブーストを剥がす処理は `engine.commit` 内で従来どおり動く。)
     fn do_commit_with_intent(&self, client: &AnyObject, intent: CommitIntent) {
         // ライブ変換 (#229) ON で、Space を押さず Enter した場合 (候補も segmented も無い
         // 生読み): 生かなでなく「推測漢字」を確定する。do_convert で state に変換結果を
@@ -1986,10 +1981,6 @@ impl NukoInputController {
                     if let Err(e) = engine.commit_teach(c, &ctx_for) {
                         error!("教える確定エラー: {e}");
                     }
-                }
-                CommitIntent::Demote => {
-                    // 降格: 追い越しブーストを剥がす (記録=+10 もしない)。
-                    engine.demote_frequency(&c.reading, &c.surface);
                 }
             });
         }
@@ -2078,9 +2069,7 @@ impl NukoInputController {
             }
 
             // Layer 1: 観察ログに確定イベントを記録 (オプトイン無効なら no-op)。
-            // 降格 (Ctrl+Enter) は「上げたくない」確定なので、観察/打ち直し/フレーズ/
-            // 再学習の加点系は一切走らせない (走らせると auto_relearn が逆に押し上げる)。
-            if !reading.is_empty() && !is_datetime_commit && intent != CommitIntent::Demote {
+            if !reading.is_empty() && !is_datetime_commit {
                 let event = if obs_candidates.is_empty() {
                     ObservationEvent::commit(reading.as_str(), decision.commit_text.as_str())
                 } else {

@@ -1726,8 +1726,9 @@ impl ConversionEngine {
     /// **教える確定** (Shift+Enter)。通常 commit と同じく記録するが、モードに関わらず
     /// 選んだ表層を**絶対的に 1 位**へ引き上げる (王冠の天井も無視し、訂正tierすら超える)。
     ///
-    /// 「この候補を最優先にしろ」というユーザーの明示操作。間違えたら `demote_frequency`
-    /// (Ctrl+Enter) でリセットできる。datetime リテラルは通常 commit 同様に学習しない。
+    /// 「この候補を最優先にしろ」というユーザーの明示操作。間違えたら「学習を忘れる」
+    /// (`demote_frequency` を呼ぶ) か ⌥← / 点数指定で下げられる。datetime リテラルは
+    /// 通常 commit 同様に学習しない。
     pub fn commit_teach(
         &mut self,
         candidate: &Candidate,
