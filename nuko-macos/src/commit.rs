@@ -226,8 +226,6 @@ pub enum CommandAction {
     Commit,
     /// Shift+Enter → 確定しつつ「教える」(選んだ候補をモード無視で絶対1位へ)
     CommitTeach,
-    /// Ctrl+Enter → 確定しつつ「降格」(追い越しブーストを剥がして上げない)
-    CommitDemote,
     /// Escape → 取消
     Cancel,
     /// Backspace → 1 文字削除
@@ -307,7 +305,10 @@ pub enum KeyAction {
 pub fn command_for_keycode(
     key_code: u16,
     shift: bool,
-    control: bool,
+    // ⌃⏎=降格 の廃止 (2026-11) で composing キーの判定に Ctrl は使わなくなった。
+    // 引数は呼び出し側の修飾キー集合 (shift/ctrl/option) との対称性と ctrl ルーティングの
+    // 呼び出し規約を保つため残す (controller の handleEvent ゲートが Ctrl の素通しを担う)。
+    _control: bool,
     option: bool,
     is_composing: bool,
 ) -> KeyAction {
@@ -330,12 +331,11 @@ pub fn command_for_keycode(
         return KeyAction::PassThrough;
     }
     match key_code {
-        // Return: 通常=確定 / Shift+=教える(絶対1位) / Ctrl+=降格(上げない)。
-        // Ctrl は呼び出し側 (_handle_event) が「composing 中の Ctrl+Enter だけ」横取りして
-        // ここへ渡す (非 composing の Ctrl+Enter はアプリのショートカットとして素通し)。
-        0x24 => KeyAction::Command(if control {
-            CommandAction::CommitDemote
-        } else if shift {
+        // Return: 通常=確定 / Shift+=教える(絶対1位)。
+        // ⌃⏎=降格 は廃止 (2026-11 森岡さん: boost を外すだけで高 count だと大して下がらず
+        // 分かりにくい。下げは ⌥← か 点数指定で低い値に。王冠モデルの自動降格は温存)。
+        // ⌃⏎ は通常確定として扱う (composing 中の ⌃⏎ は呼び出し側がここへ渡す)。
+        0x24 => KeyAction::Command(if shift {
             CommandAction::CommitTeach
         } else {
             CommandAction::Commit
@@ -745,16 +745,17 @@ mod keycode_tests {
             KeyAction::Command(CommandAction::CommitTeach),
             "Shift+Enter = 教える"
         );
+        // ⌃⏎=降格 は廃止 (2026-11)。Ctrl は確定判定に効かず、Ctrl+Enter は通常確定。
         assert_eq!(
             command_for_keycode(0x24, false, true, false, true),
-            KeyAction::Command(CommandAction::CommitDemote),
-            "Ctrl+Enter = 降格"
+            KeyAction::Command(CommandAction::Commit),
+            "Ctrl+Enter = 通常確定 (降格は廃止)"
         );
-        // Ctrl が Shift より優先 (Ctrl+Shift+Enter は降格)。
+        // Shift があれば教える (Ctrl は無視)。
         assert_eq!(
             command_for_keycode(0x24, true, true, false, true),
-            KeyAction::Command(CommandAction::CommitDemote),
-            "Ctrl+Shift+Enter は降格 (Ctrl 優先)"
+            KeyAction::Command(CommandAction::CommitTeach),
+            "Ctrl+Shift+Enter は教える (Ctrl は効かない)"
         );
     }
 

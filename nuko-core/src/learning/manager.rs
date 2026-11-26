@@ -211,7 +211,7 @@ impl LearningManager {
     ///
     /// `rival_top` は同じ読みの**他候補の最大合成スコア** (libakaza/Layer2 込み・convert 由来)。
     /// `boost_to_at_least` を使う (単調) ので、教えた順位は勝手に戻らない。明示操作ゆえ
-    /// 稀にしか呼ばれず、間違えたら Ctrl+Enter の降格でリセットできる。
+    /// 稀にしか呼ばれず、間違えたら「学習を忘れる」(demote) や ⌥← / 点数指定でリセットできる。
     pub fn apply_teach_boost(&mut self, candidate: &Candidate, rival_top: Option<i32>) {
         let Some(top) = rival_top else {
             return; // 相手が居なければ record の +10 で既に 1 位 (base 200k)。

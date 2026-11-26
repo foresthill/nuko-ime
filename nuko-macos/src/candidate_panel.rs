@@ -314,8 +314,8 @@ fn build_attributed_string(
         }
     }
 
-    // 5. 操作ヒント (順位を上げる/下げる確定方法) を常時表示する (#227)。淡色で 1 行。
-    //    表記はプラットフォームで変える (macOS=⇧⏎/⌃⏎、Win/Linux=Shift+Enter/Ctrl+Enter)。
+    // 5. 操作ヒント (順位を上げる操作とスコア調整/点数指定) を常時表示する (#227)。淡色で 1 行。
+    //    表記はプラットフォームで変える (macOS=⇧⏎/⌥←→/⇧↑、Win/Linux=Shift+Enter/Alt+←→/Shift+↑)。
     //    真実の源は nuko-core::platform (キー配線と表記を 1 箇所で揃える)。
     //    範囲を記録して tertiaryLabelColor を後段で当てる (併記テキストは別経路+範囲記録の方針)。
     let key_hint_range: Option<(usize, usize)> = {
